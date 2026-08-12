@@ -1,0 +1,20 @@
+# Always-on nd-organizer log webhook + dashboard (runs next to Navidrome).
+#
+# The plugin cannot host a web page (sandbox forbids network listeners), so this
+# tiny service receives the plugin's report/status POSTs and renders the
+# dashboard at http://<host>:8099/.
+#
+# Usage:
+#   docker compose -f webhook/docker-compose.yml up -d
+# (pulls the image from GHCR - no build needed)
+# Then set the plugin's "Log webhook URL" to http://<your-nas>:8099/
+
+services:
+  nd-organizer-webhook:
+    image: ghcr.io/lunatixz/nd-organizer/webhook:latest
+    container_name: nd-organizer-webhook
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./data:/data          # webhook.log persists here

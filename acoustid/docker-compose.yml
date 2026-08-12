@@ -1,0 +1,27 @@
+# AcoustID fingerprint sidecar for nd-organizer.
+#
+# The Navidrome plugin cannot decode audio or run chromaprint in its WASM
+# sandbox, so this service fingerprints library files for it.
+#
+# IMPORTANT: mount EVERY library at the SAME guest paths Navidrome uses (e.g.
+# /music, /unsorted), so the file paths the plugin sends match this container.
+# The plugin sends {library.path}/{relative} to the /lookup endpoint.
+#
+# Usage:
+#   docker compose -f acoustid/docker-compose.yml up -d
+# (pulls the image from GHCR - no build needed)
+# Then set the plugin's "acoustidUrl" to http://<your-nas>:8097 and
+# "acoustidApiKey" to your AcoustID client key.
+
+services:
+  nd-organizer-acoustid:
+    image: ghcr.io/lunatixz/nd-organizer/acoustid:latest
+    container_name: nd-organizer-acoustid
+    restart: unless-stopped
+    ports:
+      - "8097:8097"
+    volumes:
+      # Mirror every library mount from your Navidrome stack, SAME guest path.
+      - /path/to/music:/music:ro
+      # - /path/to/unsorted:/unsorted:ro
+

@@ -276,7 +276,10 @@ mod tests {
             "{artist} - {title}"
         );
         // Unknown tokens survive (they render empty downstream).
-        assert_eq!(translate_lidarr_format("{Some Custom Token}"), "{Some Custom Token}");
+        assert_eq!(
+            translate_lidarr_format("{Some Custom Token}"),
+            "{Some Custom Token}"
+        );
     }
 
     #[test]
@@ -306,7 +309,10 @@ mod tests {
         let mut f = fields();
         f.album_artist = "".into();
         f.year = None;
-        assert_eq!(render_folder_path("{albumArtist}/{album} ({year})", &f, &opts()), "Rock_ 70's ()");
+        assert_eq!(
+            render_folder_path("{albumArtist}/{album} ({year})", &f, &opts()),
+            "Rock_ 70's ()"
+        );
     }
 
     #[test]

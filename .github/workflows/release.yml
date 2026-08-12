@@ -1,0 +1,105 @@
+# Build the plugin .ndp and attach it to a versioned GitHub Release.
+#
+# How versioning works:
+#   - bump "version" in manifest.json (e.g. 0.2.0)
+#   - push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`
+#   -> this workflow verifies manifest.version == tag version, builds the wasm,
+#      packages dist/nd-organizer-<version>.ndp, and creates a GitHub Release
+#      with the .ndp attached for download. If the manifest version does not
+#      match the tag, the build fails (no release) to keep every release honest.
+#
+# Re-releasing the SAME version (squashed/fixed commits): move the tag to the
+# new commit and force-push it - the workflow then DELETES the old release for
+# that version and publishes a fresh one, so downloads always point at the
+# latest build:
+#   git tag -f v0.2.0 && git push origin v0.2.0 --force
+#
+# Also runnable manually with a version input.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (must match manifest.json 'version', e.g. 0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install wasm target
+        run: rustup target add wasm32-wasip1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Host tests
+        run: cargo test
+
+      - name: Build plugin (wasm32-wasip1)
+        run: cargo build --release --target wasm32-wasip1
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "tag=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify manifest version matches the release
+        run: |
+          MANIFEST=$(node -e "console.log(JSON.parse(require('fs').readFileSync('manifest.json','utf8')).version)")
+          echo "manifest version: $MANIFEST"
+          echo "release version: ${{ steps.ver.outputs.version }}"
+          if [ "$MANIFEST" != "${{ steps.ver.outputs.version }}" ]; then
+            echo "::error::manifest.json version ($MANIFEST) does not match tag/input (${{ steps.ver.outputs.version }}). Bump manifest.json to match." >&2
+            exit 1
+          fi
+          echo "version-ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Validate manifest
+        run: node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console.log('manifest ok')"
+
+      - name: Package .ndp
+        run: |
+          mkdir -p dist stage
+          cp manifest.json stage/
+          cp target/wasm32-wasip1/release/nd_organizer.wasm stage/plugin.wasm
+          cd stage
+          zip -q "../dist/nd-organizer-${{ steps.ver.outputs.version }}.ndp" manifest.json plugin.wasm
+          cp "../dist/nd-organizer-${{ steps.ver.outputs.version }}.ndp" "../dist/nd-organizer.ndp"
+          cd ..
+          ls -l dist
+
+      - name: Clean up existing release (re-releasing the same version)
+        run: |
+          gh release delete "${{ steps.ver.outputs.tag }}" --yes || echo "no existing release - creating a new one"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.ver.outputs.version }}
+          tag_name: ${{ steps.ver.outputs.tag }}
+          files: dist/*.ndp
+          generate_release_notes: true
+          draft: false
+          prerelease: false

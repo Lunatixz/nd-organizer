@@ -1,0 +1,30 @@
+# nd-organizer MySQL KV sidecar.
+#
+# Bridge that lets the plugin store its KVStore state (cache, task log, scan
+# index, stats) in YOUR MySQL/MariaDB database instead of the local SQLite file
+# Navidrome manages per-plugin. The plugin sends the DB connection details from
+# its Navidrome config on every request; nothing is stored in this container.
+#
+# Prerequisites: a MySQL/MariaDB server reachable from this container, and a
+# database + user it can write to (the `kvstore` table is created automatically).
+#
+# Usage:
+#   docker compose -f mysql/docker-compose.yml up -d
+# Then in the plugin settings set:
+#   persistenceBackend = mysql
+#   persistenceUrl      = http://<host>:8098
+#   mysqlHost/Port/Name/User/Password = your database connection
+
+services:
+  nd-organizer-mysql:
+    image: ghcr.io/lunatixz/nd-organizer/mysql:latest
+    container_name: nd-organizer-mysql
+    restart: unless-stopped
+    ports:
+      - "8098:8098"
+    networks:
+      - stack_network
+
+networks:
+  stack_network:
+    external: true

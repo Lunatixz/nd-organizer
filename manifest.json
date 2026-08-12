@@ -76,7 +76,14 @@
           "title": "Albums per task (batch size)",
           "minimum": 1,
           "default": 5,
-          "description": "Each background task only plans a small batch of albums, keeping the plugin lean so playback is never starved."
+          "description": "Each background task plans a small batch of album groups, keeping the plugin lean so playback is never starved."
+        },
+        "filesPerScanTask": {
+          "type": "integer",
+          "title": "Files scanned per task",
+          "minimum": 10,
+          "default": 200,
+          "description": "The full-library scan reads a small chunk of files' tags per background task. Lower = slower but lighter. Scanning is slow-and-accurate by design."
         },
         "runOnlyWhenIdle": {
           "type": "boolean",
@@ -100,6 +107,52 @@
           "type": "string",
           "title": "Log webhook token",
           "description": "Optional token sent as X-Token and Authorization: Bearer headers."
+        },
+        "persistenceBackend": {
+          "type": "string",
+          "title": "Persistence backend",
+          "default": "host",
+          "oneOf": [
+            { "const": "host", "title": "Navidrome KVStore (SQLite)" },
+            { "const": "mysql", "title": "External MySQL / MariaDB" }
+          ],
+          "description": "Where the plugin keeps its cache/state (scan index, task log, stats, caches). 'host' = the Navidrome-managed SQLite KVStore. 'mysql' = your own database via the mysql sidecar (mysql/docker-compose.yml), so plugin state survives plugin resets."
+        },
+        "persistenceUrl": {
+          "type": "string",
+          "title": "MySQL sidecar URL",
+          "default": "",
+          "description": "URL of the mysql sidecar (e.g. http://nd-organizer-mysql:8098). Required when persistenceBackend = mysql."
+        },
+        "mysqlHost": {
+          "type": "string",
+          "title": "MySQL host",
+          "default": "",
+          "description": "Hostname/IP of your MySQL or MariaDB server."
+        },
+        "mysqlPort": {
+          "type": "integer",
+          "title": "MySQL port",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 3306
+        },
+        "mysqlName": {
+          "type": "string",
+          "title": "MySQL database name",
+          "default": "",
+          "description": "Database that will hold the plugin's kvstore table (created automatically)."
+        },
+        "mysqlUser": {
+          "type": "string",
+          "title": "MySQL user",
+          "default": ""
+        },
+        "mysqlPassword": {
+          "type": "string",
+          "title": "MySQL password",
+          "options": { "format": "password" },
+          "description": "Credentials are sent only to the mysql sidecar over the internal Docker network."
         },
 
         "soundtrackFolder": {
@@ -129,11 +182,72 @@
           "default": true,
           "description": "Artist/Singles/{title} instead of the Various Artist singles area. Falls back to Various Artist/Singles when the artist is unknown."
         },
+        "singlesEnabled": {
+          "type": "boolean",
+          "title": "Enable singles / incomplete-album routing",
+          "default": true,
+          "description": "Route single-track and incomplete albums (below the min-tracks threshold) to the Singles folder. Off = every album stays in its own album folder."
+        },
         "preserveRecordingType": {
           "type": "boolean",
           "title": "Preserve live/bootleg recording type",
           "default": true,
           "description": "Detect live/bootleg tracks from tags (LIVE/BOOTLEG, genre, title markers) and suffix files/folders with (Live)/(Bootleg) so they never collide with or get confused as the studio release."
+        },
+        "fillerKeywords": {
+          "type": "string",
+          "title": "Filler keywords",
+          "default": "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview",
+          "description": "Comma-separated keywords. A track whose title matches one (whole-word) is ignored from the queue: the filter proxy drops it from auto-play lists (random/search/playlist/genre/top/similar). Albums stay whole - it remains in its album, and files are never moved."
+        },
+        "playbackStatsEnabled": {
+          "type": "boolean",
+          "title": "Enable playback stats (plays vs skips)",
+          "default": false,
+          "description": "Tracks full plays and skips (observed via getNowPlaying transitions; works on older Navidrome with no scrobbleretriever host), then builds a 'Top Picks' Navidrome playlist of the highest-weight songs. A full play forgives a skip."
+        },
+        "statsPollMinutes": {
+          "type": "integer",
+          "title": "Stats poll interval (minutes)",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 5,
+          "description": "How often the plugin updates play/skip stats."
+        },
+        "skipThresholdPercent": {
+          "type": "integer",
+          "title": "Skip = played less than % of the song",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 30,
+          "description": "A track that stops playing before this percentage of its duration counts as a skip."
+        },
+        "topPicksCount": {
+          "type": "integer",
+          "title": "Top Picks playlist size",
+          "minimum": 5,
+          "default": 50,
+          "description": "Number of highest-weight songs to put in the 'nd-organizer: Top Picks' playlist."
+        },
+        "skipIgnoreEnabled": {
+          "type": "boolean",
+          "title": "Exclude skip-heavy tracks from playback",
+          "default": false,
+          "description": "Publish weights + skip-heavy track IDs to the Subsonic filter proxy (filterUrl). The proxy re-sorts song lists by weight so skipped tracks sink, and only hard-removes tracks you clearly dislike: skipped more times than ever played in full AND past skipIgnoreRatio. No files are moved."
+        },
+        "skipIgnoreRatio": {
+          "type": "number",
+          "title": "Skip-heavy ratio threshold",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.6,
+          "description": "For hard removal a track must ALSO be a net negative (skips > full plays, 3+ interactions). A full play forgives one skip, so liking a song again brings it back automatically."
+        },
+        "filterUrl": {
+          "type": "string",
+          "title": "Subsonic filter proxy URL",
+          "default": "",
+          "description": "Base URL of the nd-organizer filter proxy (e.g. http://nd-organizer-proxy:4534). It receives POST /filters and drops flagged tracks from client song lists."
         },
         "incompleteAlbumMinTracks": {
           "type": "integer",
@@ -258,6 +372,11 @@
           "title": "AcoustID API key",
           "description": "Required for AcoustID lookup/fingerprinting. https://acoustid.org/new-application"
         },
+        "acoustidUrl": {
+          "type": "string",
+          "title": "AcoustID fingerprint sidecar URL",
+          "description": "URL of the AcoustID Docker sidecar (acoustid/ in this repo), e.g. http://acoustid:8097. The sidecar fingerprints files so songs without an MBID/ISRC can be accurately paired to their album. Leave empty to skip AcoustID."
+        },
 
         "primarySource": {
           "type": "string",
@@ -279,10 +398,39 @@
           "title": "Last.fm API key",
           "description": "Optional. Used for genres and user playcounts."
         },
+        "lastfmApiSecret": {
+          "type": "string",
+          "title": "Last.fm API secret",
+          "description": "Required for favorites sync (write methods need an API signature)."
+        },
+        "lastfmPassword": {
+          "type": "string",
+          "title": "Last.fm password",
+          "options": { "format": "password" },
+          "description": "Used once to obtain the session key for favorites sync."
+        },
         "lastfmUser": {
           "type": "string",
           "title": "Last.fm username",
-          "description": "Used with lastfmApiKey to pull user playcounts."
+          "description": "Used with lastfmApiKey to pull user playcounts and sync favorites."
+        },
+        "favoritesSyncEnabled": {
+          "type": "boolean",
+          "title": "Enable favorites sync",
+          "default": false,
+          "description": "Sync favorites between Navidrome (the hub) and connected platforms."
+        },
+        "favoritesSyncLastfm": {
+          "type": "boolean",
+          "title": "Sync favorites with Last.fm (loved tracks)",
+          "default": true,
+          "description": "Bidirectional: Navidrome stars become Last.fm loves, and Last.fm loves become Navidrome stars."
+        },
+        "favoritesSyncMax": {
+          "type": "integer",
+          "title": "Max favorites to sync per run",
+          "minimum": 10,
+          "default": 500
         },
         "genreFrom": {
           "type": "string",
@@ -398,7 +546,7 @@
           "type": "boolean",
           "title": "Force-search incomplete albums in Lidarr",
           "default": false,
-          "description": "When an album is missing tracks and is monitored in Lidarr, trigger a Lidarr AlbumSearch so it downloads the missing tracks."
+          "description": "When an album is missing tracks and the artist AND album are both monitored in Lidarr, trigger a Lidarr AlbumSearch so it downloads the missing tracks. Nothing is searched otherwise."
         },
         "useLidarrNamingSchema": {
           "type": "boolean",
@@ -466,27 +614,20 @@
       "elements": [
         {
           "type": "Group",
-          "label": "General",
+          "label": "General & scheduling",
           "elements": [
             { "type": "Control", "scope": "#/properties/mode" },
             { "type": "Control", "scope": "#/properties/runOnStartup" },
             { "type": "Control", "scope": "#/properties/scheduleCron" },
             { "type": "Control", "scope": "#/properties/maxAlbumsPerRun" },
-            { "type": "Control", "scope": "#/properties/albumsPerTask" },
-            { "type": "Control", "scope": "#/properties/runOnlyWhenIdle" },
-            { "type": "Control", "scope": "#/properties/rollbackRunId" }
-          ]
-        },
-        {
-          "type": "Group",
-          "label": "Logging & status",
-          "elements": [
             {
-              "type": "Label",
-              "text": "Activity is tracked automatically: the latest run status is stored under status:latest and the latest full report under report:latest in the plugin KVStore (plugins/nd-organizer/kvstore.db), and logged to the Navidrome server log. Optionally push each run's report/status to a hosted log via the webhook below."
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/albumsPerTask" },
+                { "type": "Control", "scope": "#/properties/filesPerScanTask" }
+              ]
             },
-            { "type": "Control", "scope": "#/properties/logWebhookUrl" },
-            { "type": "Control", "scope": "#/properties/logWebhookToken", "options": { "format": "password" } }
+            { "type": "Control", "scope": "#/properties/runOnlyWhenIdle" }
           ]
         },
         {
@@ -495,24 +636,41 @@
           "elements": [
             { "type": "Control", "scope": "#/properties/folderSchema" },
             { "type": "Control", "scope": "#/properties/fileSchema" },
-            { "type": "Control", "scope": "#/properties/renameSidecars" },
-            { "type": "Control", "scope": "#/properties/pruneEmptyDirs" },
-            { "type": "Control", "scope": "#/properties/skipHiddenFiles" },
-            { "type": "Control", "scope": "#/properties/illegalCharReplacement" },
-            { "type": "Control", "scope": "#/properties/maxNameLength" },
-            { "type": "Control", "scope": "#/properties/soundtrackFolder" },
-            { "type": "Control", "scope": "#/properties/variousFolder" },
-            { "type": "Control", "scope": "#/properties/singlesFolder" },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/soundtrackFolder" },
+                { "type": "Control", "scope": "#/properties/variousFolder" },
+                { "type": "Control", "scope": "#/properties/singlesFolder" }
+              ]
+            },
             { "type": "Control", "scope": "#/properties/nestBucketsUnderVarious" },
             { "type": "Control", "scope": "#/properties/singlesUnderArtist" },
+            { "type": "Control", "scope": "#/properties/singlesEnabled" },
+            {
+              "type": "Control",
+              "scope": "#/properties/incompleteAlbumMinTracks",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/singlesEnabled",
+                  "schema": { "const": true }
+                }
+              }
+            },
             { "type": "Control", "scope": "#/properties/preserveRecordingType" },
-            { "type": "Control", "scope": "#/properties/excludePaths" },
-            { "type": "Control", "scope": "#/properties/incompleteAlbumMinTracks" },
             { "type": "Control", "scope": "#/properties/classifyFromMB" },
-            { "type": "Control", "scope": "#/properties/readNfo" },
-            { "type": "Control", "scope": "#/properties/writeNfo" },
-            { "type": "Control", "scope": "#/properties/backupBeforeWrite" },
-            { "type": "Control", "scope": "#/properties/backupRetentionDays" }
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/renameSidecars" },
+                { "type": "Control", "scope": "#/properties/pruneEmptyDirs" },
+                { "type": "Control", "scope": "#/properties/skipHiddenFiles" }
+              ]
+            },
+            { "type": "Control", "scope": "#/properties/illegalCharReplacement" },
+            { "type": "Control", "scope": "#/properties/maxNameLength" },
+            { "type": "Control", "scope": "#/properties/excludePaths" }
           ]
         },
         {
@@ -520,21 +678,28 @@
           "label": "Identity verification",
           "elements": [
             { "type": "Control", "scope": "#/properties/verifyIdentity" },
-            { "type": "Control", "scope": "#/properties/minConfidence" },
-            { "type": "Control", "scope": "#/properties/skipUnverified" },
-            { "type": "Control", "scope": "#/properties/acoustidMode" },
-            { "type": "Control", "scope": "#/properties/acoustidApiKey" }
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/minConfidence" },
+                { "type": "Control", "scope": "#/properties/skipUnverified" }
+              ]
+            }
           ]
         },
         {
           "type": "Group",
-          "label": "Metadata sources",
+          "label": "Metadata & tags",
           "elements": [
             { "type": "Control", "scope": "#/properties/primarySource" },
-            { "type": "Control", "scope": "#/properties/musicbrainzToken" },
-            { "type": "Control", "scope": "#/properties/lastfmApiKey" },
-            { "type": "Control", "scope": "#/properties/lastfmUser" },
             { "type": "Control", "scope": "#/properties/genreFrom" },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/readNfo" },
+                { "type": "Control", "scope": "#/properties/writeNfo" }
+              ]
+            },
             { "type": "Control", "scope": "#/properties/overwriteExistingTags" },
             { "type": "Control", "scope": "#/properties/writePlaycount" }
           ]
@@ -543,14 +708,24 @@
           "type": "Group",
           "label": "Artwork",
           "elements": [
-            { "type": "Control", "scope": "#/properties/embedArtwork" },
-            { "type": "Control", "scope": "#/properties/writeCoverJpg" },
-            { "type": "Control", "scope": "#/properties/overwriteArt" },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/embedArtwork" },
+                { "type": "Control", "scope": "#/properties/writeCoverJpg" },
+                { "type": "Control", "scope": "#/properties/overwriteArt" }
+              ]
+            },
             { "type": "Control", "scope": "#/properties/artworkPriority" },
-            { "type": "Control", "scope": "#/properties/artworkFront" },
-            { "type": "Control", "scope": "#/properties/artworkBack" },
-            { "type": "Control", "scope": "#/properties/artworkCd" },
-            { "type": "Control", "scope": "#/properties/artworkBooklet" }
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/artworkFront" },
+                { "type": "Control", "scope": "#/properties/artworkBack" },
+                { "type": "Control", "scope": "#/properties/artworkCd" },
+                { "type": "Control", "scope": "#/properties/artworkBooklet" }
+              ]
+            }
           ]
         },
         {
@@ -563,39 +738,230 @@
         },
         {
           "type": "Group",
+          "label": "MusicBrainz",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Release metadata, classification and artwork links."
+            },
+            { "type": "Control", "scope": "#/properties/musicbrainzToken" }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "AcoustID",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Fingerprint sidecar (Docker) - verifies songs without an MBID/ISRC so they can be paired to their album."
+            },
+            { "type": "Control", "scope": "#/properties/acoustidMode" },
+            { "type": "Control", "scope": "#/properties/acoustidUrl" },
+            { "type": "Control", "scope": "#/properties/acoustidApiKey" }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Last.fm",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Genres, playcounts and favorites sync."
+            },
+            { "type": "Control", "scope": "#/properties/lastfmApiKey" },
+            { "type": "Control", "scope": "#/properties/lastfmApiSecret", "options": { "format": "password" } },
+            { "type": "Control", "scope": "#/properties/lastfmPassword", "options": { "format": "password" } },
+            { "type": "Control", "scope": "#/properties/lastfmUser" }
+          ]
+        },
+        {
+          "type": "Group",
           "label": "Lidarr",
           "elements": [
+            {
+              "type": "Label",
+              "text": "Tracked-artist metadata, naming schema and force-search for incomplete monitored albums."
+            },
             { "type": "Control", "scope": "#/properties/lidarrUrl" },
             { "type": "Control", "scope": "#/properties/lidarrApiKey", "options": { "format": "password" } },
             { "type": "Control", "scope": "#/properties/lidarrMode" },
-            { "type": "Control", "scope": "#/properties/writeTagsForTracked" },
-            { "type": "Control", "scope": "#/properties/lidarrForceSearchIncomplete" },
-            { "type": "Control", "scope": "#/properties/useLidarrNamingSchema" }
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/writeTagsForTracked" },
+                { "type": "Control", "scope": "#/properties/lidarrForceSearchIncomplete" },
+                { "type": "Control", "scope": "#/properties/useLidarrNamingSchema" }
+              ]
+            }
           ]
         },
         {
           "type": "Group",
           "label": "AudioMuse-AI",
           "elements": [
+            {
+              "type": "Label",
+              "text": "Acoustic tags (BPM/key/mood) and re-sync after renames."
+            },
             { "type": "Control", "scope": "#/properties/audiomuseUrl" },
             { "type": "Control", "scope": "#/properties/audiomuseToken", "options": { "format": "password" } },
-            { "type": "Control", "scope": "#/properties/notifyAudiomuseAfterRun" },
-            { "type": "Control", "scope": "#/properties/writeAcousticTags" }
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/notifyAudiomuseAfterRun" },
+                { "type": "Control", "scope": "#/properties/writeAcousticTags" }
+              ]
+            }
           ]
         },
         {
           "type": "Group",
-          "label": "Scanning",
+          "label": "Subsonic filter proxy",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Playback filtering without touching files: the proxy drops filler-keyword tracks from client queues and removes net-negative skip-heavy tracks. Deploy proxy/docker-compose.yml, set its URL here, then enable \"Exclude skip-heavy tracks\" in Playback stats - the keyword list below is pushed to the proxy on every stats pass."
+            },
+            { "type": "Control", "scope": "#/properties/filterUrl" },
+            {
+              "type": "Control",
+              "scope": "#/properties/fillerKeywords",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/skipIgnoreEnabled",
+                  "schema": { "const": true }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Favorites sync",
+          "elements": [
+            { "type": "Control", "scope": "#/properties/favoritesSyncEnabled" },
+            { "type": "Control", "scope": "#/properties/favoritesSyncLastfm" },
+            { "type": "Control", "scope": "#/properties/favoritesSyncMax" }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Playback stats",
+          "elements": [
+            { "type": "Control", "scope": "#/properties/playbackStatsEnabled" },
+            { "type": "Control", "scope": "#/properties/statsPollMinutes" },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/skipThresholdPercent" },
+                { "type": "Control", "scope": "#/properties/topPicksCount" }
+              ]
+            },
+            { "type": "Control", "scope": "#/properties/skipIgnoreEnabled" },
+            { "type": "Control", "scope": "#/properties/skipIgnoreRatio" }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Scanning & rescans",
           "elements": [
             { "type": "Control", "scope": "#/properties/scanUser" },
-            { "type": "Control", "scope": "#/properties/triggerScanAfterRun" },
-            { "type": "Control", "scope": "#/properties/scanAfterAlbum" },
-            { "type": "Control", "scope": "#/properties/scanAfterTagWrite" },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/triggerScanAfterRun" },
+                { "type": "Control", "scope": "#/properties/scanAfterAlbum" },
+                { "type": "Control", "scope": "#/properties/scanAfterTagWrite" }
+              ]
+            },
             { "type": "Control", "scope": "#/properties/scanDebounceSeconds" }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Safety & recovery",
+          "elements": [
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/backupBeforeWrite" },
+                { "type": "Control", "scope": "#/properties/backupRetentionDays" }
+              ]
+            },
+            { "type": "Control", "scope": "#/properties/rollbackRunId" }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Logging & status",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Activity is tracked automatically: latest status/report live in the plugin KVStore and the Navidrome server log. Optionally push each run's report/status to a hosted log."
+            },
+            { "type": "Control", "scope": "#/properties/logWebhookUrl" },
+            { "type": "Control", "scope": "#/properties/logWebhookToken", "options": { "format": "password" } }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Persistence (MySQL)",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Store the plugin's cache/state in your own MySQL/MariaDB instead of the Navidrome-managed SQLite. Deploy the mysql sidecar (mysql/docker-compose.yml) and enter your database connection here."
+            },
+            { "type": "Control", "scope": "#/properties/persistenceBackend" },
+            {
+              "type": "Control",
+              "scope": "#/properties/persistenceUrl",
+              "rule": {
+                "effect": "SHOW",
+                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+              }
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                { "type": "Control", "scope": "#/properties/mysqlHost" },
+                { "type": "Control", "scope": "#/properties/mysqlPort" }
+              ],
+              "rule": {
+                "effect": "SHOW",
+                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/mysqlName",
+              "rule": {
+                "effect": "SHOW",
+                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/mysqlUser",
+              "rule": {
+                "effect": "SHOW",
+                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/mysqlPassword",
+              "options": { "format": "password" },
+              "rule": {
+                "effect": "SHOW",
+                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+              }
+            }
           ]
         }
       ]
     }
   }
 }
+
 
