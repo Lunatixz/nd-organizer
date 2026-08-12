@@ -5,18 +5,29 @@
 // Extism/Navidrome glue (capability exports, host-service calls) is gated to
 // the wasm32 target, where the plugin actually runs.
 
+// Phased development: some helpers are still only exercised by host tests.
+#![allow(dead_code)]
+
 mod config;
+mod favorites;
+mod identity;
+mod lidarr;
 mod nfo;
 mod organizer;
 mod report;
+#[cfg(target_arch = "wasm32")]
+mod scan;
 mod state;
+mod stats;
 #[cfg(target_arch = "wasm32")]
 mod store;
 mod tags;
 mod template;
+#[cfg(target_arch = "wasm32")]
+mod net;
 
 #[cfg(target_arch = "wasm32")]
-mod wasm {
+pub(crate) mod wasm {
     // Capabilities:
     //   - Lifecycle:   create the task queue, schedule a startup run.
     //   - Scheduler:   on a scheduled tick, run a pass (dry-run report always,
@@ -36,12 +47,7 @@ mod wasm {
     use serde::{Deserialize, Serialize};
 
     use super::config::{Config, Mode};
-    use super::nfo::{self, NfoAlbum, NfoArtist};
-    use super::organizer::{
-        album_info_with_nfo, apply_plan, build_plan, discover_albums_skip, Bucket,
-    };
-    use super::report;
-    use super::state::{self, ApplyRecord, FileRename};
+    use super::state::{self, ApplyRecord};
     use super::store;
     use super::template;
 
@@ -50,20 +56,25 @@ mod wasm {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TaskPayload {
-        /// "pass" = run a batch of albums; "album" = apply one album.
+        /// "scan" = scan a chunk of the library; "group" = build album groups;
+        /// "plan" = plan/apply a batch of album groups.
         kind: String,
         library_id: i32,
         dir: String,
         run_id: String,
-        /// Album dirs to plan in this pass task (small batches).
+        /// Album dirs / file lists carried by tasks.
         dirs: Vec<String>,
+        /// Album groups (lists of file paths) for "plan" tasks.
+        groups: Vec<Vec<String>>,
         batch_index: i32,
         batch_total: i32,
     }
 
     fn enqueue_payload(p: &TaskPayload) -> Result<(), String> {
         let bytes = serde_json::to_vec(p).map_err(|e| e.to_string())?;
-        host::task::enqueue(QUEUE, bytes).map(|_| ()).map_err(|e| e.to_string())
+        host::task::enqueue(QUEUE, bytes)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     fn enqueue(kind: &str, library_id: i32, dir: &str, run_id: &str) -> Result<(), String> {
@@ -73,9 +84,58 @@ mod wasm {
             dir: dir.into(),
             run_id: run_id.into(),
             dirs: vec![],
+            groups: vec![],
             batch_index: -1,
             batch_total: -1,
         })
+    }
+
+    pub(crate) fn enqueue_scan_task(library_id: i32) -> Result<(), String> {
+        enqueue("scan", library_id, "", "")
+    }
+
+    pub(crate) fn enqueue_group_task(library_id: i32) -> Result<(), String> {
+        enqueue("group", library_id, "", "")
+    }
+
+    pub(crate) fn enqueue_plan_tasks(
+        cfg: &Config,
+        library_id: i32,
+        groups: Vec<Vec<String>>,
+    ) -> Result<usize, String> {
+        let batch = cfg.albums_per_task.max(1);
+        let total = groups.len().div_ceil(batch);
+        let mut enqueued = 0;
+        for (i, chunk) in groups.chunks(batch).enumerate() {
+            enqueue_payload(&TaskPayload {
+                kind: "plan".into(),
+                library_id,
+                dir: String::new(),
+                run_id: String::new(),
+                dirs: vec![],
+                groups: chunk.to_vec(),
+                batch_index: i as i32,
+                batch_total: total as i32,
+            })?;
+            enqueued += 1;
+        }
+        Ok(enqueued)
+    }
+
+    /// The run id used for rollback of this pass's applies (stable per pass,
+    /// shared by all plan tasks of a library).
+    pub(crate) fn current_run_id(library_id: i32) -> Result<String, String> {
+        let key = format!("run.current.{library_id}");
+        if let Ok(Some(v)) = host::kvstore::get(&key) {
+            if let Ok(s) = String::from_utf8(v) {
+                if !s.is_empty() {
+                    return Ok(s);
+                }
+            }
+        }
+        let id = state::host_state::new_run_id();
+        host::kvstore::set(&key, id.clone().into_bytes()).map_err(|e| e.to_string())?;
+        Ok(id)
     }
 
     #[derive(Default)]
@@ -91,6 +151,19 @@ mod wasm {
                 cfg.libraries
             ));
             log_library_inventory();
+            // Post an initial integration-health snapshot so the webhook
+            // dashboard shows status even before the first scheduled pass.
+            if !cfg.log_webhook_url.trim().is_empty() {
+                let status = serde_json::json!({
+                    "ts": state::now_ts(),
+                    "mode": mode_label(&cfg),
+                    "inProgress": false,
+                    "integrations": integration_health(&cfg),
+                    "warnings": collect_warnings(&cfg),
+                })
+                .to_string();
+                post_webhook(&cfg, &status);
+            }
             // Create the organize queue. Concurrency 1 keeps per-album scans
             // coherent (only one album mid-move when a scan runs).
             let _ = host::task::create_queue(
@@ -108,13 +181,39 @@ mod wasm {
                     log_warn(&format!("schedule startup run: {e}"));
                 }
             }
+            if !cfg.schedule_cron.trim().is_empty() {
+                if let Err(e) = host::scheduler::schedule_recurring(
+                    &cfg.schedule_cron,
+                    "organize",
+                    "nd-organizer-cron",
+                ) {
+                    log_warn(&format!("schedule cron: {e}"));
+                }
+            }
+            if cfg.playback_stats_enabled && cfg.stats_poll_minutes > 0 {
+                let cron = format!("*/{} * * * *", cfg.stats_poll_minutes.min(60));
+                if let Err(e) =
+                    host::scheduler::schedule_recurring(&cron, "stats", "nd-organizer-stats")
+                {
+                    log_warn(&format!("schedule stats: {e}"));
+                }
+            }
             Ok(())
         }
     }
 
     impl CallbackProvider for NdOrganizer {
-        fn on_callback(&self, _req: SchedulerCallbackRequest) -> Result<(), nd_pdk::scheduler::Error> {
+        fn on_callback(
+            &self,
+            req: SchedulerCallbackRequest,
+        ) -> Result<(), nd_pdk::scheduler::Error> {
             let cfg = Config::load().map_err(|e| nd_pdk::scheduler::Error::new(e))?;
+            if req.payload == "stats" && cfg.playback_stats_enabled {
+                if let Err(e) = enqueue("stats", 0, "", "") {
+                    log_warn(&format!("enqueue stats: {e}"));
+                }
+                return Ok(());
+            }
             match run_pass(&cfg) {
                 Ok(()) => log_info("run pass completed"),
                 Err(e) => log_error(&e),
@@ -124,40 +223,105 @@ mod wasm {
     }
 
     impl TaskExecuteProvider for NdOrganizer {
-        fn on_task_execute(&self, req: TaskExecuteRequest) -> Result<String, nd_pdk::taskworker::Error> {
+        fn on_task_execute(
+            &self,
+            req: TaskExecuteRequest,
+        ) -> Result<String, nd_pdk::taskworker::Error> {
             if req.queue_name != QUEUE {
-                return Err(nd_pdk::taskworker::Error::new(format!("unknown queue {}", req.queue_name)));
+                return Err(nd_pdk::taskworker::Error::new(format!(
+                    "unknown queue {}",
+                    req.queue_name
+                )));
             }
             let payload: TaskPayload = serde_json::from_slice(&req.payload)
                 .map_err(|e| nd_pdk::taskworker::Error::new(format!("bad payload: {e}")))?;
             let cfg = Config::load().map_err(|e| nd_pdk::taskworker::Error::new(e))?;
-            match payload.kind.as_str() {
-                "pass" => run_pass_batch(&cfg, &payload)
-                    .map(|st| format!("pass done (batch {}/{})", st.batch_index, st.batch_total))
-                    .map_err(|e| nd_pdk::taskworker::Error::new(e)),
-                "album" => apply_one_album(&cfg, payload.library_id, &payload.dir, &payload.run_id)
-                    .map(|_| format!("ok:{}", payload.dir))
-                    .map_err(|e| nd_pdk::taskworker::Error::new(e)),
-                other => Err(nd_pdk::taskworker::Error::new(format!("unknown task kind {other}"))),
+            let kind = payload.kind.as_str();
+            record_task(kind, payload.library_id, "running", "");
+            let r: Result<String, String> = match kind {
+                "scan" => match super::scan::scan_step(&cfg, payload.library_id) {
+                    Ok(true) => Ok("scan chunk done (more remain)".into()),
+                    Ok(false) => Ok("scan complete".into()),
+                    Err(e) => Err(e),
+                },
+                "group" => super::scan::group_step(&cfg, payload.library_id)
+                    .map(|n| format!("grouped into {n} plan tasks")),
+                "plan" => super::scan::plan_step(
+                    &cfg,
+                    payload.library_id,
+                    &payload.groups,
+                    payload.batch_index,
+                    payload.batch_total,
+                )
+                .map(|_| {
+                    format!(
+                        "plan batch {}/{} done",
+                        payload.batch_index + 1,
+                        payload.batch_total.max(1)
+                    )
+                }),
+                "favsync" => crate::favorites::host_favorites::sync(&cfg).map(|s| {
+                    format!(
+                        "favorites sync: {} -> Last.fm, {} -> Navidrome, {} errors",
+                        s.nav_to_lastfm, s.lastfm_to_nav, s.errors
+                    )
+                }),
+                "stats" => match crate::stats::host_stats::poll(&cfg) {
+                    Ok((plays, skips)) => {
+                        let picks = if cfg.top_picks_count > 0 {
+                            crate::stats::host_stats::refresh_top_picks(&cfg, cfg.top_picks_count)
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
+                        Ok(format!("playback stats: {plays} plays, {skips} skips, {picks} top picks, {filtered} skip-heavy tracks removed by the filter proxy"))
+                    }
+                    Err(e) => Err(e),
+                },
+                other => Err(format!("unknown task kind {other}")),
+            };
+            match &r {
+                Ok(msg) => record_task(kind, payload.library_id, "done", msg),
+                Err(e) => record_task(kind, payload.library_id, "failed", e),
             }
+            r.map_err(|e| nd_pdk::taskworker::Error::new(e))
         }
     }
 
     /// Libraries to process: every library the plugin has been granted access
     /// to via the Navidrome "Library Access" permission (the authority).
     /// Any legacy `libraries`/`libraryId` config value is ignored.
-    fn target_libraries(_cfg: &Config) -> Vec<i32> {
-        match host::library::get_all_libraries() {
-            Ok(libs) if !libs.is_empty() => libs.into_iter().map(|l| l.id).collect(),
+    fn target_libraries(cfg: &Config) -> Vec<i32> {
+        use std::collections::HashSet;
+        let libs = match host::library::get_all_libraries() {
+            Ok(libs) if !libs.is_empty() => libs,
             Ok(_) => {
                 log_warn("no accessible libraries; grant Library Access in the plugin settings");
-                Vec::new()
+                return Vec::new();
             }
             Err(e) => {
                 log_warn(&format!("cannot list libraries: {e}"));
-                Vec::new()
+                return Vec::new();
+            }
+        };
+        let granted: Vec<i32> = libs.into_iter().map(|l| l.id).collect();
+        // Empty `libraries` = organize every granted library. Otherwise only the
+        // configured ids are organized - warn loudly when one is not granted.
+        if cfg.libraries.is_empty() {
+            return granted;
+        }
+        let wanted: HashSet<i32> = cfg.libraries.iter().cloned().collect();
+        let targets: Vec<i32> = granted.iter().filter(|id| wanted.contains(id)).cloned().collect();
+        for id in &cfg.libraries {
+            if !targets.contains(id) {
+                log_warn(&format!(
+                    "library {id} is configured but NOT granted in the plugin's Library Access; \
+                     grant it in Navidrome plugin settings (or clear the libraries setting)"
+                ));
             }
         }
+        targets
     }
 
     /// Per-library summary of a pass batch, used to build the status snapshot.
@@ -197,11 +361,16 @@ mod wasm {
                 let active = entries
                     .iter()
                     .filter(|e| {
-                        matches!(e.get("state").and_then(|s| s.as_str()), Some("playing" | "starting"))
+                        matches!(
+                            e.get("state").and_then(|s| s.as_str()),
+                            Some("playing" | "starting")
+                        )
                     })
                     .count();
                 if active > 0 {
-                    log_info(&format!("playback active ({active} playing); deferring organizer work"));
+                    log_info(&format!(
+                        "playback active ({active} playing); deferring organizer work"
+                    ));
                 }
                 active == 0
             }
@@ -218,6 +387,7 @@ mod wasm {
         in_progress: bool,
         statuses: &[LibraryStatus],
         batch: Option<(i32, i32)>,
+        run_id: Option<&str>,
     ) -> String {
         let mut libs = Vec::new();
         let mut total_to_move = 0usize;
@@ -243,21 +413,64 @@ mod wasm {
             "ts": state::now_ts(),
             "mode": mode_label(cfg),
             "inProgress": in_progress,
+            "runId": run_id,
             "batch": batch_field,
             "libraries": libs,
             "totalAlbumsToMove": total_to_move,
             "totalFileMoves": total_moves,
             "warnings": collect_warnings(cfg),
+            "integrations": integration_health(cfg),
+            "tasks": task_log(),
         })
         .to_string()
     }
 
+    /// Recent task executions (newest first), kept in the KVStore so status
+    /// posts can show what the plugin is/was processing.
+    fn record_task(kind: &str, library_id: i32, state: &str, message: &str) {
+        let mut log: Vec<serde_json::Value> = host::kvstore::get("tasklog")
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice(&v).ok())
+            .unwrap_or_default();
+        log.insert(
+            0,
+            serde_json::json!({
+                "ts": state::now_ts(),
+                "kind": kind,
+                "libraryId": library_id,
+                "state": state,
+                "message": message,
+            }),
+        );
+        log.truncate(20);
+        if let Ok(bytes) = serde_json::to_vec(&log) {
+            let _ = host::kvstore::set("tasklog", bytes);
+        }
+    }
+
+    pub(crate) fn task_log() -> serde_json::Value {
+        host::kvstore::get("tasklog")
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok())
+            .unwrap_or_else(|| serde_json::json!([]))
+    }
+
     /// Probe a service URL (cached 1h) and return a warning when it's bad.
-    fn probe_ok(key: &str, url: &str, headers: &HashMap<String, String>) -> Option<String> {
+    pub(crate) fn probe_ok(
+        key: &str,
+        url: &str,
+        headers: &HashMap<String, String>,
+    ) -> Option<String> {
         let cache_key = format!("probe:{}:{}", key, url);
         if let Ok(Some(v)) = host::kvstore::get(&cache_key) {
             let s = String::from_utf8_lossy(&v);
-            return if s == "ok" { None } else { Some(s.into_owned()) };
+            return if s == "ok" {
+                None
+            } else {
+                Some(s.into_owned())
+            };
         }
         let req = host::http::HTTPRequest {
             method: "GET".into(),
@@ -269,7 +482,10 @@ mod wasm {
         };
         let result = match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => Ok(()),
-            Ok(Some(resp)) => Err(format!("unreachable or wrong credentials (HTTP {})", resp.status_code)),
+            Ok(Some(resp)) => Err(format!(
+                "unreachable or wrong credentials (HTTP {})",
+                resp.status_code
+            )),
             Ok(None) => Err("no response".into()),
             Err(e) => Err(format!("connection failed: {e}")),
         };
@@ -284,12 +500,145 @@ mod wasm {
         }
     }
 
+    /// Health of every third-party integration, derived from the plugin config
+    /// (kept in Navidrome settings, never in Docker). Included in status posts
+    /// so the webhook dashboard can render it. Cached 5 min so it can't hammer
+    /// the external APIs (it does real probes + a Last.fm login).
+    pub(crate) fn integration_health(cfg: &Config) -> serde_json::Value {
+        crate::net::cached("health", 300, || Some(integration_health_uncached(cfg)))
+            .unwrap_or_else(|| serde_json::json!([]))
+    }
+
+    fn integration_health_uncached(cfg: &Config) -> serde_json::Value {
+        use serde_json::json;
+        let mut arr = Vec::new();
+
+        let empty = HashMap::new();
+
+        // AcoustID sidecar
+        if cfg.acoustid_url.trim().is_empty() {
+            arr.push(
+                json!({"name":"AcoustID","state":"notConfigured","detail":"acoustidUrl not set"}),
+            );
+        } else {
+            let url = format!("{}/health", cfg.acoustid_url.trim_end_matches('/'));
+            match probe_ok("acoustid", &url, &empty) {
+                None => arr.push(json!({"name":"AcoustID","state":"ok","detail":url})),
+                Some(w) => arr.push(json!({"name":"AcoustID","state":"unreachable","detail":w})),
+            }
+        }
+
+        // Lidarr
+        if cfg.lidarr_url.trim().is_empty() {
+            arr.push(json!({"name":"Lidarr","state":"notConfigured","detail":"lidarrUrl not set"}));
+        } else {
+            let mut h = HashMap::new();
+            if !cfg.lidarr_api_key.trim().is_empty() {
+                h.insert("X-Api-Key".to_string(), cfg.lidarr_api_key.clone());
+            }
+            let base = resolve_url_base(
+                "lidarr",
+                cfg.lidarr_url.trim_end_matches('/'),
+                "/api/v1/system/status",
+                &h,
+            );
+            let url = format!("{base}/api/v1/system/status");
+            match probe_ok("lidarr", &url, &h) {
+                None => arr.push(json!({"name":"Lidarr","state":"ok","detail":url})),
+                Some(w) => {
+                    let state = if w.contains("HTTP 401") || w.contains("HTTP 403") {
+                        "reachable"
+                    } else {
+                        "unreachable"
+                    };
+                    arr.push(json!({"name":"Lidarr","state":state,"detail":w}));
+                }
+            }
+        }
+
+        // AudioMuse-AI
+        if cfg.audiomuse_url.trim().is_empty() {
+            arr.push(json!({"name":"AudioMuse-AI","state":"notConfigured","detail":"audiomuseUrl not set"}));
+        } else {
+            let url = cfg.audiomuse_url.trim_end_matches('/').to_string();
+            match probe_ok("audiomuse", &url, &empty) {
+                None => arr.push(json!({"name":"AudioMuse-AI","state":"ok","detail":url})),
+                Some(w) => {
+                    arr.push(json!({"name":"AudioMuse-AI","state":"unreachable","detail":w}))
+                }
+            }
+        }
+
+        // MusicBrainz
+        {
+            let url = "https://musicbrainz.org/ws/2/";
+            let detail = if cfg.musicbrainz_token.trim().is_empty() {
+                "no token (optional, 1 req/s)".to_string()
+            } else {
+                "token set".to_string()
+            };
+            match probe_ok("musicbrainz", url, &empty) {
+                None => arr.push(json!({"name":"MusicBrainz","state":"ok","detail":detail})),
+                Some(w) => arr.push(json!({"name":"MusicBrainz","state":"unreachable","detail":w})),
+            }
+        }
+
+        // Last.fm
+        if cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty() {
+            arr.push(json!({"name":"Last.fm","state":"notConfigured","detail":"set lastfmApiKey + lastfmUser"}));
+        } else if cfg.favorites_sync_enabled
+            && cfg.favorites_sync_lastfm
+            && !cfg.lastfm_api_secret.trim().is_empty()
+            && !cfg.lastfm_password.trim().is_empty()
+        {
+            // Favorites sync does a real login - reflect its actual auth state
+            // instead of only checking that the API is reachable. Shared with
+            // collect_warnings so the login is attempted at most once per 5 min.
+            match lastfm_auth_issue(cfg) {
+                Some(issue) => arr.push(json!({"name":"Last.fm","state":"authFailed","detail":issue})),
+                None => arr.push(json!({"name":"Last.fm","state":"ok","detail":"auth ok (favorites)"})),
+            }
+        } else {
+            let url = format!(
+                "https://ws.audioscrobbler.com/2.0/?method=user.getinfo&user={}&api_key={}&format=json",
+                cfg.lastfm_user, cfg.lastfm_api_key
+            );
+            match probe_ok("lastfm", &url, &empty) {
+                None => arr.push(json!({"name":"Last.fm","state":"ok","detail":"api reachable"})),
+                Some(w) => arr.push(json!({"name":"Last.fm","state":"unreachable","detail":w})),
+            }
+        }
+
+        serde_json::json!(arr)
+    }
+
+    /// A human-readable Last.fm auth problem, or None when the login works.
+    /// Cached 5 min (shared by health + warnings) so the auth endpoint is not
+    /// hammered on every status post.
+    fn lastfm_auth_issue(cfg: &Config) -> Option<String> {
+        if !cfg.favorites_sync_enabled || !cfg.favorites_sync_lastfm {
+            return None;
+        }
+        if cfg.lastfm_api_secret.trim().is_empty() || cfg.lastfm_password.trim().is_empty() {
+            return None; // covered by a static config warning
+        }
+        crate::net::cached("lastfm-auth", 300, || {
+            match crate::favorites::host_favorites::session(cfg) {
+                Ok(_) => None,
+                Err(e) => Some(format!("auth failed: {e}")),
+            }
+        })
+    }
+
     /// Validate config + connectivity and return human-readable warnings shown
     /// in the status JSON so users notice wrong API keys or IP addresses.
     fn collect_warnings(cfg: &Config) -> Vec<String> {
         let mut w = Vec::new();
         if target_libraries(cfg).is_empty() {
-            w.push("no libraries are accessible - grant Library Access in the plugin permissions".into());
+            w.push(
+                "no libraries are accessible - grant Library Access in the plugin permissions"
+                    .into(),
+            );
         }
         if cfg.mode == Mode::Apply {
             for lib in host::library::get_all_libraries().unwrap_or_default() {
@@ -301,16 +650,37 @@ mod wasm {
                 }
             }
         }
-        if cfg.acoustid_mode != crate::config::AcoustIdMode::Disabled && cfg.acoustid_api_key.trim().is_empty() {
+        if cfg.acoustid_mode != crate::config::AcoustIdMode::Disabled
+            && cfg.acoustid_api_key.trim().is_empty()
+        {
             w.push("acoustidApiKey is empty but acoustidMode is enabled".into());
         }
-        if cfg.write_playcount && (cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty()) {
+        if cfg.verify_identity && cfg.acoustid_url.trim().is_empty() {
+            w.push("verifyIdentity is on but acoustidUrl is empty - files without an MBID/ISRC cannot be verified and will be left in place. Deploy the AcoustID sidecar (acoustid/) and set its URL.".into());
+        }
+        if cfg.write_playcount
+            && (cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty())
+        {
             w.push("writePlaycount requires lastfmApiKey and lastfmUser".into());
+        }
+        if cfg.favorites_sync_enabled && cfg.favorites_sync_lastfm {
+            if cfg.lastfm_api_secret.trim().is_empty() || cfg.lastfm_password.trim().is_empty() {
+                w.push("favorites sync (Last.fm) is on but needs lastfmApiSecret + lastfmPassword (for the session key)".into());
+            } else if let Some(issue) = lastfm_auth_issue(cfg) {
+                w.push(format!(
+                    "favorites sync (Last.fm) cannot log in: {issue}. Check lastfmPassword (and lastfmApiSecret)."
+                ));
+            }
+            if cfg.scan_user.trim().is_empty() {
+                w.push("favorites sync needs scanUser (a Navidrome user)".into());
+            }
         }
         if cfg.genre_from == "lastfm" && cfg.lastfm_api_key.trim().is_empty() {
             w.push("genreFrom is lastfm but lastfmApiKey is empty".into());
         }
-        if cfg.use_lidarr_naming_schema && (cfg.lidarr_url.trim().is_empty() || cfg.lidarr_api_key.trim().is_empty()) {
+        if cfg.use_lidarr_naming_schema
+            && (cfg.lidarr_url.trim().is_empty() || cfg.lidarr_api_key.trim().is_empty())
+        {
             w.push("useLidarrNamingSchema is on but Lidarr URL/API key are not configured".into());
         }
         if cfg.trigger_scan_after_run && cfg.scan_user.trim().is_empty() {
@@ -321,20 +691,40 @@ mod wasm {
             if !cfg.lidarr_api_key.trim().is_empty() {
                 h.insert("X-Api-Key".to_string(), cfg.lidarr_api_key.clone());
             }
-            if let Some(war) = probe_ok("lidarr", &format!("{}/api/v1/system/status", cfg.lidarr_url.trim_end_matches('/')), &h) {
-                w.push(format!("Lidarr: {war}"));
+            let base = resolve_url_base(
+                "lidarr",
+                cfg.lidarr_url.trim_end_matches('/'),
+                "/api/v1/system/status",
+                &h,
+            );
+            if crate::net::throttle("warn-probe-lidarr", 60_000) {
+                if let Some(war) = probe_ok("lidarr", &format!("{base}/api/v1/system/status"), &h) {
+                    w.push(format!(
+                        "Lidarr: {war}. If Lidarr runs in a Docker container, set lidarrUrl to its container name on the same network (e.g. http://lidarr:8686)."
+                    ));
+                }
             }
         }
         if !cfg.audiomuse_url.trim().is_empty() {
-            if let Some(war) = probe_ok("audiomuse", cfg.audiomuse_url.trim_end_matches('/'), &HashMap::new()) {
-                w.push(format!("AudioMuse-AI: {war}"));
+            let base = resolve_url_base(
+                "audiomuse",
+                cfg.audiomuse_url.trim_end_matches('/'),
+                "",
+                &HashMap::new(),
+            );
+            if crate::net::throttle("warn-probe-audiomuse", 60_000) {
+                if let Some(war) = probe_ok("audiomuse", &base, &HashMap::new()) {
+                    w.push(format!(
+                        "AudioMuse-AI: {war}. If AudioMuse-AI runs in a Docker container, set audiomuseUrl to its container name on the same network (e.g. http://audiomuse:8000)."
+                    ));
+                }
             }
         }
         w
     }
 
     /// POST a log/report body to the configured webhook (a hosted log).
-    fn post_webhook(cfg: &Config, body: &str) {
+    pub(crate) fn post_webhook(cfg: &Config, body: &str) {
         let url = cfg.log_webhook_url.trim();
         if url.is_empty() {
             return;
@@ -343,7 +733,10 @@ mod wasm {
         headers.insert("Content-Type".to_string(), "text/plain".to_string());
         if !cfg.log_webhook_token.is_empty() {
             headers.insert("X-Token".to_string(), cfg.log_webhook_token.clone());
-            headers.insert("Authorization".to_string(), format!("Bearer {}", cfg.log_webhook_token));
+            headers.insert(
+                "Authorization".to_string(),
+                format!("Bearer {}", cfg.log_webhook_token),
+            );
         }
         let req = host::http::HTTPRequest {
             method: "POST".into(),
@@ -360,19 +753,48 @@ mod wasm {
         }
     }
 
+    /// Trigger a Navidrome rescan so the player never points at moved files.
+    /// Scans are incremental and coalesced by Navidrome, so calling after each
+    /// changed album is cheap and safe.
+    pub(crate) fn trigger_navidrome_scan(cfg: &Config) -> Result<(), String> {
+        if !cfg.trigger_scan_after_run {
+            return Ok(());
+        }
+        let user = cfg.scan_user.trim();
+        if user.is_empty() {
+            log_warn("triggerScanAfterRun is on but scanUser is empty");
+            return Ok(());
+        }
+        match host::subsonicapi::call(&format!("startScan?u={user}")) {
+            Ok(json) => {
+                let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+                let scanning = v
+                    .pointer("/subsonic-response/scanStatus/scanning")
+                    .and_then(|s| s.as_bool())
+                    .unwrap_or(false);
+                log_info(&format!("Navidrome scan triggered (scanning={scanning})"));
+                Ok(())
+            }
+            Err(e) => Err(format!("startScan failed: {e}")),
+        }
+    }
+
     /// A scheduled pass. Handles a pending rollback first; otherwise, when the
-    /// player is idle, enumerates album dirs (fast, bounded) and enqueues one
-    /// small-batch pass task per chunk so resources stay lean.
+    /// player is idle, kicks off a full-library scan -> group -> plan chain for
+    /// each target library.
     fn run_pass(cfg: &Config) -> Result<(), String> {
         if !cfg.rollback_run_id.is_empty() {
-            log_info(&format!("rollback requested for run {}", cfg.rollback_run_id));
+            log_info(&format!(
+                "rollback requested for run {}",
+                cfg.rollback_run_id
+            ));
             return do_rollback(cfg);
         }
         log_library_inventory();
         let target_libs = target_libraries(cfg);
         if target_libs.is_empty() {
             log_error("nothing to organize: no libraries are accessible");
-            store::write_status(&status_json(cfg, false, &[], None));
+            store::write_status(&status_json(cfg, false, &[], None, None));
             return Ok(());
         }
         if !is_idle(cfg) {
@@ -383,62 +805,37 @@ mod wasm {
                 "inProgress": false,
                 "deferredUntilIdle": true,
                 "warnings": collect_warnings(cfg),
+                "integrations": integration_health(cfg),
+                "tasks": task_log(),
             })
             .to_string();
             store::write_status(&status);
-            post_webhook(cfg, &format!("nd-organizer: run deferred - playback active.\n{status}"));
+            post_webhook(
+                cfg,
+                &format!("nd-organizer: run deferred - playback active.\n{status}"),
+            );
             let _ = host::scheduler::schedule_one_time(120, "idle-retry", "");
             return Ok(());
         }
-        store::write_status(&status_json(cfg, true, &[], None));
-
-        let batch_size = cfg.albums_per_task.max(1);
-        let mut enqueued = 0;
-        for &library_id in &target_libs {
-            let lib = match host::library::get_library(library_id) {
-                Ok(Some(lib)) if !lib.mount_point.is_empty() => lib,
-                Ok(_) => {
-                    log_warn(&format!("library {library_id} has no filesystem mount; skipped"));
-                    continue;
-                }
-                Err(e) => {
-                    log_warn(&format!("library {library_id}: {e}"));
-                    continue;
-                }
-            };
-            let root = Path::new(&lib.mount_point);
-            let limit = if cfg.max_albums_per_run == 0 {
-                0usize
-            } else {
-                cfg.max_albums_per_run
-            };
-            let albums = discover_albums_skip(
-                root,
-                cfg.skip_hidden_files,
-                &cfg.exclude_paths,
-                limit,
-                cfg.max_scan_entries,
-            );
-            let dirs: Vec<String> = albums.into_iter().map(|a| a.dir).collect();
-            log_info(&format!("library {library_id}: found {} albums; batching by {batch_size}", dirs.len()));
-            let total = dirs.len().div_ceil(batch_size);
-            for (i, chunk) in dirs.chunks(batch_size).enumerate() {
-                let p = TaskPayload {
-                    kind: "pass".into(),
-                    library_id,
-                    dir: String::new(),
-                    run_id: String::new(),
-                    dirs: chunk.to_vec(),
-                    batch_index: i as i32,
-                    batch_total: total as i32,
-                };
-                match enqueue_payload(&p) {
-                    Ok(()) => enqueued += 1,
-                    Err(e) => log_warn(&format!("enqueue batch {}/{}: {e}", i + 1, total)),
-                }
+        store::write_status(&status_json(cfg, true, &[], None, None));
+        if cfg.favorites_sync_enabled {
+            if let Err(e) = enqueue("favsync", 0, "", "") {
+                log_warn(&format!("enqueue favsync: {e}"));
             }
         }
-        log_info(&format!("run pass: enqueued {enqueued} batch tasks"));
+        if cfg.mode == Mode::Apply {
+            for &library_id in &target_libs {
+                let _ = current_run_id(library_id);
+            }
+        }
+        let mut enqueued = 0;
+        for &library_id in &target_libs {
+            match enqueue_scan_task(library_id) {
+                Ok(()) => enqueued += 1,
+                Err(e) => log_warn(&format!("enqueue scan for library {library_id}: {e}")),
+            }
+        }
+        log_info(&format!("run pass: enqueued {enqueued} scan tasks"));
         Ok(())
     }
 
@@ -465,12 +862,18 @@ mod wasm {
             }
             let root = Path::new(&lib.mount_point);
             let recs = state::host_state::get_run_applies(&run_id)?;
-            let recs: Vec<ApplyRecord> = recs.into_iter().filter(|r| r.library_id == library_id).collect();
+            let recs: Vec<ApplyRecord> = recs
+                .into_iter()
+                .filter(|r| r.library_id == library_id)
+                .collect();
             if !recs.is_empty() {
                 if let Err(e) = state::host_state::run_rollback(root, &recs) {
                     errors.push(format!("library {library_id}: {e}"));
                 } else {
-                    log_info(&format!("library {library_id}: rolled back {} applies", recs.len()));
+                    log_info(&format!(
+                        "library {library_id}: rolled back {} applies",
+                        recs.len()
+                    ));
                 }
             }
         }
@@ -486,7 +889,9 @@ mod wasm {
             .to_string(),
         );
         if errors.is_empty() {
-            log_info(&format!("rollback of run {run_id} complete. Clear the rollbackRunId setting."));
+            log_info(&format!(
+                "rollback of run {run_id} complete. Clear the rollbackRunId setting."
+            ));
             Ok(())
         } else {
             Err(errors.join("; "))
@@ -531,10 +936,88 @@ mod wasm {
         }
     }
 
+    /// Replace the host part of a URL (used to try docker host aliases).
+    fn host_replace(url: &str, new_host: &str) -> Option<String> {
+        let idx = url.find("://")?;
+        let scheme_end = idx + 3;
+        let after = &url[scheme_end..];
+        let path_start = after.find('/').unwrap_or(after.len());
+        let authority = &after[..path_start];
+        let path = &after[path_start..];
+        let (_, port) = match authority.rsplit_once(':') {
+            Some((_, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => ((), p),
+            _ => ((), ""),
+        };
+        let new_authority = if port.is_empty() {
+            new_host.to_string()
+        } else {
+            format!("{new_host}:{port}")
+        };
+        Some(format!("{}{}{}", &url[..scheme_end], new_authority, path))
+    }
+
+    /// Derive the subnet gateway of a URL's host (replace the last octet with 1,
+    /// e.g. http://172.99.0.12:8000 -> http://172.99.0.1:8000). Docker's bridge
+    /// gateway can reach host-published ports, so this helps reach services on
+    /// the container's own network without any Docker changes.
+    fn subnet_gateway(url: &str) -> Option<String> {
+        let idx = url.find("://")? + 3;
+        let after = &url[idx..];
+        let path_start = after.find('/').unwrap_or(after.len());
+        let authority = &after[..path_start];
+        let (host, port) = authority.rsplit_once(':')?;
+        let last_dot = host.rfind('.')?;
+        if !host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return None;
+        }
+        Some(format!(
+            "{}{}.1:{}{}",
+            &url[..idx],
+            &host[..last_dot],
+            port,
+            &after[path_start..]
+        ))
+    }
+
+    /// Resolve the base URL to use for a service: the configured address first,
+    /// then common docker host aliases (`host.docker.internal`, the default
+    /// bridge gateway `172.17.0.1`) which reach host-published services when
+    /// containers cannot reach the host's LAN IP. Returns the first that
+    /// responds (probes are cached 1h).
+    pub(crate) fn resolve_url_base(
+        key: &str,
+        configured: &str,
+        probe_path: &str,
+        headers: &HashMap<String, String>,
+    ) -> String {
+        let mut candidates = vec![configured.to_string()];
+        for host in ["host.docker.internal", "172.17.0.1"] {
+            if let Some(alt) = host_replace(configured, host) {
+                if !candidates.contains(&alt) {
+                    candidates.push(alt);
+                }
+            }
+        }
+        // The subnet gateway of the configured address can reach host-published
+        // ports on the container's own network (no Docker changes required).
+        if let Some(gw) = subnet_gateway(configured) {
+            if !candidates.contains(&gw) {
+                candidates.push(gw);
+            }
+        }
+        for c in candidates {
+            if probe_ok(key, &format!("{c}{probe_path}"), headers).is_none() {
+                return c;
+            }
+        }
+        configured.to_string()
+    }
+
     /// When `useLidarrNamingSchema` is on, fetch Lidarr's naming config and
     /// override folder/file schemas with it (cached for 7 days). Falls back to
-    /// the plugin schemas when Lidarr is unreachable.
-    fn effective_config(cfg: &Config) -> Config {
+    /// the plugin schemas when Lidarr is unreachable. Tries docker host aliases
+    /// when the configured address is unreachable from the container.
+    pub(crate) fn effective_config(cfg: &Config) -> Config {
         if !cfg.use_lidarr_naming_schema {
             return cfg.clone();
         }
@@ -542,15 +1025,22 @@ mod wasm {
             log_warn("useLidarrNamingSchema is on but Lidarr URL/API key are not configured; using plugin schemas");
             return cfg.clone();
         }
-        let cache_key = format!("lidarr-naming:{}", cfg.lidarr_url.trim_end_matches('/'));
+        let configured_base = cfg.lidarr_url.trim_end_matches('/');
+        let cache_key = format!("lidarr-naming:{configured_base}");
         if let Ok(Some(json)) = state::host_state::get_cached_meta("lidarr-naming", &cache_key) {
             if let Some(eff) = apply_lidarr_naming(cfg, &json) {
                 return eff;
             }
         }
-        let url = format!("{}/api/v1/config/naming", cfg.lidarr_url.trim_end_matches('/'));
         let mut headers = HashMap::new();
         headers.insert("X-Api-Key".to_string(), cfg.lidarr_api_key.clone());
+        let base = resolve_url_base("lidarr", configured_base, "/api/v1/system/status", &headers);
+        if base != configured_base {
+            log_info(&format!(
+                "Lidarr reachable at {base} (container->host alias)"
+            ));
+        }
+        let url = format!("{base}/api/v1/config/naming");
         let req = host::http::HTTPRequest {
             method: "GET".into(),
             url,
@@ -567,7 +1057,10 @@ mod wasm {
                     return eff;
                 }
             }
-            Ok(Some(resp)) => log_warn(&format!("Lidarr /config/naming returned HTTP {}", resp.status_code)),
+            Ok(Some(resp)) => log_warn(&format!(
+                "Lidarr /config/naming returned HTTP {}",
+                resp.status_code
+            )),
             Ok(None) => log_warn("Lidarr /config/naming returned no response"),
             Err(e) => log_warn(&format!("Lidarr /config/naming request failed: {e}")),
         }
@@ -593,219 +1086,7 @@ mod wasm {
         Some(eff)
     }
 
-    /// Pass task: plan + report a small batch of albums. Re-checks idle (defer +
-    /// retry when playback starts), writes per-batch status, and in apply mode
-    /// enqueues the album apply tasks.
-    fn run_pass_batch(cfg: &Config, payload: &TaskPayload) -> Result<LibraryStatus, String> {
-        let eff = effective_config(cfg);
-        let cfg = &eff;
-        let library_id = payload.library_id;
-
-        if !is_idle(cfg) {
-            log_info("batch deferred: playback active; scheduling retry in 120s");
-            post_webhook(cfg, &format!(
-                "nd-organizer: batch {}/{} deferred - playback active.",
-                payload.batch_index + 1,
-                payload.batch_total.max(1)
-            ));
-            let _ = host::scheduler::schedule_one_time(120, "idle-retry", "");
-            return Ok(LibraryStatus {
-                library_id,
-                batch_index: payload.batch_index,
-                batch_total: payload.batch_total,
-                ..Default::default()
-            });
-        }
-
-        let lib = host::library::get_library(library_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("library {library_id} not found"))?;
-        let root = Path::new(&lib.mount_point);
-        if lib.mount_point.is_empty() {
-            return Err("library has no filesystem mount: grant the library permission and write access (navidrome plugin edit nd-organizer --write-access)".into());
-        }
-
-        let mut plans = Vec::new();
-        for dir in &payload.dirs {
-            let album = discover_albums_skip(&root.join(dir), cfg.skip_hidden_files, &cfg.exclude_paths, 1, 0)
-                .into_iter()
-                .next();
-            if let Some(album) = album {
-                plans.push(build_plan(&album, cfg, root));
-            }
-        }
-        let report = report::build_report(
-            mode_label(cfg),
-            &format!("{} (batch {}/{})", lib.name, payload.batch_index + 1, payload.batch_total.max(1)),
-            &plans,
-        );
-        save_report(&report, cfg.backup_retention_days as i64);
-        log_info(&report);
-        post_webhook(cfg, &report);
-
-        let status = LibraryStatus {
-            library_id,
-            name: lib.name,
-            albums_found: plans.len(),
-            albums_to_move: plans.iter().filter(|p| !p.moves.is_empty()).count(),
-            file_moves: plans.iter().map(|p| p.moves.len()).sum(),
-            kept: plans.iter().map(|p| p.keeps).sum(),
-            skipped: plans.iter().map(|p| p.skipped.len()).sum(),
-            batch_index: payload.batch_index,
-            batch_total: payload.batch_total,
-        };
-
-        store::write_status(&status_json(
-            cfg,
-            false,
-            std::slice::from_ref(&status),
-            Some((payload.batch_index, payload.batch_total)),
-        ));
-        log_info(&format!(
-            "STATUS: library={} mode={} batch={}/{} inProgress=false albumsToMove={} fileMoves={}",
-            library_id,
-            mode_label(cfg),
-            payload.batch_index + 1,
-            payload.batch_total.max(1),
-            status.albums_to_move,
-            status.file_moves
-        ));
-
-        if cfg.mode == Mode::Apply && !payload.dirs.is_empty() {
-            let run_id = state::host_state::new_run_id();
-            log_info(&format!("run {run_id}: enqueuing apply tasks for batch {} in library {library_id}", payload.batch_index + 1));
-            for dir in &payload.dirs {
-                if let Err(e) = enqueue("album", library_id, dir, &run_id) {
-                    log_warn(&format!("enqueue apply {}: {e}", dir));
-                }
-            }
-        }
-        Ok(status)
-    }
-
-    /// Task worker: apply one album's plan. Rebuilds the plan at execution time
-    /// so earlier tasks in the same pass are reflected.
-    fn apply_one_album(cfg: &Config, library_id: i32, dir: &str, run_id: &str) -> Result<(), String> {
-        let eff = effective_config(cfg);
-        let cfg = &eff;
-        let lib = host::library::get_library(library_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("library {library_id} not found"))?;
-        let root = Path::new(&lib.mount_point);
-        let album_path = root.join(dir);
-
-        let album = discover_albums_skip(&album_path, cfg.skip_hidden_files, &cfg.exclude_paths, 0, 0)
-            .into_iter()
-            .next();
-        let Some(album) = album else {
-            log_info(&format!("apply: folder {} no longer exists, skipping", dir));
-            return Ok(());
-        };
-
-        let plan = build_plan(&album, cfg, root);
-        if plan.moves.is_empty() && plan.skipped.is_empty() && !cfg.write_nfo {
-            log_info(&format!("apply: no changes for {}", dir));
-            return Ok(());
-        }
-        let count = plan.moves.len();
-        apply_plan(root, &plan, cfg.prune_empty_dirs)?;
-
-        // Write/update NFO, backing up the previous content first so it can be
-        // restored during a rollback (backups live in the KVStore).
-        let mut nfo_written = None;
-        let mut nfo_backup = None;
-        if cfg.write_nfo {
-            let nfo_path = root.join(&plan.target_dir).join("album.nfo");
-            if cfg.backup_before_write && nfo_path.exists() {
-                if let Ok(bytes) = std::fs::read(&nfo_path) {
-                    let seq = state::host_state::next_seq(run_id).unwrap_or(0);
-                    let key = state::backup_key(run_id, seq);
-                    if store::save_backup(&key, bytes).is_ok() {
-                        nfo_backup = Some(key);
-                    }
-                }
-            }
-            write_nfo_files(cfg, root, &plan);
-            nfo_written = Some(format!("{}/album.nfo", plan.target_dir));
-        }
-
-        // Record the apply so it can be audited and rolled back.
-        let mut rec = ApplyRecord {
-            seq: 0,
-            ts: state::now_ts(),
-            run_id: run_id.to_string(),
-            library_id,
-            from_dir: plan.current_dir.clone(),
-            to_dir: plan.target_dir.clone(),
-            file_renames: plan
-                .moves
-                .iter()
-                .map(|m| FileRename {
-                    from: file_name(&m.from).to_string(),
-                    to: file_name(&m.to).to_string(),
-                })
-                .collect(),
-            dir_sidecars: plan.dir_sidecars.clone(),
-            nfo_written,
-            nfo_backup,
-        };
-        if let Err(e) = state::host_state::record_apply(&mut rec) {
-            log_warn(&format!("record apply for {}: {e}", dir));
-        }
-        log_info(&format!(
-            "applied: {} ({} file moves, seq {})",
-            dir, count, rec.seq
-        ));
-        Ok(())
-    }
-
-    fn file_name(rel: &str) -> &str {
-        rel.rsplit('/').next().unwrap_or(rel)
-    }
-
-    /// Rewrite album.nfo / artist.nfo from the metadata gathered so far. Phase 2
-    /// feeds enriched (external) metadata into this same path.
-    fn write_nfo_files(cfg: &Config, root: &Path, plan: &super::organizer::AlbumPlan) {
-        let album_path = root.join(&plan.target_dir);
-        let Some(album) = discover_albums_skip(&album_path, cfg.skip_hidden_files, &cfg.exclude_paths, 0, 0).into_iter().next() else {
-            return;
-        };
-        let info = album_info_with_nfo(&album, cfg, root);
-        let genre = if info.genre.is_empty() {
-            vec![]
-        } else {
-            vec![info.genre.clone()]
-        };
-        let nfo_album = NfoAlbum {
-            title: info.album.clone(),
-            album_artists: if info.album_artist.is_empty() {
-                vec![]
-            } else {
-                vec![info.album_artist.clone()]
-            },
-            year: info.year,
-            genres: genre.clone(),
-            ..Default::default()
-        };
-        if let Err(e) = std::fs::write(album_path.join("album.nfo"), nfo::serialize_album(&nfo_album)) {
-            log_warn(&format!("write album.nfo: {e}"));
-        }
-        // In the normal per-artist layout the parent folder is the artist folder.
-        if plan.bucket == Bucket::Normal && !info.album_artist.is_empty() {
-            if let Some(parent) = album_path.parent() {
-                let nfo_artist = NfoArtist {
-                    name: info.album_artist.clone(),
-                    genres: genre,
-                    ..Default::default()
-                };
-                if let Err(e) = std::fs::write(parent.join("artist.nfo"), nfo::serialize_artist(&nfo_artist)) {
-                    log_warn(&format!("write artist.nfo: {e}"));
-                }
-            }
-        }
-    }
-
-    fn save_report(report: &str, retention_days: i64) {
+    pub(crate) fn save_report(report: &str, retention_days: i64) {
         store::write_report(report, retention_days);
     }
 
@@ -816,18 +1097,18 @@ mod wasm {
         store::append_log(level, msg);
     }
 
-    fn mode_label(cfg: &Config) -> &'static str {
+    pub(crate) fn mode_label(cfg: &Config) -> &'static str {
         match cfg.mode {
             Mode::DryRun => "dryRun",
             Mode::Apply => "apply",
         }
     }
 
-    fn log_info(msg: &str) {
+    pub(crate) fn log_info(msg: &str) {
         extism_pdk::log!(extism_pdk::LogLevel::Info, "{}", msg);
         file_log("INFO", msg);
     }
-    fn log_warn(msg: &str) {
+    pub(crate) fn log_warn(msg: &str) {
         extism_pdk::log!(extism_pdk::LogLevel::Warn, "{}", msg);
         file_log("WARN", msg);
     }
@@ -840,7 +1121,3 @@ mod wasm {
     register_scheduler_callback!(NdOrganizer);
     register_taskworker_task_execute!(NdOrganizer);
 }
-
-
-
-

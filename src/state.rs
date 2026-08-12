@@ -51,9 +51,20 @@ pub fn fnv1a64(s: &str) -> u64 {
     h
 }
 
+/// KVStore key for a scanned file's index entry. Hashed because deep library
+/// paths exceed the 256-byte KVStore key limit (the rel path is stored in the
+/// value instead).
+pub fn file_index_key(library_id: i32, rel: &str) -> String {
+    format!("scan.filev2.{library_id}:{:016x}", fnv1a64(rel))
+}
+
 /// Reverse one applied album: restore file names, restore the nfo content from
 /// its backup, then move the folder back to its original location.
-pub fn rollback_record(root: &Path, rec: &ApplyRecord, nfo_content: Option<Vec<u8>>) -> Result<(), String> {
+pub fn rollback_record(
+    root: &Path,
+    rec: &ApplyRecord,
+    nfo_content: Option<Vec<u8>>,
+) -> Result<(), String> {
     // 1. Rename files back (new -> old) inside the target dir.
     for fr in rec.file_renames.iter().rev() {
         if fr.from.eq_ignore_ascii_case(&fr.to) {
@@ -62,19 +73,18 @@ pub fn rollback_record(root: &Path, rec: &ApplyRecord, nfo_content: Option<Vec<u
         let to_path = root.join(&rec.to_dir).join(&fr.to);
         let from_path = root.join(&rec.to_dir).join(&fr.from);
         if to_path.exists() && !from_path.exists() {
-            std::fs::rename(&to_path, &from_path).map_err(|e| {
-                format!("restore file {} -> {}: {e}", fr.to, fr.from)
-            })?;
+            std::fs::rename(&to_path, &from_path)
+                .map_err(|e| format!("restore file {} -> {}: {e}", fr.to, fr.from))?;
         }
     }
     // 2. Restore the original nfo content.
     if let (Some(written), Some(content)) = (&rec.nfo_written, nfo_content) {
         let target = root.join(written);
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        std::fs::write(&target, content)
-            .map_err(|e| format!("restore nfo {written}: {e}"))?;
+        std::fs::write(&target, content).map_err(|e| format!("restore nfo {written}: {e}"))?;
     }
     // 3. Move the folder back.
     if !rec.from_dir.eq_ignore_ascii_case(&rec.to_dir) {
@@ -190,8 +200,12 @@ mod tests {
     use std::fs;
 
     fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("nd-organizer-state-{tag}-{}", std::process::id()));
-        let storage = std::env::temp_dir().join(format!("nd-organizer-state-store-{tag}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-state-{tag}-{}", std::process::id()));
+        let storage = std::env::temp_dir().join(format!(
+            "nd-organizer-state-store-{tag}-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&storage);
         fs::create_dir_all(root.join("Album")).unwrap();
@@ -208,7 +222,10 @@ mod tests {
             library_id: 1,
             from_dir: "Artist/Album".into(),
             to_dir: "Artist/Album (2020)".into(),
-            file_renames: vec![FileRename { from: "01 - Old.flac".into(), to: "01 - New.flac".into() }],
+            file_renames: vec![FileRename {
+                from: "01 - Old.flac".into(),
+                to: "01 - New.flac".into(),
+            }],
             dir_sidecars: vec!["album.nfo".into()],
             nfo_written: Some("Artist/Album (2020)/album.nfo".into()),
             nfo_backup: Some("backups/run-1-1-album.nfo".into()),
@@ -220,8 +237,25 @@ mod tests {
 
     #[test]
     fn fnv1a64_is_stable() {
-        assert_eq!(fnv1a64("musicbrainz|Pink Floyd|The Wall"), fnv1a64("musicbrainz|Pink Floyd|The Wall"));
+        assert_eq!(
+            fnv1a64("musicbrainz|Pink Floyd|The Wall"),
+            fnv1a64("musicbrainz|Pink Floyd|The Wall")
+        );
         assert_ne!(fnv1a64("a"), fnv1a64("b"));
+    }
+
+    #[test]
+    fn file_index_key_is_bounded_for_deep_paths() {
+        // 45k-file library with deep nesting -> rel paths over 256 bytes must
+        // never blow the KVStore key limit.
+        let deep = "very-long-folder-name/".repeat(30) + "song.flac";
+        assert!(deep.len() > 256);
+        let key = file_index_key(2, &deep);
+        assert!(key.len() < 256, "key too long: {} bytes", key.len());
+        // Deterministic: same path, same key; different path/library -> different key.
+        assert_eq!(file_index_key(2, &deep), file_index_key(2, &deep));
+        assert_ne!(file_index_key(2, &deep), file_index_key(2, "other.flac"));
+        assert_ne!(file_index_key(1, &deep), file_index_key(2, &deep));
     }
 
     #[test]
@@ -229,7 +263,11 @@ mod tests {
         let (root, storage) = fixture("rb");
         fs::write(root.join("Album/01 - Old.flac"), b"audio").unwrap();
         fs::write(root.join("Album/album.nfo"), b"<album>NEW</album>").unwrap();
-        fs::write(storage.join("backups/run-1-1-album.nfo"), b"<album>ORIGINAL</album>").unwrap();
+        fs::write(
+            storage.join("backups/run-1-1-album.nfo"),
+            b"<album>ORIGINAL</album>",
+        )
+        .unwrap();
 
         // Simulate: dir moved, file renamed, nfo rewritten.
         let rec = ApplyRecord {
@@ -239,7 +277,10 @@ mod tests {
             library_id: 1,
             from_dir: "Album".into(),
             to_dir: "Artist/Album (2020)".into(),
-            file_renames: vec![FileRename { from: "01 - Old.flac".into(), to: "01 - New.flac".into() }],
+            file_renames: vec![FileRename {
+                from: "01 - Old.flac".into(),
+                to: "01 - New.flac".into(),
+            }],
             dir_sidecars: vec!["album.nfo".into()],
             nfo_written: Some("Artist/Album (2020)/album.nfo".into()),
             nfo_backup: Some("backup:run-1:1".into()),
@@ -248,14 +289,27 @@ mod tests {
         // the old dir pruned (as apply_plan would do).
         fs::create_dir_all(root.join("Artist/Album (2020)")).unwrap();
         fs::write(root.join("Artist/Album (2020)/01 - New.flac"), b"audio").unwrap();
-        fs::write(root.join("Artist/Album (2020)/album.nfo"), b"<album>NEW</album>").unwrap();
+        fs::write(
+            root.join("Artist/Album (2020)/album.nfo"),
+            b"<album>NEW</album>",
+        )
+        .unwrap();
         fs::remove_dir_all(root.join("Album")).unwrap();
 
         rollback_record(&root, &rec, Some(b"<album>ORIGINAL</album>".to_vec())).unwrap();
 
-        assert!(root.join("Album/01 - Old.flac").exists(), "file renamed back");
-        assert_eq!(fs::read_to_string(root.join("Album/album.nfo")).unwrap(), "<album>ORIGINAL</album>");
-        assert!(!root.join("Artist/Album (2020)").exists(), "target dir moved back");
+        assert!(
+            root.join("Album/01 - Old.flac").exists(),
+            "file renamed back"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Album/album.nfo")).unwrap(),
+            "<album>ORIGINAL</album>"
+        );
+        assert!(
+            !root.join("Artist/Album (2020)").exists(),
+            "target dir moved back"
+        );
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&storage);
     }
@@ -270,7 +324,10 @@ mod tests {
             library_id: 1,
             from_dir: "Album".into(),
             to_dir: "Album (2020)".into(),
-            file_renames: vec![FileRename { from: "a.flac".into(), to: "b.flac".into() }],
+            file_renames: vec![FileRename {
+                from: "a.flac".into(),
+                to: "b.flac".into(),
+            }],
             dir_sidecars: vec![],
             nfo_written: None,
             nfo_backup: None,

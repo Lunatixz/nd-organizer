@@ -4,13 +4,15 @@
 // directories on the host. In the plugin the root is the library mount point
 // (e.g. `/libraries/1`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::nfo::{self, NfoAlbum, NfoArtist};
 use crate::tags::{read_tags, Recording, TrackTags};
-use crate::template::{render_file_name, render_folder_path, SanitizeOptions, TemplateFields};
+use crate::template::{
+    render_file_name, render_folder_path, sanitize_with, SanitizeOptions, TemplateFields,
+};
 
 pub const AUDIO_EXTS: &[&str] = &[
     "mp3", "flac", "m4a", "aac", "ogg", "oga", "opus", "wav", "wv", "aiff", "aif", "ape", "mpc",
@@ -19,10 +21,19 @@ const SIDECAR_EXTS: &[&str] = &["lrc", "jpg", "jpeg", "png", "nfo", "cue"];
 
 /// Album-level files that always move with the folder (not tied to a track stem).
 const DIR_SIDECARS: &[&str] = &[
-    "album.nfo", "artist.nfo",
-    "cover.jpg", "cover.png", "cover.jpeg",
-    "folder.jpg", "folder.png",
-    "front.jpg", "front.png", "back.jpg", "back.png", "cd.jpg", "cd.png",
+    "album.nfo",
+    "artist.nfo",
+    "cover.jpg",
+    "cover.png",
+    "cover.jpeg",
+    "folder.jpg",
+    "folder.png",
+    "front.jpg",
+    "front.png",
+    "back.jpg",
+    "back.png",
+    "cd.jpg",
+    "cd.png",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -136,7 +147,10 @@ pub fn discover_albums_skip(
             }
         }
         if !tracks.is_empty() {
-            albums.push(AlbumDir { dir: rel.clone(), tracks });
+            albums.push(AlbumDir {
+                dir: rel.clone(),
+                tracks,
+            });
         }
         for sub in subdirs {
             let sub_rel = if rel.is_empty() {
@@ -154,7 +168,7 @@ pub fn discover_albums_skip(
 /// True when a relative directory path is covered by an exclusion pattern.
 /// A pattern is either a directory prefix ("inbox", "Downloads") or a glob of
 /// the form "prefix/*"; both exclude the dir and everything beneath it.
-fn is_excluded(rel: &str, excludes: &[String]) -> bool {
+pub fn is_excluded(rel: &str, excludes: &[String]) -> bool {
     excludes.iter().any(|p| {
         let p = p.trim_end_matches('/');
         if let Some(prefix) = p.strip_suffix("/*") {
@@ -167,16 +181,12 @@ fn is_excluded(rel: &str, excludes: &[String]) -> bool {
 
 fn sanitize_opts(cfg: &Config) -> SanitizeOptions {
     SanitizeOptions {
-        illegal_char_replacement: cfg
-            .illegal_char_replacement
-            .chars()
-            .next()
-            .unwrap_or('_'),
+        illegal_char_replacement: cfg.illegal_char_replacement.chars().next().unwrap_or('_'),
         max_name_length: cfg.max_name_length.max(1),
     }
 }
 
-fn is_audio(name: &str) -> bool {
+pub fn is_audio(name: &str) -> bool {
     name.rsplit_once('.')
         .map(|(_, ext)| AUDIO_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
@@ -327,13 +337,15 @@ pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
     }
 
     let aa = info.album_artist.trim().to_ascii_lowercase();
-    let is_various = aa == "various" || aa == "various artists" || aa == "va"
+    let is_various = aa == "various"
+        || aa == "various artists"
+        || aa == "va"
         || (info.distinct_artists.len() > 1 && aa.is_empty());
     if is_various {
         return Bucket::Various;
     }
 
-    if info.track_count == 1 || info.track_count < cfg.incomplete_album_min_tracks {
+    if cfg.singles_enabled && (info.track_count == 1 || info.track_count < cfg.incomplete_album_min_tracks) {
         return Bucket::Singles;
     }
 
@@ -376,12 +388,21 @@ fn album_fields(info: &AlbumInfo, first_title: &str) -> TemplateFields {
 ///
 /// Live/bootleg albums get a " (Live)"/" (Bootleg)" suffix so they never
 /// collide with the studio release.
-pub fn target_album_dir(bucket: Bucket, info: &AlbumInfo, cfg: &Config, first_title: &str) -> String {
+pub fn target_album_dir(
+    bucket: Bucket,
+    info: &AlbumInfo,
+    cfg: &Config,
+    first_title: &str,
+) -> String {
     let fields = album_fields(info, first_title);
     let opts = sanitize_opts(cfg);
     let rendered = match bucket {
         Bucket::Soundtrack => {
-            let sub = render_folder_path(&format!("{}/{{album}} ({{year}})", cfg.soundtrack_folder), &fields, &opts);
+            let sub = render_folder_path(
+                &format!("{}/{{album}} ({{year}})", cfg.soundtrack_folder),
+                &fields,
+                &opts,
+            );
             if cfg.nest_buckets_under_various {
                 format!("{}/{}", cfg.various_folder, sub)
             } else {
@@ -440,15 +461,21 @@ fn parse_file_name(name: &str) -> (Option<u32>, String) {
     }
 }
 
-/// Build the full change plan for one album. Reads embedded tags on demand
-/// (discovery keeps them deferred so a full-library scan stays fast).
-pub fn build_plan(album: &AlbumDir, cfg: &Config, root: &Path) -> AlbumPlan {
-    let mut album = album.clone();
+/// Populate embedded tags for an album's tracks (no-op when already loaded).
+/// Discovery keeps tags deferred; call this before anything that needs them.
+pub fn load_tags(album: &mut AlbumDir, root: &Path) {
     for t in &mut album.tracks {
         if t.tags.is_none() {
             t.tags = read_tags(&root.join(&album.dir).join(&t.name));
         }
     }
+}
+
+/// Build the full change plan for one album. Reads embedded tags on demand
+/// (discovery keeps them deferred so a full-library scan stays fast).
+pub fn build_plan(album: &AlbumDir, cfg: &Config, root: &Path) -> AlbumPlan {
+    let mut album = album.clone();
+    load_tags(&mut album, root);
     let info = album_info_with_nfo(&album, cfg, root);
     let bucket = classify(&info, cfg);
     let first_title = album
@@ -501,7 +528,11 @@ pub fn build_plan(album: &AlbumDir, cfg: &Config, root: &Path) -> AlbumPlan {
             .as_ref()
             .map(|t| t.artist.clone())
             .unwrap_or_else(|| info.album_artist.clone());
-        let track_recording = track.tags.as_ref().map(|t| t.recording).unwrap_or(Recording::Studio);
+        let track_recording = track
+            .tags
+            .as_ref()
+            .map(|t| t.recording)
+            .unwrap_or(Recording::Studio);
 
         let fields = TemplateFields {
             track: tag_track.or(name_track),
@@ -513,7 +544,11 @@ pub fn build_plan(album: &AlbumDir, cfg: &Config, root: &Path) -> AlbumPlan {
             year: info.year,
             genre: info.genre.clone(),
             recording: track_recording.as_str().to_string(),
-            mbid: track.tags.as_ref().map(|t| t.mbid_recording.clone()).unwrap_or_default(),
+            mbid: track
+                .tags
+                .as_ref()
+                .map(|t| t.mbid_recording.clone())
+                .unwrap_or_default(),
         };
         let mut new_name = render_file_name(&cfg.file_schema, &fields, &sanitize_opts(cfg));
         // A live/bootleg track is a distinct recording: append "(Live)"/"(Bootleg)"
@@ -547,15 +582,30 @@ pub fn build_plan(album: &AlbumDir, cfg: &Config, root: &Path) -> AlbumPlan {
         let target_exists = !target_dir.is_empty() && root.join(&to).exists();
         let dup = !seen_targets.insert(to.clone().to_ascii_lowercase());
         if target_exists || dup {
-            plan.skipped.push((from.clone(), if dup { "duplicate target name".into() } else { "target file already exists".into() }));
+            plan.skipped.push((
+                from.clone(),
+                if dup {
+                    "duplicate target name".into()
+                } else {
+                    "target file already exists".into()
+                },
+            ));
             continue;
         }
 
         // Sidecar files that share the source stem.
-        let src_stem = track.name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&track.name);
+        let src_stem = track
+            .name
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(&track.name);
         let mut sidecars = Vec::new();
         if cfg.rename_sidecars {
-            for e in std::fs::read_dir(root.join(&album.dir)).into_iter().flatten().flatten() {
+            for e in std::fs::read_dir(root.join(&album.dir))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 let n = e.file_name().to_string_lossy().to_string();
                 if is_sidecar(&n) && n.starts_with(src_stem) {
                     sidecars.push(n);
@@ -573,6 +623,482 @@ fn join_rel(dir: &str, name: &str) -> String {
         name.to_string()
     } else {
         format!("{dir}/{name}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Grouped (virtual album) planning.
+//
+// A full-library scan reads every file's tags first; files are then grouped
+// into albums by their METADATA (MBID, or album_artist+album+year), not by
+// their folders. This lets scattered songs that share an album be recognized
+// as one album instead of a pile of "singles", and surfaces duplicates.
+// ---------------------------------------------------------------------------
+
+/// The metadata key that determines whether files belong to the same album.
+pub fn group_key(t: &TrackTags) -> String {
+    if !t.mbid_album.trim().is_empty() {
+        return format!("mb:{}", t.mbid_album.trim().to_ascii_lowercase());
+    }
+    let artist = t.album_artist.trim().to_ascii_lowercase();
+    let album = t.album.trim().to_ascii_lowercase();
+    if !artist.is_empty() && !album.is_empty() {
+        format!(
+            "a:{}|{}|{}",
+            artist,
+            album,
+            t.year.map(|y| y.to_string()).unwrap_or_default()
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// Group file paths into albums by their tags. Files with no album metadata
+/// fall back to their folder (so unrelated loose files stay separate).
+pub fn group_entries(entries: &[(String, TrackTags)]) -> Vec<Vec<String>> {
+    let mut by_key: HashMap<String, Vec<String>> = HashMap::new();
+    for (path, t) in entries {
+        let key = match group_key(t) {
+            k if !k.is_empty() => k,
+            _ => {
+                let folder = path
+                    .rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_default();
+                format!("f:{folder}")
+            }
+        };
+        by_key.entry(key).or_default().push(path.clone());
+    }
+    let mut groups: Vec<Vec<String>> = by_key.into_values().collect();
+    groups.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a[0].cmp(&b[0])));
+    groups
+}
+
+/// Aggregate album-level info from pre-read tags of a group of files.
+pub fn album_info_from_tags(files: &[(String, TrackTags)]) -> AlbumInfo {
+    let mut title = String::new();
+    let mut artist = String::new();
+    let mut year = None;
+    let mut genre = String::new();
+    let mut distinct_artists: Vec<String> = Vec::new();
+    let mut recordings: Vec<Recording> = Vec::new();
+    for (_, t) in files {
+        if title.is_empty() {
+            title = t.album.clone();
+        }
+        if artist.is_empty() {
+            artist = t.album_artist.clone();
+        }
+        if year.is_none() {
+            year = t.year;
+        }
+        if genre.is_empty() {
+            genre = t.genre.clone();
+        }
+        let ta = t.artist.trim();
+        if !ta.is_empty() && !distinct_artists.iter().any(|a| a.eq_ignore_ascii_case(ta)) {
+            distinct_artists.push(ta.to_string());
+        }
+        if !recordings.contains(&t.recording) {
+            recordings.push(t.recording);
+        }
+    }
+    let recording = match recordings.len() {
+        0 => Recording::Studio,
+        1 => recordings[0],
+        _ => Recording::Mixed,
+    };
+    AlbumInfo {
+        album: title,
+        album_artist: artist,
+        year,
+        genre,
+        track_count: files.len(),
+        distinct_artists,
+        recording,
+    }
+}
+
+/// A confirmed duplicate: same album, artist, title, track and file size.
+#[derive(Debug, Clone)]
+pub struct Duplicate {
+    pub winner: String,
+    pub loser: String,
+    /// Where the loser is moved (the artist's Singles folder, disambiguated).
+    pub target: String,
+}
+
+/// A plan for a group of files that belong to one album (possibly scattered
+/// across folders).
+#[derive(Debug, Clone, Default)]
+pub struct GroupPlan {
+    pub bucket: Bucket,
+    pub target_dir: String,
+    pub moves: Vec<FileMove>,
+    /// Confirmed duplicates within the album.
+    pub duplicates: Vec<Duplicate>,
+    /// Filler tracks (intro/outro/...) detected within the album. Reported only,
+    /// never moved - the Subsonic filter proxy drops them from playback.
+    pub fillers: Vec<String>,
+    /// Files skipped because their identity could not be verified.
+    pub unverified: Vec<String>,
+    pub kept: usize,
+    pub skipped: Vec<(String, String)>,
+}
+
+fn file_size(p: PathBuf) -> u64 {
+    std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+fn norm(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
+}
+
+/// True when a track title is "filler" (intro/outro/interlude/...). Whole-word
+/// match so "Interlude (Live)" or "The Intro" count, but "Introspection" does not.
+pub fn is_filler(title: &str, keywords: &[String]) -> bool {
+    let t = title.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return false;
+    }
+    keywords.iter().any(|k| {
+        let k = k.trim().to_ascii_lowercase();
+        if k.is_empty() {
+            return false;
+        }
+        t == k
+            || t.starts_with(&format!("{k} "))
+            || t.ends_with(&format!(" {k}"))
+            || t.contains(&format!(" {k} "))
+            || t.starts_with(&format!("{k}-"))
+            || t.starts_with(&format!("{k}:"))
+            || t.contains(&format!("({k})"))
+            || t.contains(&format!("[{k}]"))
+    })
+}
+
+/// Parse the comma-separated filler-keyword config.
+pub fn filler_keyword_list(cfg: &Config) -> Vec<String> {
+    cfg.filler_keywords
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Where a confirmed duplicate is moved: the artist's Singles folder, with the
+/// filename disambiguated (source album appended, then a counter) so it never
+/// overwrites existing singles.
+fn singles_target(
+    root: &Path,
+    cfg: &Config,
+    album_artist: &str,
+    album: &str,
+    loser_rel: &str,
+) -> String {
+    let artist_folder = if album_artist.trim().is_empty() {
+        cfg.various_folder.clone()
+    } else {
+        album_artist.trim().to_string()
+    };
+    let ext = loser_rel
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let stem = loser_rel.rsplit('/').next().unwrap_or(loser_rel);
+    let stem = stem.rsplit_once('.').map(|(s, _)| s).unwrap_or(stem);
+    let singles_dir = format!("{}/{}", artist_folder, cfg.singles_folder);
+    let opts = sanitize_opts(cfg);
+    let mut name = sanitize_with(stem, &opts);
+    let mut target = format!("{singles_dir}/{name}.{ext}");
+    if root.join(&target).exists() {
+        let info = if album.trim().is_empty() {
+            "another album".to_string()
+        } else {
+            album.trim().to_string()
+        };
+        name = sanitize_with(&format!("{name} (from {info})"), &opts);
+        target = format!("{singles_dir}/{name}.{ext}");
+    }
+    let mut n = 2;
+    while root.join(&target).exists() {
+        target = format!("{singles_dir}/{name}-{n}.{ext}");
+        n += 1;
+    }
+    target
+}
+
+/// Build a change plan for a whole album group. `folder_hint` names the album
+/// when it has no metadata at all.
+pub fn build_group_plan(
+    root: &Path,
+    cfg: &Config,
+    files: &[(String, TrackTags)],
+    folder_hint: &str,
+) -> GroupPlan {
+    let mut info = album_info_from_tags(files);
+    if info.album.is_empty() {
+        info.album = folder_hint.to_string();
+    }
+    if info.album_artist.is_empty() && info.distinct_artists.len() == 1 {
+        info.album_artist = info.distinct_artists[0].clone();
+    }
+    let bucket = classify(&info, cfg);
+    let first_title = files
+        .first()
+        .map(|(_, t)| t.title.clone())
+        .unwrap_or_default();
+    let target_dir = target_album_dir(bucket, &info, cfg, &first_title);
+    let opts = sanitize_opts(cfg);
+    let mut plan = GroupPlan {
+        bucket,
+        target_dir: target_dir.clone(),
+        ..Default::default()
+    };
+
+    // Target file names.
+    let filler_kws = filler_keyword_list(cfg);
+    let mut targets: Vec<String> = Vec::with_capacity(files.len());
+    let mut fillers: Vec<bool> = Vec::with_capacity(files.len());
+    for (relpath, t) in files {
+        let fields = TemplateFields {
+            track: t.track,
+            disc: t.disc,
+            title: if t.title.is_empty() {
+                parse_file_name(relpath).1
+            } else {
+                t.title.clone()
+            },
+            artist: if t.artist.is_empty() {
+                t.album_artist.clone()
+            } else {
+                t.artist.clone()
+            },
+            album_artist: info.album_artist.clone(),
+            album: info.album.clone(),
+            year: info.year,
+            genre: info.genre.clone(),
+            recording: t.recording.as_str().to_string(),
+            mbid: t.mbid_recording.clone(),
+        };
+        let mut name = render_file_name(&cfg.file_schema, &fields, &opts);
+        if cfg.preserve_recording_type
+            && matches!(t.recording, Recording::Live | Recording::Bootleg)
+            && !name
+                .to_ascii_lowercase()
+                .contains(&t.recording.as_str().to_ascii_lowercase())
+        {
+            name = format!("{name} ({})", t.recording.as_str());
+        }
+        let ext = relpath
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        targets.push(format!("{name}.{ext}"));
+        let title_for_filler = if t.title.trim().is_empty() {
+            parse_file_name(relpath).1
+        } else {
+            t.title.clone()
+        };
+        fillers.push(is_filler(&title_for_filler, &filler_kws));
+    }
+
+    // Duplicate detection: only files that match on album, album artist, title
+    // AND track number are candidates (the "same version of the song"). They
+    // must also be identical in size (the "100% same file") to be confirmed.
+    // Confirmed duplicates are temp-moved to the artist's Singles folder.
+    let mut dup_groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, (_, t)) in files.iter().enumerate() {
+        if t.track.is_none() || t.title.trim().is_empty() {
+            continue;
+        }
+        let key = format!(
+            "t:{}|{}|{}|{}",
+            norm(&t.album_artist),
+            norm(&t.album),
+            norm(&t.title),
+            t.track.unwrap()
+        );
+        dup_groups.entry(key).or_default().push(i);
+    }
+    let mut skip: HashSet<usize> = HashSet::new();
+    for (_, idxs) in dup_groups {
+        if idxs.len() < 2 {
+            continue;
+        }
+        // Confirm identical content by file size; different sizes = different
+        // quality/version, so keep both.
+        let s0 = file_size(root.join(&files[idxs[0]].0));
+        if !idxs
+            .iter()
+            .all(|&i| file_size(root.join(&files[i].0)) == s0)
+        {
+            continue;
+        }
+        let winner = idxs[0];
+        for &i in &idxs[1..] {
+            skip.insert(i);
+            let loser_rel = files[i].0.clone();
+            let target = singles_target(
+                root,
+                cfg,
+                &files[i].1.album_artist,
+                &files[i].1.album,
+                &loser_rel,
+            );
+            plan.duplicates.push(Duplicate {
+                winner: files[winner].0.clone(),
+                loser: loser_rel,
+                target,
+            });
+        }
+    }
+
+    // Build moves for the winners.
+    let mut seen_targets: HashSet<String> = HashSet::new();
+    for (i, (relpath, t)) in files.iter().enumerate() {
+        if skip.contains(&i) {
+            continue;
+        }
+        let from = relpath.clone();
+        if fillers[i] {
+            plan.fillers.push(from.clone());
+        }
+        let to = format!("{target_dir}/{}", targets[i]);
+        if from.eq_ignore_ascii_case(&to) {
+            plan.kept += 1;
+            continue;
+        }
+        let exists = root.join(&to).exists();
+        let dup = !seen_targets.insert(to.to_ascii_lowercase());
+        if exists || dup {
+            plan.skipped.push((
+                from,
+                if dup {
+                    "duplicate target name".into()
+                } else {
+                    "target file already exists".into()
+                },
+            ));
+            continue;
+        }
+        let mut sidecars = Vec::new();
+        if cfg.rename_sidecars {
+            if let Some(dir) = root.join(&from).parent() {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    let stem = from
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&from)
+                        .rsplit_once('.')
+                        .map(|(s, _)| s)
+                        .unwrap_or(&from);
+                    for e in entries.flatten() {
+                        let n = e.file_name().to_string_lossy().to_string();
+                        if is_sidecar(&n) && n.starts_with(stem) {
+                            sidecars.push(n);
+                        }
+                    }
+                }
+            }
+        }
+        let _ = t;
+        plan.moves.push(FileMove { from, to, sidecars });
+    }
+    plan
+}
+
+/// Apply a group plan: move files + sidecars into the album target dir,
+/// handle duplicates per policy, prune now-empty source dirs.
+pub fn apply_group_plan(root: &Path, plan: &GroupPlan, prune: bool) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for m in &plan.moves {
+        let to_path = root.join(&m.to);
+        if let Some(parent) = to_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                errors.push(format!("mkdir {}: {e}", parent.display()));
+                continue;
+            }
+        }
+        let from_path = root.join(&m.from);
+        if let Err(e) = std::fs::rename(&from_path, &to_path) {
+            errors.push(format!("move {} -> {}: {e}", m.from, m.to));
+            continue;
+        }
+        // Move sidecars into the target dir alongside the new file.
+        if let Some(src_dir) = from_path.parent() {
+            if let Some(dst_dir) = to_path.parent() {
+                for sc in &m.sidecars {
+                    let _ = std::fs::rename(src_dir.join(sc), dst_dir.join(sc));
+                }
+            }
+        }
+    }
+    // Duplicates: move the loser to the artist's Singles folder (filename is
+    // disambiguated so it never overwrites existing singles).
+    for dup in &plan.duplicates {
+        let loser_path = root.join(&dup.loser);
+        if !loser_path.exists() {
+            continue;
+        }
+        let target_path = root.join(&dup.target);
+        if let Some(parent) = target_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                errors.push(format!("mkdir {}: {e}", parent.display()));
+                continue;
+            }
+        }
+        if let Err(e) = std::fs::rename(&loser_path, &target_path) {
+            errors.push(format!(
+                "move duplicate {} -> {}: {e}",
+                dup.loser, dup.target
+            ));
+        }
+    }
+    if prune {
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        for m in &plan.moves {
+            if let Some(dir) = root.join(&m.from).parent() {
+                if seen.insert(dir.to_path_buf()) {
+                    prune_empty_dirs_abs(dir);
+                }
+            }
+        }
+        for dup in &plan.duplicates {
+            if let Some(dir) = root.join(&dup.loser).parent() {
+                if seen.insert(dir.to_path_buf()) {
+                    prune_empty_dirs_abs(dir);
+                }
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Remove an empty directory and its empty ancestors (absolute path version).
+fn prune_empty_dirs_abs(dir: &Path) {
+    let mut cur = dir.to_path_buf();
+    loop {
+        if !cur.is_dir() {
+            break;
+        }
+        let Ok(mut rd) = std::fs::read_dir(&cur) else {
+            break;
+        };
+        if rd.next().is_some() {
+            break;
+        }
+        let _ = std::fs::remove_dir(&cur);
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => break,
+        }
     }
 }
 
@@ -634,7 +1160,9 @@ fn prune_empty_dirs(root: &Path, rel: &str) {
         if !cur.is_dir() {
             break;
         }
-        let Ok(mut rd) = std::fs::read_dir(&cur) else { break };
+        let Ok(mut rd) = std::fs::read_dir(&cur) else {
+            break;
+        };
         if rd.next().is_some() {
             break; // not empty
         }
@@ -665,7 +1193,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nd-organizer-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         for (album, files) in [
-            ("Artist A/Album One", &["01 - Dream On.flac", "02 - Walk This Way.mp3"] as &[&str]),
+            (
+                "Artist A/Album One",
+                &["01 - Dream On.flac", "02 - Walk This Way.mp3"] as &[&str],
+            ),
             ("Various Artists/Greatest Hits", &["01 - Hit One.flac"]),
             ("OST Sample/Original Soundtrack", &["01 - Theme.flac"]),
             ("Lone Singer/Single Song", &["01 - Only One.flac"]),
@@ -700,29 +1231,75 @@ mod tests {
             year: None,
             genre: genre.into(),
             track_count: tracks,
-            distinct_artists: if multi { vec!["A".into(), "B".into()] } else { vec![] },
+            distinct_artists: if multi {
+                vec!["A".into(), "B".into()]
+            } else {
+                vec![]
+            },
             recording: Recording::Studio,
         };
 
-        assert_eq!(classify(&info("OST", "X", "Soundtrack", 12, false), &c), Bucket::Soundtrack);
-        assert_eq!(classify(&info("Album", "X", "OST", 12, false), &c), Bucket::Soundtrack);
-        assert_eq!(classify(&info("Greatest", "Various Artists", "", 20, false), &c), Bucket::Various);
-        assert_eq!(classify(&info("Comp", "Various", "Rock", 14, false), &c), Bucket::Various);
-        assert_eq!(classify(&info("Multi", "", "Rock", 10, true), &c), Bucket::Various);
-        assert_eq!(classify(&info("Solo", "X", "Rock", 1, false), &c), Bucket::Singles);
-        assert_eq!(classify(&info("Partial", "X", "Rock", 2, false), &c), Bucket::Singles);
-        assert_eq!(classify(&info("Real", "X", "Rock", 12, false), &c), Bucket::Normal);
+        assert_eq!(
+            classify(&info("OST", "X", "Soundtrack", 12, false), &c),
+            Bucket::Soundtrack
+        );
+        assert_eq!(
+            classify(&info("Album", "X", "OST", 12, false), &c),
+            Bucket::Soundtrack
+        );
+        assert_eq!(
+            classify(&info("Greatest", "Various Artists", "", 20, false), &c),
+            Bucket::Various
+        );
+        assert_eq!(
+            classify(&info("Comp", "Various", "Rock", 14, false), &c),
+            Bucket::Various
+        );
+        assert_eq!(
+            classify(&info("Multi", "", "Rock", 10, true), &c),
+            Bucket::Various
+        );
+        assert_eq!(
+            classify(&info("Solo", "X", "Rock", 1, false), &c),
+            Bucket::Singles
+        );
+        assert_eq!(
+            classify(&info("Partial", "X", "Rock", 2, false), &c),
+            Bucket::Singles
+        );
+        assert_eq!(
+            classify(&info("Real", "X", "Rock", 12, false), &c),
+            Bucket::Normal
+        );
         // Incomplete-album threshold is configurable.
         let mut c2 = cfg();
         c2.incomplete_album_min_tracks = 5;
-        assert_eq!(classify(&info("Partial", "X", "Rock", 4, false), &c2), Bucket::Singles);
+        assert_eq!(
+            classify(&info("Partial", "X", "Rock", 4, false), &c2),
+            Bucket::Singles
+        );
+        // Singles routing can be turned off entirely: singles/incomplete albums
+        // stay as normal albums in their own folder.
+        let mut c3 = cfg();
+        c3.singles_enabled = false;
+        assert_eq!(
+            classify(&info("Solo", "X", "Rock", 1, false), &c3),
+            Bucket::Normal
+        );
+        assert_eq!(
+            classify(&info("Partial", "X", "Rock", 2, false), &c3),
+            Bucket::Normal
+        );
     }
 
     #[test]
     fn album_info_falls_back_to_folder_names() {
         let root = fixture("info");
         let albums = discover_albums(&root);
-        let one = albums.iter().find(|a| a.dir.ends_with("Album One")).unwrap();
+        let one = albums
+            .iter()
+            .find(|a| a.dir.ends_with("Album One"))
+            .unwrap();
         let info = album_info(one);
         assert_eq!(info.album, "Album One"); // folder name fallback
         assert_eq!(info.track_count, 2);
@@ -763,7 +1340,10 @@ mod tests {
             distinct_artists: vec![],
             recording: Recording::Studio,
         };
-        assert_eq!(target_album_dir(Bucket::Singles, &info, &c, "Crazy"), "Beyonce/Singles/Crazy");
+        assert_eq!(
+            target_album_dir(Bucket::Singles, &info, &c, "Crazy"),
+            "Beyonce/Singles/Crazy"
+        );
         // Unknown artist falls back to the various-artist singles area.
         let mut anon = info.clone();
         anon.album_artist = String::new();
@@ -790,13 +1370,26 @@ mod tests {
     fn soundtrack_nesting_respects_config() {
         let root = fixture("nested");
         let albums = discover_albums(&root);
-        let soundtrack = albums.iter().find(|a| a.dir.contains("Soundtrack")).unwrap();
+        let soundtrack = albums
+            .iter()
+            .find(|a| a.dir.contains("Soundtrack"))
+            .unwrap();
         let mut c = cfg();
-        assert!(target_album_dir(Bucket::Soundtrack, &album_info_with_nfo(soundtrack, &c, &root), &c, "Theme")
-            .starts_with(&format!("{}/{}", c.various_folder, c.soundtrack_folder)));
+        assert!(target_album_dir(
+            Bucket::Soundtrack,
+            &album_info_with_nfo(soundtrack, &c, &root),
+            &c,
+            "Theme"
+        )
+        .starts_with(&format!("{}/{}", c.various_folder, c.soundtrack_folder)));
         c.nest_buckets_under_various = false;
-        assert!(target_album_dir(Bucket::Soundtrack, &album_info_with_nfo(soundtrack, &c, &root), &c, "Theme")
-            .starts_with(&c.soundtrack_folder));
+        assert!(target_album_dir(
+            Bucket::Soundtrack,
+            &album_info_with_nfo(soundtrack, &c, &root),
+            &c,
+            "Theme"
+        )
+        .starts_with(&c.soundtrack_folder));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -867,7 +1460,8 @@ mod tests {
 
     #[test]
     fn render_sidecar_moves_only_matching_stem() {
-        let root = std::env::temp_dir().join(format!("nd-organizer-sidecar-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-sidecar-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("Album")).unwrap();
         fs::write(root.join("Album/01 - Song.flac"), b"x").unwrap();
@@ -906,7 +1500,8 @@ mod tests {
 
     #[test]
     fn prune_can_be_disabled() {
-        let root = std::env::temp_dir().join(format!("nd-organizer-noprune-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-noprune-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("Some Artist/Some Album")).unwrap();
         fs::write(root.join("Some Artist/Some Album/01 - Song.flac"), b"x").unwrap();
@@ -915,9 +1510,206 @@ mod tests {
         assert!(!plan.moves.is_empty());
         apply_plan(&root, &plan, false).unwrap();
         // Files moved but the now-empty source folder is left in place.
-        assert!(root.join(&plan.target_dir).join(plan.moves[0].to.rsplit('/').next().unwrap()).exists());
+        assert!(root
+            .join(&plan.target_dir)
+            .join(plan.moves[0].to.rsplit('/').next().unwrap())
+            .exists());
         assert!(root.join("Some Artist/Some Album").exists());
         let _ = fs::remove_dir_all(&root);
     }
-}
 
+    #[test]
+    fn filler_detection_whole_words_only() {
+        let kws = vec![
+            "intro".to_string(),
+            "outro".to_string(),
+            "interlude".to_string(),
+        ];
+        assert!(is_filler("Intro", &kws));
+        assert!(is_filler("Interlude (Live)", &kws));
+        assert!(is_filler("The Outro", &kws));
+        assert!(is_filler("1. Interlude", &kws));
+        assert!(!is_filler("Introspection", &kws));
+        assert!(!is_filler("Main Song", &kws));
+        assert!(!is_filler("", &kws));
+    }
+
+    #[test]
+    fn filler_tracks_are_reported_but_not_moved() {
+        use crate::tags::TrackTags;
+        let root = std::env::temp_dir().join(format!("nd-organizer-filler-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Album")).unwrap();
+        fs::write(root.join("Album/01 - Intro.flac"), b"x").unwrap();
+        fs::write(root.join("Album/02 - Real Song.flac"), b"x").unwrap();
+        let t1 = TrackTags {
+            album_artist: "Artist".into(),
+            album: "Album".into(),
+            title: "Intro".into(),
+            track: Some(1),
+            ..Default::default()
+        };
+        let mut t2 = t1.clone();
+        t2.title = "Real Song".into();
+        t2.track = Some(2);
+        let files = vec![
+            ("Album/01 - Intro.flac".to_string(), t1),
+            ("Album/02 - Real Song.flac".to_string(), t2),
+        ];
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album");
+        assert_eq!(plan.fillers.len(), 1);
+        assert!(plan.fillers[0].contains("01 - Intro.flac"));
+        // Albums stay whole: no subfolder routing, every file moves to album root.
+        assert!(plan.moves.iter().all(|m| !m.to.contains("_filler")));
+        assert!(plan
+            .moves
+            .iter()
+            .any(|m| m.to.ends_with("02 - Real Song.flac")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn groups_scattered_files_by_album_metadata() {
+        use crate::tags::TrackTags;
+        let t = |artist: &str, album: &str, track: u32| TrackTags {
+            album_artist: artist.into(),
+            album: album.into(),
+            artist: artist.into(),
+            track: Some(track),
+            ..Default::default()
+        };
+        let entries = vec![
+            (
+                "Scattered/A/01 - Song.flac".to_string(),
+                t("Artist X", "Great Album", 1),
+            ),
+            (
+                "Elsewhere/B/02 - Song.flac".to_string(),
+                t("Artist X", "Great Album", 2),
+            ),
+            (
+                "Scattered/A/01 - Solo.flac".to_string(),
+                t("Artist Y", "Solo EP", 1),
+            ),
+            ("NOMETA/song.flac".to_string(), TrackTags::default()),
+        ];
+        let groups = group_entries(&entries);
+        // The two scattered files with identical album metadata group together.
+        assert!(groups.iter().any(|g| g.len() == 2
+            && g.contains(&"Scattered/A/01 - Song.flac".to_string())
+            && g.contains(&"Elsewhere/B/02 - Song.flac".to_string())));
+        // No-metadata file falls back to its folder group.
+        assert!(groups
+            .iter()
+            .any(|g| g.len() == 1 && g[0] == "NOMETA/song.flac"));
+    }
+
+    #[test]
+    fn group_plan_detects_duplicates_by_track_number() {
+        use crate::tags::TrackTags;
+        let root = std::env::temp_dir().join(format!("nd-organizer-dupe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("A")).unwrap();
+        fs::create_dir_all(root.join("B")).unwrap();
+        // Same track 3, same album, two IDENTICAL-size files (100% same content).
+        fs::write(root.join("A/03 - Song.flac"), b"same-bytes-here").unwrap();
+        fs::write(root.join("B/03 - Song.flac"), b"same-bytes-here").unwrap();
+        let t1 = TrackTags {
+            album_artist: "X".into(),
+            album: "Album".into(),
+            title: "Song".into(),
+            track: Some(3),
+            ..Default::default()
+        };
+        let files = vec![
+            ("A/03 - Song.flac".to_string(), t1.clone()),
+            ("B/03 - Song.flac".to_string(), t1),
+        ];
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album");
+        assert_eq!(plan.duplicates.len(), 1, "one duplicate pair");
+        // Winner is the first file; the loser routes to the artist's Singles folder.
+        assert_eq!(plan.duplicates[0].winner, "A/03 - Song.flac");
+        assert_eq!(plan.duplicates[0].loser, "B/03 - Song.flac");
+        assert!(
+            plan.duplicates[0].target.starts_with("X/Singles/"),
+            "target: {}",
+            plan.duplicates[0].target
+        );
+        // Only the winner is moved into the album.
+        assert_eq!(plan.moves.len(), 1);
+        assert_eq!(plan.moves[0].from, "A/03 - Song.flac");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn different_sizes_are_not_confirmed_duplicates() {
+        use crate::tags::TrackTags;
+        let root = std::env::temp_dir().join(format!("nd-organizer-ndupe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("A")).unwrap();
+        fs::create_dir_all(root.join("B")).unwrap();
+        // Same track, same album, but DIFFERENT sizes (e.g. different quality).
+        fs::write(root.join("A/03 - Song.flac"), b"small").unwrap();
+        fs::write(root.join("B/03 - Song.flac"), b"large-bytes-here").unwrap();
+        let t1 = TrackTags {
+            album_artist: "X".into(),
+            album: "Album".into(),
+            title: "Song".into(),
+            track: Some(3),
+            ..Default::default()
+        };
+        let files = vec![
+            ("A/03 - Song.flac".to_string(), t1.clone()),
+            ("B/03 - Song.flac".to_string(), t1),
+        ];
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album");
+        assert!(
+            plan.duplicates.is_empty(),
+            "not 100% same -> not a confirmed duplicate"
+        );
+        // They still share a target filename, so one moves and the other is
+        // reported as a name collision (not silently overwritten).
+        assert_eq!(plan.moves.len(), 1);
+        assert_eq!(plan.skipped.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn group_plan_moves_all_files_to_one_target() {
+        use crate::tags::TrackTags;
+        let root = std::env::temp_dir().join(format!("nd-organizer-gmove-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("One")).unwrap();
+        fs::create_dir_all(root.join("Two")).unwrap();
+        fs::write(root.join("One/1.flac"), b"x").unwrap();
+        fs::write(root.join("Two/2.flac"), b"x").unwrap();
+        let tags = TrackTags {
+            album_artist: "Artist".into(),
+            album: "Album".into(),
+            track: Some(1),
+            ..Default::default()
+        };
+        let mut tags2 = tags.clone();
+        tags2.track = Some(2);
+        let files = vec![
+            ("One/1.flac".to_string(), tags),
+            ("Two/2.flac".to_string(), tags2),
+        ];
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album");
+        assert_eq!(plan.moves.len(), 2);
+        // Both land in the same target album dir.
+        assert!(plan
+            .moves
+            .iter()
+            .all(|m| m.to.starts_with(&plan.target_dir)));
+        apply_group_plan(&root, &plan, true).unwrap();
+        let target = root.join(&plan.target_dir);
+        let files_after = std::fs::read_dir(&target)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .count();
+        assert_eq!(files_after, 2, "both files moved into the target dir");
+        let _ = fs::remove_dir_all(&root);
+    }
+}

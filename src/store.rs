@@ -56,7 +56,10 @@ fn prune_reports(retention_days: i64) {
     let cutoff = crate::state::now_ts() - retention_days * 86_400;
     if let Ok(keys) = host::kvstore::list("report:") {
         for key in keys {
-            let Some(ts) = key.strip_prefix("report:").and_then(|s| s.parse::<i64>().ok()) else {
+            let Some(ts) = key
+                .strip_prefix("report:")
+                .and_then(|s| s.parse::<i64>().ok())
+            else {
                 continue;
             };
             if ts < cutoff {
@@ -88,7 +91,11 @@ pub fn append_log(level: &str, msg: &str) {
     if let Some(dir) = storage_dir() {
         use std::io::Write;
         let path = dir.join("nd-organizer.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "[{}] [{}] {}", crate::state::now_ts(), level, msg);
         }
     }
