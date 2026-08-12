@@ -1,0 +1,29 @@
+# nd-organizer Subsonic filtering proxy.
+#
+# Sits in front of Navidrome: point Symfonium (or any Subsonic client) at THIS
+# service instead of Navidrome. It forwards every request to Navidrome and
+# filters JSON song lists before returning them (ignores filler-keyword tracks
+# from the queue, removes net-negative skip-heavy tracks, re-sorts by weight).
+# Credentials pass through unchanged - use your normal Navidrome user/password.
+#
+# Usage:
+#   docker compose -f filter/docker-compose.yml up -d
+# (pulls the image from GHCR - no build needed)
+# In Symfonium add a Subsonic/OpenSubsonic server: http://<your-nas>:4534/rest/
+
+services:
+  nd-organizer-filter:
+    image: ghcr.io/lunatixz/nd-organizer/filter:latest
+    container_name: nd-organizer-filter
+    restart: unless-stopped
+    ports:
+      - "4534:4534"
+    environment:
+      - NAVIDROME_URL=http://navidrome:4533
+      # - FILTER_KEYWORDS=intro,outro,interlude
+    networks:
+      - stack_network
+
+networks:
+  stack_network:
+    external: true

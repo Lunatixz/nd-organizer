@@ -59,7 +59,11 @@ pub fn read_artist_nfo(dir: &Path) -> Option<NfoArtist> {
 }
 
 fn parse_year(value: &str) -> Option<u32> {
-    let digits: String = value.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
+    let digits: String = value
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(4)
+        .collect();
     digits.parse().ok()
 }
 
@@ -158,7 +162,8 @@ fn esc(s: &str) -> String {
 
 /// Serialize an album NFO (Kodi-style).
 pub fn serialize_album(nfo: &NfoAlbum) -> String {
-    let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n<album>\n");
+    let mut out =
+        String::from("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n<album>\n");
     if !nfo.title.is_empty() {
         out.push_str(&format!("  <title>{}</title>\n", esc(&nfo.title)));
     }
@@ -184,7 +189,10 @@ pub fn serialize_album(nfo: &NfoAlbum) -> String {
         out.push_str(&format!("  <mbid>{}</mbid>\n", esc(&nfo.mbid)));
     }
     if !nfo.releasedate.is_empty() {
-        out.push_str(&format!("  <releasedate>{}</releasedate>\n", esc(&nfo.releasedate)));
+        out.push_str(&format!(
+            "  <releasedate>{}</releasedate>\n",
+            esc(&nfo.releasedate)
+        ));
     }
     out.push_str("</album>\n");
     out
@@ -192,7 +200,8 @@ pub fn serialize_album(nfo: &NfoAlbum) -> String {
 
 /// Serialize an artist NFO (Kodi-style).
 pub fn serialize_artist(nfo: &NfoArtist) -> String {
-    let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n<artist>\n");
+    let mut out =
+        String::from("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n<artist>\n");
     if !nfo.name.is_empty() {
         out.push_str(&format!("  <name>{}</name>\n", esc(&nfo.name)));
     }
@@ -209,7 +218,10 @@ pub fn serialize_artist(nfo: &NfoArtist) -> String {
         out.push_str(&format!("  <mbid>{}</mbid>\n", esc(&nfo.mbid)));
     }
     if !nfo.biography.is_empty() {
-        out.push_str(&format!("  <biography>{}</biography>\n", esc(&nfo.biography)));
+        out.push_str(&format!(
+            "  <biography>{}</biography>\n",
+            esc(&nfo.biography)
+        ));
     }
     out.push_str("</artist>\n");
     out
@@ -281,4 +293,3 @@ mod tests {
         assert_eq!(reparsed.year, Some(1999));
     }
 }
-

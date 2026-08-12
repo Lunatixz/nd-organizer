@@ -51,8 +51,27 @@ pub struct Config {
     pub max_scan_entries: usize,
     /// Albums processed per background task (small batches keep the plugin lean).
     pub albums_per_task: usize,
+    /// Files scanned (tags read) per scan task chunk.
+    pub files_per_scan_task: usize,
     /// Only run when nothing is playing (player resources come first).
     pub run_only_when_idle: bool,
+
+    // Favorites sync (Navidrome hub <-> Last.fm loved tracks)
+    pub favorites_sync_enabled: bool,
+    pub favorites_sync_lastfm: bool,
+    pub favorites_sync_max: usize,
+
+    // Playback stats (plays/skips weighting + Top Picks playlist)
+    pub playback_stats_enabled: bool,
+    pub stats_poll_minutes: i32,
+    pub top_picks_count: usize,
+    pub skip_threshold_percent: i32,
+    /// Publish frequently-skipped track IDs to the Subsonic filter proxy so
+    /// they are excluded from client playback. No files are moved.
+    pub skip_ignore_enabled: bool,
+    pub skip_ignore_ratio: f64,
+    /// Base URL of the Subsonic filter proxy (e.g. http://nd-organizer-filter:4534).
+    pub filter_url: String,
     /// When set, the next run pass rolls back that run's changes instead of
     /// organizing. Empty disables rollback.
     pub rollback_run_id: String,
@@ -61,6 +80,17 @@ pub struct Config {
     pub log_webhook_url: String,
     /// Optional token sent as X-Token (and Authorization: Bearer) header.
     pub log_webhook_token: String,
+
+    // Persistence backend. "host" = Navidrome-managed SQLite KVStore (default).
+    // "mysql" = the plugin's KVStore state lives in the user's MySQL/MariaDB via
+    // the mysql sidecar (persistenceUrl), with the connection details below.
+    pub persistence_backend: String,
+    pub persistence_url: String,
+    pub mysql_host: String,
+    pub mysql_port: u16,
+    pub mysql_name: String,
+    pub mysql_user: String,
+    pub mysql_password: String,
 
     // Classification
     pub soundtrack_folder: String,
@@ -86,6 +116,12 @@ pub struct Config {
     pub skip_hidden_files: bool,
     pub preserve_recording_type: bool,
     pub singles_under_artist: bool,
+    /// Route single-track and incomplete albums to the Singles folder. Off =
+    /// they stay as normal albums in their own folder.
+    pub singles_enabled: bool,
+    /// Comma-separated keywords that mark a track as filler (intro/outro/...).
+    /// Used to report filler tracks; the filter proxy drops them by title.
+    pub filler_keywords: String,
     /// Path prefixes/globs under the library root that must never be touched.
     pub exclude_paths: Vec<String>,
     /// Snapshot previous tags (and original .nfo) to plugin storage before any
@@ -100,12 +136,18 @@ pub struct Config {
     pub skip_unverified: bool,
     pub acoustid_mode: AcoustIdMode,
     pub acoustid_api_key: String,
+    /// URL of the AcoustID fingerprint sidecar (Docker), e.g. http://acoustid:8097
+    pub acoustid_url: String,
 
     // Metadata sources
     pub primary_source: PrimarySource,
     pub musicbrainz_token: String,
     pub lastfm_api_key: String,
     pub lastfm_user: String,
+    /// Last.fm API secret (write methods need an api_sig).
+    pub lastfm_api_secret: String,
+    /// Last.fm account password (used once to obtain a session key).
+    pub lastfm_password: String,
     pub genre_from: String,
     pub overwrite_existing_tags: bool,
     pub write_playcount: bool,
@@ -159,10 +201,28 @@ impl Default for Config {
             max_albums_per_run: 100,
             max_scan_entries: 3000,
             albums_per_task: 5,
+            files_per_scan_task: 200,
             run_only_when_idle: true,
+            favorites_sync_enabled: false,
+            favorites_sync_lastfm: true,
+            favorites_sync_max: 500,
+            playback_stats_enabled: false,
+            stats_poll_minutes: 5,
+            top_picks_count: 50,
+            skip_threshold_percent: 30,
+            skip_ignore_enabled: false,
+            skip_ignore_ratio: 0.6,
+            filter_url: String::new(),
             rollback_run_id: String::new(),
             log_webhook_url: String::new(),
             log_webhook_token: String::new(),
+            persistence_backend: "host".into(),
+            persistence_url: String::new(),
+            mysql_host: String::new(),
+            mysql_port: 3306,
+            mysql_name: String::new(),
+            mysql_user: String::new(),
+            mysql_password: String::new(),
             soundtrack_folder: "Sound Tracks".into(),
             various_folder: "Various Artist".into(),
             singles_folder: "Singles".into(),
@@ -180,6 +240,8 @@ impl Default for Config {
             skip_hidden_files: true,
             preserve_recording_type: true,
             singles_under_artist: true,
+            singles_enabled: true,
+            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview".into(),
             exclude_paths: Vec::new(),
             backup_before_write: true,
             backup_retention_days: 30,
@@ -188,10 +250,13 @@ impl Default for Config {
             skip_unverified: true,
             acoustid_mode: AcoustIdMode::Fingerprint,
             acoustid_api_key: String::new(),
+            acoustid_url: String::new(),
             primary_source: PrimarySource::MusicBrainz,
             musicbrainz_token: String::new(),
             lastfm_api_key: String::new(),
             lastfm_user: String::new(),
+            lastfm_api_secret: String::new(),
+            lastfm_password: String::new(),
             genre_from: "musicbrainz".into(),
             overwrite_existing_tags: false,
             write_playcount: false,
@@ -241,10 +306,28 @@ impl Config {
             "maxAlbumsPerRun",
             "maxScanEntries",
             "albumsPerTask",
+            "filesPerScanTask",
             "runOnlyWhenIdle",
+            "favoritesSyncEnabled",
+            "favoritesSyncLastfm",
+            "favoritesSyncMax",
+            "playbackStatsEnabled",
+            "statsPollMinutes",
+            "topPicksCount",
+            "skipThresholdPercent",
+            "skipIgnoreEnabled",
+            "skipIgnoreRatio",
+            "filterUrl",
             "rollbackRunId",
             "logWebhookUrl",
             "logWebhookToken",
+            "persistenceBackend",
+            "persistenceUrl",
+            "mysqlHost",
+            "mysqlPort",
+            "mysqlName",
+            "mysqlUser",
+            "mysqlPassword",
             "soundtrackFolder",
             "variousFolder",
             "singlesFolder",
@@ -262,6 +345,8 @@ impl Config {
             "skipHiddenFiles",
             "preserveRecordingType",
             "singlesUnderArtist",
+            "singlesEnabled",
+            "fillerKeywords",
             "excludePaths",
             "backupBeforeWrite",
             "backupRetentionDays",
@@ -274,10 +359,13 @@ impl Config {
             "skipUnverified",
             "acoustidMode",
             "acoustidApiKey",
+            "acoustidUrl",
             "primarySource",
             "musicbrainzToken",
             "lastfmApiKey",
             "lastfmUser",
+            "lastfmApiSecret",
+            "lastfmPassword",
             "genreFrom",
             "overwriteExistingTags",
             "writePlaycount",
@@ -317,7 +405,11 @@ impl Config {
     pub fn from_map(map: &HashMap<String, String>) -> Config {
         let mut c = Config::default();
         if let Some(v) = map.get("mode") {
-            c.mode = if v == "apply" { Mode::Apply } else { Mode::DryRun };
+            c.mode = if v == "apply" {
+                Mode::Apply
+            } else {
+                Mode::DryRun
+            };
         }
         // Multi-library: `libraries` wins if present; `libraryId` is the single
         // library fallback. Handles JSON array, comma list or single value.
@@ -342,6 +434,27 @@ impl Config {
         if let Some(v) = map.get("logWebhookToken") {
             c.log_webhook_token = v.clone();
         }
+        if let Some(v) = map.get("persistenceBackend") {
+            c.persistence_backend = v.trim().to_string();
+        }
+        if let Some(v) = map.get("persistenceUrl") {
+            c.persistence_url = v.trim().to_string();
+        }
+        if let Some(v) = map.get("mysqlHost") {
+            c.mysql_host = v.trim().to_string();
+        }
+        if let Some(v) = map.get("mysqlPort") {
+            c.mysql_port = v.trim().parse().unwrap_or(c.mysql_port);
+        }
+        if let Some(v) = map.get("mysqlName") {
+            c.mysql_name = v.trim().to_string();
+        }
+        if let Some(v) = map.get("mysqlUser") {
+            c.mysql_user = v.trim().to_string();
+        }
+        if let Some(v) = map.get("mysqlPassword") {
+            c.mysql_password = v.to_string();
+        }
         if let Some(v) = map.get("maxAlbumsPerRun") {
             c.max_albums_per_run = v.trim().parse().unwrap_or(c.max_albums_per_run);
         }
@@ -351,7 +464,32 @@ impl Config {
         if let Some(v) = map.get("albumsPerTask") {
             c.albums_per_task = v.trim().parse().unwrap_or(c.albums_per_task);
         }
+        if let Some(v) = map.get("filesPerScanTask") {
+            c.files_per_scan_task = v.trim().parse().unwrap_or(c.files_per_scan_task);
+        }
         c.run_only_when_idle = bool(map, "runOnlyWhenIdle", c.run_only_when_idle);
+        c.favorites_sync_enabled = bool(map, "favoritesSyncEnabled", c.favorites_sync_enabled);
+        c.favorites_sync_lastfm = bool(map, "favoritesSyncLastfm", c.favorites_sync_lastfm);
+        if let Some(v) = map.get("favoritesSyncMax") {
+            c.favorites_sync_max = v.trim().parse().unwrap_or(c.favorites_sync_max);
+        }
+        c.playback_stats_enabled = bool(map, "playbackStatsEnabled", c.playback_stats_enabled);
+        if let Some(v) = map.get("statsPollMinutes") {
+            c.stats_poll_minutes = v.trim().parse().unwrap_or(c.stats_poll_minutes);
+        }
+        if let Some(v) = map.get("topPicksCount") {
+            c.top_picks_count = v.trim().parse().unwrap_or(c.top_picks_count);
+        }
+        if let Some(v) = map.get("skipThresholdPercent") {
+            c.skip_threshold_percent = v.trim().parse().unwrap_or(c.skip_threshold_percent);
+        }
+        c.skip_ignore_enabled = bool(map, "skipIgnoreEnabled", c.skip_ignore_enabled);
+        if let Some(v) = map.get("skipIgnoreRatio") {
+            c.skip_ignore_ratio = v.trim().parse().unwrap_or(c.skip_ignore_ratio);
+        }
+        if let Some(v) = map.get("filterUrl") {
+            c.filter_url = v.trim().to_string();
+        }
         if let Some(v) = map.get("soundtrackFolder") {
             c.soundtrack_folder = v.clone();
         }
@@ -361,11 +499,13 @@ impl Config {
         if let Some(v) = map.get("singlesFolder") {
             c.singles_folder = v.clone();
         }
-        c.nest_buckets_under_various = bool(map, "nestBucketsUnderVarious", c.nest_buckets_under_various);
+        c.nest_buckets_under_various =
+            bool(map, "nestBucketsUnderVarious", c.nest_buckets_under_various);
         c.read_nfo = bool(map, "readNfo", c.read_nfo);
         c.write_nfo = bool(map, "writeNfo", c.write_nfo);
         if let Some(v) = map.get("incompleteAlbumMinTracks") {
-            c.incomplete_album_min_tracks = v.trim().parse().unwrap_or(c.incomplete_album_min_tracks);
+            c.incomplete_album_min_tracks =
+                v.trim().parse().unwrap_or(c.incomplete_album_min_tracks);
         }
         c.classify_from_mb = bool(map, "classifyFromMB", c.classify_from_mb);
         if let Some(v) = map.get("folderSchema") {
@@ -384,7 +524,11 @@ impl Config {
         c.prune_empty_dirs = bool(map, "pruneEmptyDirs", c.prune_empty_dirs);
         c.skip_hidden_files = bool(map, "skipHiddenFiles", c.skip_hidden_files);
         c.preserve_recording_type = bool(map, "preserveRecordingType", c.preserve_recording_type);
+        c.singles_enabled = bool(map, "singlesEnabled", c.singles_enabled);
         c.singles_under_artist = bool(map, "singlesUnderArtist", c.singles_under_artist);
+        if let Some(v) = map.get("fillerKeywords") {
+            c.filler_keywords = v.clone();
+        }
         if let Some(v) = map.get("excludePaths") {
             let parsed = parse_string_list(v);
             if !parsed.is_empty() {
@@ -410,6 +554,9 @@ impl Config {
         if let Some(v) = map.get("acoustidApiKey") {
             c.acoustid_api_key = v.clone();
         }
+        if let Some(v) = map.get("acoustidUrl") {
+            c.acoustid_url = v.clone();
+        }
         if let Some(v) = map.get("primarySource") {
             c.primary_source = match v.as_str() {
                 "lidarr" => PrimarySource::Lidarr,
@@ -425,6 +572,12 @@ impl Config {
         }
         if let Some(v) = map.get("lastfmUser") {
             c.lastfm_user = v.clone();
+        }
+        if let Some(v) = map.get("lastfmApiSecret") {
+            c.lastfm_api_secret = v.clone();
+        }
+        if let Some(v) = map.get("lastfmPassword") {
+            c.lastfm_password = v.clone();
         }
         if let Some(v) = map.get("genreFrom") {
             c.genre_from = v.clone();
@@ -459,8 +612,11 @@ impl Config {
             };
         }
         c.write_tags_for_tracked = bool(map, "writeTagsForTracked", c.write_tags_for_tracked);
-        c.lidarr_force_search_incomplete =
-            bool(map, "lidarrForceSearchIncomplete", c.lidarr_force_search_incomplete);
+        c.lidarr_force_search_incomplete = bool(
+            map,
+            "lidarrForceSearchIncomplete",
+            c.lidarr_force_search_incomplete,
+        );
         c.use_lidarr_naming_schema = bool(map, "useLidarrNamingSchema", c.use_lidarr_naming_schema);
         if let Some(v) = map.get("audiomuseUrl") {
             c.audiomuse_url = v.clone();
@@ -468,7 +624,8 @@ impl Config {
         if let Some(v) = map.get("audiomuseToken") {
             c.audiomuse_token = v.clone();
         }
-        c.notify_audiomuse_after_run = bool(map, "notifyAudiomuseAfterRun", c.notify_audiomuse_after_run);
+        c.notify_audiomuse_after_run =
+            bool(map, "notifyAudiomuseAfterRun", c.notify_audiomuse_after_run);
         c.write_acoustic_tags = bool(map, "writeAcousticTags", c.write_acoustic_tags);
         if let Some(v) = map.get("scanUser") {
             c.scan_user = v.clone();
@@ -499,7 +656,11 @@ fn parse_string_list(v: &str) -> Vec<String> {
         return Vec::new();
     }
     if let Ok(json) = serde_json::from_str::<Vec<String>>(trimmed) {
-        return json.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        return json
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
     }
     trimmed
         .split(',')
@@ -518,7 +679,10 @@ fn parse_library_list(v: &str) -> Vec<i32> {
     if let Ok(json) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
         return json
             .iter()
-            .filter_map(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.trim().parse().ok())))
+            .filter_map(|x| {
+                x.as_i64()
+                    .or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))
+            })
             .filter(|&n| n > 0)
             .map(|n| n as i32)
             .collect();
@@ -620,6 +784,7 @@ mod tests {
             ("lidarrForceSearchIncomplete", "true"),
             ("preserveRecordingType", "false"),
             ("singlesUnderArtist", "false"),
+            ("singlesEnabled", "false"),
             ("backupBeforeWrite", "false"),
             ("useLidarrNamingSchema", "true"),
             ("excludePaths", "[\"inbox\", \"Downloads/*\"]"),
@@ -631,6 +796,7 @@ mod tests {
         assert!(c.lidarr_force_search_incomplete);
         assert!(!c.preserve_recording_type);
         assert!(!c.singles_under_artist);
+        assert!(!c.singles_enabled);
         assert!(!c.backup_before_write);
         assert!(c.use_lidarr_naming_schema);
         assert_eq!(c.exclude_paths, vec!["inbox", "Downloads/*"]);
@@ -641,5 +807,49 @@ mod tests {
         assert_eq!(parse_string_list("a, b , c"), vec!["a", "b", "c"]);
         assert_eq!(parse_string_list("[\"x\",\"y\"]"), vec!["x", "y"]);
         assert_eq!(parse_string_list(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parses_filler_and_playback_stats() {
+        let c = Config::from_map(&map(&[
+            ("fillerKeywords", "intro,outro,cold open"),
+            ("playbackStatsEnabled", "true"),
+            ("statsPollMinutes", "10"),
+            ("skipThresholdPercent", "25"),
+            ("topPicksCount", "80"),
+        ]));
+        assert_eq!(c.filler_keywords, "intro,outro,cold open");
+        assert!(c.playback_stats_enabled);
+        assert_eq!(c.stats_poll_minutes, 10);
+        assert_eq!(c.skip_threshold_percent, 25);
+        assert_eq!(c.top_picks_count, 80);
+        // Defaults are opt-in (off).
+        let d = Config::from_map(&HashMap::new());
+        assert!(!d.playback_stats_enabled);
+        assert_eq!(d.skip_threshold_percent, 30);
+    }
+
+    #[test]
+    fn parses_persistence_mysql_fields() {
+        let c = Config::from_map(&map(&[
+            ("persistenceBackend", "mysql"),
+            ("persistenceUrl", "http://nd-organizer-mysql:8098"),
+            ("mysqlHost", "db.internal"),
+            ("mysqlPort", "3307"),
+            ("mysqlName", "navidrome_plugins"),
+            ("mysqlUser", "plugin"),
+            ("mysqlPassword", "s3cret"),
+        ]));
+        assert_eq!(c.persistence_backend, "mysql");
+        assert_eq!(c.persistence_url, "http://nd-organizer-mysql:8098");
+        assert_eq!(c.mysql_host, "db.internal");
+        assert_eq!(c.mysql_port, 3307);
+        assert_eq!(c.mysql_name, "navidrome_plugins");
+        assert_eq!(c.mysql_user, "plugin");
+        assert_eq!(c.mysql_password, "s3cret");
+        // Default backend is the Navidrome host KVStore.
+        let d = Config::from_map(&HashMap::new());
+        assert_eq!(d.persistence_backend, "host");
+        assert_eq!(d.mysql_port, 3306);
     }
 }

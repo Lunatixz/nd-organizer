@@ -5,10 +5,11 @@ use std::path::Path;
 
 use lofty::prelude::*;
 use lofty::tag::Tag;
+use serde::{Deserialize, Serialize};
 
 /// Recording source of a track. A live or bootleg recording is a distinct
 /// entity from the studio release and must never be merged/overwritten by it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Recording {
     #[default]
     Studio,
@@ -29,7 +30,7 @@ impl Recording {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 // Some fields are only consumed in Phase 2 (verification/tag-writing).
 #[allow(dead_code)]
 pub struct TrackTags {
@@ -42,6 +43,7 @@ pub struct TrackTags {
     pub disc: Option<u32>,
     pub genre: String,
     pub recording: Recording,
+    pub isrc: String,
     pub mbid_recording: String,
     pub mbid_album: String,
     pub mbid_artist: String,
@@ -58,7 +60,9 @@ fn detect_recording(tag: &Tag, title: &str, album: &str, genre: &str) -> Recordi
     if boot(&g) || boot(&t) || boot(&a) {
         return Recording::Bootleg;
     }
-    let live = |s: &str| s.contains("(live") || s.contains("[live") || s.contains("live at") || s.contains(" live ");
+    let live = |s: &str| {
+        s.contains("(live") || s.contains("[live") || s.contains("live at") || s.contains(" live ")
+    };
     if live(&t) || live(&a) {
         return Recording::Live;
     }
@@ -74,9 +78,17 @@ fn detect_recording(tag: &Tag, title: &str, album: &str, genre: &str) -> Recordi
         if !key.contains("live") && !key.contains("bootleg") {
             continue;
         }
-        let val = item.value().text().unwrap_or("").trim().to_ascii_lowercase();
-        let truthy =
-            val.is_empty() || matches!(val.as_str(), "1" | "true" | "yes" | "y" | "live" | "bootleg");
+        let val = item
+            .value()
+            .text()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let truthy = val.is_empty()
+            || matches!(
+                val.as_str(),
+                "1" | "true" | "yes" | "y" | "live" | "bootleg"
+            );
         if truthy {
             if key.contains("bootleg") {
                 bootleg_tag = true;
@@ -111,13 +123,17 @@ pub fn read_tags(path: &Path) -> Option<TrackTags> {
     Some(TrackTags {
         title,
         artist: text(tag.artist()),
-        album_artist: tag.get_string(&ItemKey::AlbumArtist).unwrap_or("").to_string(),
+        album_artist: tag
+            .get_string(&ItemKey::AlbumArtist)
+            .unwrap_or("")
+            .to_string(),
         album,
         year: tag.year(),
         track: tag.track(),
         disc: tag.disk(),
         genre,
         recording,
+        isrc: mbid(ItemKey::Isrc),
         mbid_recording: mbid(ItemKey::MusicBrainzRecordingId),
         mbid_album: mbid(ItemKey::MusicBrainzReleaseId),
         mbid_artist: mbid(ItemKey::MusicBrainzArtistId),

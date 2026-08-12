@@ -51,9 +51,20 @@ pub fn fnv1a64(s: &str) -> u64 {
     h
 }
 
+/// KVStore key for a scanned file's index entry. Hashed because deep library
+/// paths exceed the 256-byte KVStore key limit (the rel path is stored in the
+/// value instead).
+pub fn file_index_key(library_id: i32, rel: &str) -> String {
+    format!("scan.filev2.{library_id}:{:016x}", fnv1a64(rel))
+}
+
 /// Reverse one applied album: restore file names, restore the nfo content from
 /// its backup, then move the folder back to its original location.
-pub fn rollback_record(root: &Path, rec: &ApplyRecord, nfo_content: Option<Vec<u8>>) -> Result<(), String> {
+pub fn rollback_record(
+    root: &Path,
+    rec: &ApplyRecord,
+    nfo_content: Option<Vec<u8>>,
+) -> Result<(), String> {
     // 1. Rename files back (new -> old) inside the target dir.
     for fr in rec.file_renames.iter().rev() {
         if fr.from.eq_ignore_ascii_case(&fr.to) {
@@ -62,19 +73,18 @@ pub fn rollback_record(root: &Path, rec: &ApplyRecord, nfo_content: Option<Vec<u
         let to_path = root.join(&rec.to_dir).join(&fr.to);
         let from_path = root.join(&rec.to_dir).join(&fr.from);
         if to_path.exists() && !from_path.exists() {
-            std::fs::rename(&to_path, &from_path).map_err(|e| {
-                format!("restore file {} -> {}: {e}", fr.to, fr.from)
-            })?;
+            std::fs::rename(&to_path, &from_path)
+                .map_err(|e| format!("restore file {} -> {}: {e}", fr.to, fr.from))?;
         }
     }
     // 2. Restore the original nfo content.
     if let (Some(written), Some(content)) = (&rec.nfo_written, nfo_content) {
         let target = root.join(written);
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        std::fs::write(&target, content)
-            .map_err(|e| format!("restore nfo {written}: {e}"))?;
+        std::fs::write(&target, content).map_err(|e| format!("restore nfo {written}: {e}"))?;
     }
     // 3. Move the folder back.
     if !rec.from_dir.eq_ignore_ascii_case(&rec.to_dir) {
@@ -105,12 +115,12 @@ pub mod host_state {
     /// read-increment-write is safe).
     pub fn next_seq(run_id: &str) -> Result<i64, String> {
         let key = format!("seq:{run_id}");
-        let n = match host::kvstore::get(&key).map_err(|e| e.to_string())? {
+        let n = match crate::store::kv().get(&key).map_err(|e| e.to_string())? {
             Some(v) => String::from_utf8_lossy(&v).parse::<i64>().unwrap_or(0),
             None => 0,
         };
         let n = n + 1;
-        host::kvstore::set(&key, n.to_string().into_bytes()).map_err(|e| e.to_string())?;
+        crate::store::kv().set(&key, n.to_string().into_bytes()).map_err(|e| e.to_string())?;
         Ok(n)
     }
 
@@ -118,13 +128,13 @@ pub mod host_state {
         rec.seq = next_seq(&rec.run_id)?;
         let key = format!("apply:{}:{}", rec.run_id, rec.seq);
         let json = serde_json::to_vec(rec).map_err(|e| e.to_string())?;
-        host::kvstore::set(&key, json).map_err(|e| e.to_string())?;
+        crate::store::kv().set(&key, json).map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn get_run_applies(run_id: &str) -> Result<Vec<ApplyRecord>, String> {
-        let keys = host::kvstore::list(&format!("apply:{run_id}:")).map_err(|e| e.to_string())?;
-        let values = host::kvstore::get_many(keys).map_err(|e| e.to_string())?;
+        let keys = crate::store::kv().list(&format!("apply:{run_id}:")).map_err(|e| e.to_string())?;
+        let values = crate::store::kv().get_many(keys).map_err(|e| e.to_string())?;
         let mut recs: Vec<ApplyRecord> = values
             .values()
             .filter_map(|v| serde_json::from_slice(v).ok())
@@ -136,24 +146,24 @@ pub mod host_state {
     /// Cache a fetched-metadata/artwork-URL value for a source+query for 7 days.
     pub fn cache_meta(source: &str, query: &str, value: &str) -> Result<(), String> {
         let key = format!("meta:{}:{}", source, fnv1a64(query));
-        host::kvstore::set_with_ttl(&key, value.as_bytes().to_vec(), 7 * 24 * 3600)
+        crate::store::kv().set_with_ttl(&key, value.as_bytes().to_vec(), 7 * 24 * 3600)
             .map_err(|e| e.to_string())
     }
 
     pub fn get_cached_meta(source: &str, query: &str) -> Result<Option<String>, String> {
         let key = format!("meta:{}:{}", source, fnv1a64(query));
-        Ok(host::kvstore::get(&key)
+        Ok(crate::store::kv().get(&key)
             .map_err(|e| e.to_string())?
             .map(|v| String::from_utf8_lossy(&v).into_owned()))
     }
 
     pub fn mark_rollback_done(run_id: &str) -> Result<(), String> {
-        host::kvstore::set(&format!("rollback:done:{run_id}"), b"1".to_vec())
+        crate::store::kv().set(&format!("rollback:done:{run_id}"), b"1".to_vec())
             .map_err(|e| e.to_string())
     }
 
     pub fn rollback_done(run_id: &str) -> bool {
-        host::kvstore::get(&format!("rollback:done:{run_id}"))
+        crate::store::kv().get(&format!("rollback:done:{run_id}"))
             .map(|o| o.is_some())
             .unwrap_or(false)
     }
@@ -166,7 +176,7 @@ pub mod host_state {
             let nfo_content = rec
                 .nfo_backup
                 .as_deref()
-                .and_then(|key| host::kvstore::get(key).ok().flatten());
+                .and_then(|key| crate::store::kv().get(key).ok().flatten());
             if let Err(e) = rollback_record(root, rec, nfo_content) {
                 errors.push(format!("seq {}: {e}", rec.seq));
             }
@@ -190,8 +200,12 @@ mod tests {
     use std::fs;
 
     fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("nd-organizer-state-{tag}-{}", std::process::id()));
-        let storage = std::env::temp_dir().join(format!("nd-organizer-state-store-{tag}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-state-{tag}-{}", std::process::id()));
+        let storage = std::env::temp_dir().join(format!(
+            "nd-organizer-state-store-{tag}-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&storage);
         fs::create_dir_all(root.join("Album")).unwrap();
@@ -208,7 +222,10 @@ mod tests {
             library_id: 1,
             from_dir: "Artist/Album".into(),
             to_dir: "Artist/Album (2020)".into(),
-            file_renames: vec![FileRename { from: "01 - Old.flac".into(), to: "01 - New.flac".into() }],
+            file_renames: vec![FileRename {
+                from: "01 - Old.flac".into(),
+                to: "01 - New.flac".into(),
+            }],
             dir_sidecars: vec!["album.nfo".into()],
             nfo_written: Some("Artist/Album (2020)/album.nfo".into()),
             nfo_backup: Some("backups/run-1-1-album.nfo".into()),
@@ -220,8 +237,25 @@ mod tests {
 
     #[test]
     fn fnv1a64_is_stable() {
-        assert_eq!(fnv1a64("musicbrainz|Pink Floyd|The Wall"), fnv1a64("musicbrainz|Pink Floyd|The Wall"));
+        assert_eq!(
+            fnv1a64("musicbrainz|Pink Floyd|The Wall"),
+            fnv1a64("musicbrainz|Pink Floyd|The Wall")
+        );
         assert_ne!(fnv1a64("a"), fnv1a64("b"));
+    }
+
+    #[test]
+    fn file_index_key_is_bounded_for_deep_paths() {
+        // 45k-file library with deep nesting -> rel paths over 256 bytes must
+        // never blow the KVStore key limit.
+        let deep = "very-long-folder-name/".repeat(30) + "song.flac";
+        assert!(deep.len() > 256);
+        let key = file_index_key(2, &deep);
+        assert!(key.len() < 256, "key too long: {} bytes", key.len());
+        // Deterministic: same path, same key; different path/library -> different key.
+        assert_eq!(file_index_key(2, &deep), file_index_key(2, &deep));
+        assert_ne!(file_index_key(2, &deep), file_index_key(2, "other.flac"));
+        assert_ne!(file_index_key(1, &deep), file_index_key(2, &deep));
     }
 
     #[test]
@@ -229,7 +263,11 @@ mod tests {
         let (root, storage) = fixture("rb");
         fs::write(root.join("Album/01 - Old.flac"), b"audio").unwrap();
         fs::write(root.join("Album/album.nfo"), b"<album>NEW</album>").unwrap();
-        fs::write(storage.join("backups/run-1-1-album.nfo"), b"<album>ORIGINAL</album>").unwrap();
+        fs::write(
+            storage.join("backups/run-1-1-album.nfo"),
+            b"<album>ORIGINAL</album>",
+        )
+        .unwrap();
 
         // Simulate: dir moved, file renamed, nfo rewritten.
         let rec = ApplyRecord {
@@ -239,7 +277,10 @@ mod tests {
             library_id: 1,
             from_dir: "Album".into(),
             to_dir: "Artist/Album (2020)".into(),
-            file_renames: vec![FileRename { from: "01 - Old.flac".into(), to: "01 - New.flac".into() }],
+            file_renames: vec![FileRename {
+                from: "01 - Old.flac".into(),
+                to: "01 - New.flac".into(),
+            }],
             dir_sidecars: vec!["album.nfo".into()],
             nfo_written: Some("Artist/Album (2020)/album.nfo".into()),
             nfo_backup: Some("backup:run-1:1".into()),
@@ -248,14 +289,27 @@ mod tests {
         // the old dir pruned (as apply_plan would do).
         fs::create_dir_all(root.join("Artist/Album (2020)")).unwrap();
         fs::write(root.join("Artist/Album (2020)/01 - New.flac"), b"audio").unwrap();
-        fs::write(root.join("Artist/Album (2020)/album.nfo"), b"<album>NEW</album>").unwrap();
+        fs::write(
+            root.join("Artist/Album (2020)/album.nfo"),
+            b"<album>NEW</album>",
+        )
+        .unwrap();
         fs::remove_dir_all(root.join("Album")).unwrap();
 
         rollback_record(&root, &rec, Some(b"<album>ORIGINAL</album>".to_vec())).unwrap();
 
-        assert!(root.join("Album/01 - Old.flac").exists(), "file renamed back");
-        assert_eq!(fs::read_to_string(root.join("Album/album.nfo")).unwrap(), "<album>ORIGINAL</album>");
-        assert!(!root.join("Artist/Album (2020)").exists(), "target dir moved back");
+        assert!(
+            root.join("Album/01 - Old.flac").exists(),
+            "file renamed back"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Album/album.nfo")).unwrap(),
+            "<album>ORIGINAL</album>"
+        );
+        assert!(
+            !root.join("Artist/Album (2020)").exists(),
+            "target dir moved back"
+        );
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&storage);
     }
@@ -270,7 +324,10 @@ mod tests {
             library_id: 1,
             from_dir: "Album".into(),
             to_dir: "Album (2020)".into(),
-            file_renames: vec![FileRename { from: "a.flac".into(), to: "b.flac".into() }],
+            file_renames: vec![FileRename {
+                from: "a.flac".into(),
+                to: "b.flac".into(),
+            }],
             dir_sidecars: vec![],
             nfo_written: None,
             nfo_backup: None,
@@ -283,3 +340,4 @@ mod tests {
         let _ = fs::remove_dir_all(&storage);
     }
 }
+
