@@ -1,0 +1,294 @@
+# nd-organizer full stack - Navidrome plus all five sidecars, one command:
+#   docker compose up -d
+#
+# Services:
+#   navidrome                  (4533)  the music server (plugins enabled)
+#   octo-fiesta                (4535)  missing-track proxy (multi-provider)
+#   nd-organizer-acoustid (8097)  fingerprint sidecar - powers identity verification
+#   nd-organizer-webhook  (8099)  dashboard + log/status receiver
+#   nd-organizer-proxy    (4534)  Subsonic filter proxy
+#   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
+#
+# Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
+# normal Navidrome user/password - credentials pass through unchanged):
+#   player -> octo-fiesta (4535) -> nd-organizer-proxy (4534) -> navidrome (4533)  [full stack]
+#   player -> nd-organizer-proxy (4534) -> navidrome (4533)                        [filtering only]
+#   player -> navidrome (4533)                                                     [no proxy]
+# Point the player at http://<your-nas>:4535/rest/ to get queue filtering AND
+# missing-track fallback. octo-fiesta is transparent for songs Navidrome already
+# has; only tracks NOT in the library are fetched from the configured provider.
+#
+# Providers (octo-fiesta supports all of these; fill credentials in a .env
+# file next to this compose and pick one via MUSIC_SERVICE):
+#   SquidWTF - no credentials (free, proxies Qobuz/Tidal/Amazon/Deemix)
+#   Deezer   - DEEZER_ARL (see octo-fiesta wiki "Getting-Deezer-Credentials")
+#   Qobuz    - QOBUZ_USER_AUTH_TOKEN + QOBUZ_USER_ID (paid account)
+#   Yandex   - YANDEX_OAUTH_TOKEN (see wiki "Getting-Yandex-Credentials")
+#
+# Prerequisites:
+#   - a user-defined Docker network named `stack_network`:
+#         docker network create stack_network
+#   - if you ALREADY run Navidrome separately, remove the `navidrome` service
+#     below and just connect your existing container to the network instead:
+#         docker network connect stack_network navidrome
+#   - acoustid: mirror EVERY library mount at the SAME guest paths Navidrome uses.
+#   - mysql: optional - only if you set persistenceBackend=mysql in the plugin.
+#
+# Plugin settings to match:
+#   logWebhookUrl = http://nd-organizer-webhook:8099
+#   acoustidUrl   = http://nd-organizer-acoustid:8097
+#   filterUrl     = http://nd-organizer-proxy:4534
+#   persistenceUrl= http://nd-organizer-mysql:8098   (if using mysql backend)
+#   octoFiestaUrl = http://octo-fiesta:8080         (or your NAS:4535; webhook health)
+
+services:
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      - ND_PLUGINS_ENABLED=true
+      - ND_PLUGINS_AUTORELOAD=true
+      # Default library. Additional libraries are added in the UI
+      # (Settings -> Libraries) pointing at the mounted guest paths below.
+      - ND_MUSICFOLDER=/music
+      # Import playlists (.m3u) from this folder, relative to ND_MUSICFOLDER.
+      # Colon-separated for multiple folders/globs. Empty = scan the whole library.
+      - ND_PLAYLISTSPATH=playlists
+      # Optional: agents the plugin can power for the UI (see README/agents):
+      # - ND_AGENTS=nd-organizer
+    volumes:
+      - ./navidrome-data:/data
+      - /path/to/music:/music:rw        # library 1  (path = /music)
+      - /path/to/unsorted:/unsorted:rw  # library 2  (path = /unsorted)
+      # add more - /host/path:/guest:rw lines for every library
+    networks:
+      - stack_network
+
+  # ===== AudioMuse-AI (OPTIONAL - sonic analysis / metadata server) =====
+  # Uncomment these three services to deploy AudioMuse-AI
+  # (ghcr.io/neptunehub/audiomuse-ai, AGPL-3.0) on this stack, then set the
+  # plugin's audiomuseUrl = http://audiomuse-ai-flask-app:8000 and run its setup
+  # wizard once (admin user + connect your Navidrome server).
+  # Container names match AudioMuse-AI's own deployment example.
+  # Requires ~8 GB RAM and a 4-core CPU with AVX2 (see AudioMuse-AI docs);
+  # a heavy service - that's why this block is commented out by default.
+  # audiomuse-postgres:
+  #   image: postgres:15-alpine
+  #   container_name: audiomuse-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     TZ: UTC
+  #     POSTGRES_USER: audiomuse
+  #     POSTGRES_PASSWORD: changeme
+  #     POSTGRES_DB: audiomusedb
+  #   volumes:
+  #     - audiomuse-postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - stack_network
+  #
+  # audiomuse-ai-flask:
+  #   image: ghcr.io/neptunehub/audiomuse-ai:latest
+  #   container_name: audiomuse-ai-flask-app
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     SERVICE_TYPE: flask
+  #     TZ: UTC
+  #     POSTGRES_USER: audiomuse
+  #     POSTGRES_PASSWORD: changeme
+  #     POSTGRES_DB: audiomusedb
+  #     POSTGRES_HOST: audiomuse-postgres
+  #     POSTGRES_PORT: "5432"
+  #     TEMP_DIR: /app/temp_audio
+  #   volumes:
+  #     - audiomuse-temp-flask:/app/temp_audio
+  #   depends_on:
+  #     - audiomuse-postgres
+  #   networks:
+  #     - stack_network
+  #
+  # audiomuse-ai-worker:
+  #   image: ghcr.io/neptunehub/audiomuse-ai:latest
+  #   container_name: audiomuse-ai-worker-instance
+  #   restart: unless-stopped
+  #   environment:
+  #     SERVICE_TYPE: worker
+  #     TZ: UTC
+  #     POSTGRES_USER: audiomuse
+  #     POSTGRES_PASSWORD: changeme
+  #     POSTGRES_DB: audiomusedb
+  #     POSTGRES_HOST: audiomuse-postgres
+  #     POSTGRES_PORT: "5432"
+  #     TEMP_DIR: /app/temp_audio
+  #   volumes:
+  #     - audiomuse-temp-worker:/app/temp_audio
+  #   depends_on:
+  #     - audiomuse-postgres
+  #   networks:
+  #     - stack_network
+
+  # ===== AudioMuse-AI MusicServer (OPTIONAL - Subsonic music server) =====
+  # A Subsonic/OpenSubsonic music server showcasing AudioMuse-AI's sonic
+  # analysis - an optional alternative to Navidrome (or run both side by side).
+  # Commented out by default. Uncomment to use:
+  #   - web UI:      http://<your-nas>:3000
+  #   - Subsonic API http://<your-nas>:8080/rest/  (first login admin/admin)
+  #   - mount the SAME library paths Navidrome uses, then add them in the UI
+  #     (admin tab) and start the scan. Configure AudioMuse-AI's URL in the
+  #     admin tab to enable the sonic features.
+  # audiomuse:
+  #   image: ghcr.io/neptunehub/audiomuse-ai-musicserver:latest
+  #   container_name: audiomuse
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3000:3000"   # web UI
+  #     - "8080:8080"   # Open Subsonic API
+  #   volumes:
+  #     - /path/to/music:/music        # same library as Navidrome
+  #     - ./audiomuse-ms-config:/config  # DB + settings persist here
+  #   networks:
+  #     - stack_network
+
+  octo-fiesta:
+    image: ghcr.io/v1ck3s/octo-fiesta
+    container_name: octo-fiesta
+    restart: unless-stopped
+    ports:
+      - "4535:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
+      - Library__DownloadPath=/app/downloads
+      # Upstream = our filter proxy (keeps keyword/skip filtering), which
+      # forwards to Navidrome. Point directly at http://navidrome:4533 to skip
+      # the filter layer for this path.
+      - Subsonic__Url=http://nd-organizer-proxy:4534
+      # Music service: SquidWTF (no creds) | Deezer | Qobuz | Yandex
+      - Subsonic__MusicService=${MUSIC_SERVICE:-SquidWTF}
+      # Cache = stream missing tracks without writing to the library.
+      # Set to Permanent + mount DOWNLOAD_PATH to save them into the library.
+      - Subsonic__StorageMode=${STORAGE_MODE:-Cache}
+      - Subsonic__CacheDurationHours=${CACHE_DURATION_HOURS:-1}
+      - Subsonic__EnableExternalPlaylists=${ENABLE_EXTERNAL_PLAYLISTS:-true}
+      - Subsonic__PlaylistsDirectory=${PLAYLISTS_DIRECTORY:-playlists}
+      - Subsonic__ExplicitFilter=${EXPLICIT_FILTER:-All}
+      - Subsonic__DownloadMode=${DOWNLOAD_MODE:-Track}
+      - Subsonic__AutoUpgradeQuality=${AUTO_UPGRADE_QUALITY:-false}
+      - Subsonic__DisableLibraryScan=${DISABLE_LIBRARY_SCAN:-false}
+      - Subsonic__FolderTemplate=${FOLDER_TEMPLATE:-{artist}/{album}/{track} - {title}}
+      # Admin creds only needed for Permanent-mode library registration.
+      - Subsonic__AdminUsername=${SUBSONIC_ADMIN_USERNAME:-}
+      - Subsonic__AdminPassword=${SUBSONIC_ADMIN_PASSWORD:-}
+
+      # ===== SQUIDWTF (free, no credentials) =====
+      # Backend: Qobuz | Tidal | AmazonMusic | Deemix
+      - SquidWTF__Source=${SQUIDWTF_SOURCE:-Qobuz}
+      # Quality: Qobuz 27/7/6/5, Tidal HI_RES_LOSSLESS/LOSSLESS/HIGH/LOW,
+      #          AmazonMusic FLAC_24/FLAC_16/AAC/OPUS/ATMOS, Deemix FLAC/MP3_320/MP3_128
+      - SquidWTF__Quality=${SQUIDWTF_QUALITY:-6}
+      - SquidWTF__InstanceTimeoutSeconds=${SQUIDWTF_INSTANCE_TIMEOUT:-5}
+      # Force a specific Tidal API instance (e.g. a self-hosted hifi-api). When
+      # set, the remote instances.json is NOT fetched - only this URL is used.
+      - SquidWTF__Instances__0=${SQUIDWTF_INSTANCE:-}
+      # Override URL of the remote instances.json (ignored if SQUIDWTF_INSTANCE
+      # is set). Defaults to https://tidal-uptime.geeked.wtf/ if empty.
+      - SquidWTF__InstancesUrl=${SQUIDWTF_INSTANCES_URL:-}
+
+      # ===== DEEZER (requires DEEZER_ARL) =====
+      - Deezer__Arl=${DEEZER_ARL:-}
+      - Deezer__ArlFallback=${DEEZER_ARL_FALLBACK:-}
+      - Deezer__Quality=${DEEZER_QUALITY:-}
+
+      # ===== QOBUZ (requires QOBUZ_USER_AUTH_TOKEN + QOBUZ_USER_ID) =====
+      - Qobuz__UserAuthToken=${QOBUZ_USER_AUTH_TOKEN:-}
+      - Qobuz__UserId=${QOBUZ_USER_ID:-}
+      - Qobuz__Quality=${QOBUZ_QUALITY:-}
+
+      # ===== YANDEX (requires YANDEX_OAUTH_TOKEN) =====
+      - Yandex__OAuthToken=${YANDEX_OAUTH_TOKEN:-}
+      - Yandex__Quality=${YANDEX_QUALITY:-}
+      - Yandex__Language=${YANDEX_LANGUAGE:-en}
+      - Yandex__IncludeUnavailable=${YANDEX_INCLUDE_UNAVAILABLE_TRACKS:-false}
+    networks:
+      - stack_network
+    # OPTIONAL - Permanent mode saves fetched tracks into a Navidrome-scanned
+    # library folder (host path must match a Navidrome library mount):
+    #   volumes:
+    #     - ${DOWNLOAD_PATH:-/path/to/music/Octo-Fiesta}:/app/downloads
+    #   environment:
+    #     - Subsonic__StorageMode=Permanent
+
+  nd-organizer-acoustid:
+    image: ghcr.io/lunatixz/nd-organizer/acoustid:latest
+    container_name: nd-organizer-acoustid
+    restart: unless-stopped
+    ports:
+      - "8097:8097"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+    volumes:
+      # Mirror every library mount from your Navidrome stack, SAME guest path.
+      - /path/to/music:/music:ro
+      - /path/to/unsorted:/unsorted:ro
+    networks:
+      - stack_network
+
+  nd-organizer-webhook:
+    image: ghcr.io/lunatixz/nd-organizer/webhook:latest
+    container_name: nd-organizer-webhook
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./data:/data          # webhook.log persists here
+      # Read-only Docker socket: lets the dashboard read octo-fiesta's logs
+      # (octo exposes only the Subsonic API, no /logs endpoint).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # octo-fiesta's URL + provider come from the plugin's Navidrome config
+      # (octoFiestaUrl / octoFiestaProvider), reported in status POSTs. Only the
+      # docker-log container name stays here (it's infrastructure, not a URL).
+      - OCTO_FIESTA_CONTAINER=octo-fiesta
+    networks:
+      - stack_network
+    # The dashboard pulls each sidecar's /logs by container name (same
+    # network required), so this one UI shows plugin status + all sidecar logs.
+
+  nd-organizer-proxy:
+    image: ghcr.io/lunatixz/nd-organizer/proxy:latest
+    container_name: nd-organizer-proxy
+    restart: unless-stopped
+    ports:
+      - "4534:4534"
+    environment:
+      - NAVIDROME_URL=http://navidrome:4533
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+      # - FILTER_KEYWORDS=intro,outro,interlude
+    networks:
+      - stack_network
+
+  nd-organizer-mysql:
+    image: ghcr.io/lunatixz/nd-organizer/mysql:latest
+    container_name: nd-organizer-mysql
+    restart: unless-stopped
+    ports:
+      - "8098:8098"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+    networks:
+      - stack_network
+
+networks:
+  stack_network:
+    external: true
+
+# Uncomment the volumes below (with the AudioMuse-AI services above) to persist
+# AudioMuse-AI's PostgreSQL data and worker temp files:
+# volumes:
+#   audiomuse-postgres-data:
+#   audiomuse-temp-flask:
+#   audiomuse-temp-worker:

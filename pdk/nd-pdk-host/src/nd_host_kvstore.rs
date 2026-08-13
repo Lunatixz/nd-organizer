@@ -88,7 +88,7 @@ struct KVStoreGetManyRequest {
 #[serde(rename_all = "camelCase")]
 struct KVStoreGetManyResponse {
     #[serde(default)]
-    values: std::collections::HashMap<String, Vec<u8>>,
+    values: std::collections::HashMap<String, String>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -297,7 +297,14 @@ pub fn get_many(keys: Vec<String>) -> Result<std::collections::HashMap<String, V
         return Err(Error::msg(err));
     }
 
-    Ok(response.0.values)
+    // Navidrome sends values base64-encoded in the JSON response; decode each
+    // back to raw bytes (mirrors the single-value base64_bytes deserializer).
+    Ok(response
+        .0
+        .values
+        .into_iter()
+        .filter_map(|(k, v)| BASE64.decode(v).ok().map(|bytes| (k, bytes)))
+        .collect())
 }
 
 /// Has checks if a key exists in storage.

@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "description": "Organizes your Navidrome library: classifies albums (Soundtrack > Various Artist > Singles > Normal) and renames folders/files to your schemas, preserving live/bootleg recordings. Refreshes tags + artwork from MusicBrainz, Cover Art Archive, iTunes and Last.fm; reads/writes Kodi NFO sidecars; verifies identity (AcoustID fingerprint + tags + names) before writing. Integrates with Lidarr (metadata, naming schema, force-search incomplete albums) and AudioMuse-AI (acoustic tags, re-sync). Dry-run default, change history with rollback, metadata backups, reports + status feed (log webhook). Runs in idle-only batches and rescans Navidrome after moves so playback never hits stale files.",
   "website": "https://github.com/Lunatixz/nd-organizer",
-
   "permissions": {
     "library": {
       "reason": "Read, tag and rename music files inside library folders. Write access must be granted via the CLI (navidrome plugin edit nd-organizer --write-access).",
@@ -12,7 +11,9 @@
     },
     "http": {
       "reason": "Fetch metadata/artwork from MusicBrainz, Cover Art Archive, iTunes, Last.fm, AcoustID, Lidarr and AudioMuse-AI. Wildcard required for user-configured Lidarr/AudioMuse URLs.",
-      "requiredHosts": ["*"]
+      "requiredHosts": [
+        "*"
+      ]
     },
     "taskqueue": {
       "reason": "Process one album per background task (callbacks are time-limited).",
@@ -38,31 +39,37 @@
       "reason": "Write run reports and persistent state."
     }
   },
-
   "config": {
     "schema": {
       "type": "object",
       "properties": {
         "mode": {
           "type": "string",
-          "title": "Mode",
+          "title": "Run mode (dry run / apply)",
           "default": "dryRun",
           "oneOf": [
-            { "const": "dryRun", "title": "Dry run (preview only)" },
-            { "const": "apply", "title": "Apply (rename + write)" }
+            {
+              "const": "dryRun",
+              "title": "Dry run (preview only)"
+            },
+            {
+              "const": "apply",
+              "title": "Apply (rename + write)"
+            }
           ],
-          "description": "dryRun computes and reports the full change plan without writing anything. Switch to apply once you have reviewed a dry-run report."
+          "description": "dryRun plans and reports everything without changing a file. Switch to apply once you've reviewed a dry-run report."
         },
         "runOnStartup": {
           "type": "boolean",
-          "title": "Run once on startup",
-          "default": false
+          "title": "Run on plugin start",
+          "default": false,
+          "description": "Run the organizer once when the plugin starts (~15s after load). If a scheduleCron is set, it then runs on that schedule as well; if the cron is empty, this startup run is the only automatic run."
         },
         "scheduleCron": {
           "type": "string",
-          "title": "Schedule (cron)",
+          "title": "Run schedule (cron)",
           "default": "",
-          "description": "Cron expression for recurring runs, e.g. \"0 3 * * 1\" (weekly). Empty disables scheduling."
+          "description": "Cron expression for recurring runs, e.g. \"0 3 * * 1\" (weekly). Empty disables recurring runs - then only the 'Run on plugin start' run (if enabled) runs automatically."
         },
         "maxAlbumsPerRun": {
           "type": "integer",
@@ -76,20 +83,20 @@
           "title": "Albums per task (batch size)",
           "minimum": 1,
           "default": 5,
-          "description": "Each background task plans a small batch of album groups, keeping the plugin lean so playback is never starved."
+          "description": "Each background task plans a small batch of album groups, keeping resource use low so playback is never impacted."
         },
         "filesPerScanTask": {
           "type": "integer",
           "title": "Files scanned per task",
           "minimum": 10,
           "default": 200,
-          "description": "The full-library scan reads a small chunk of files' tags per background task. Lower = slower but lighter. Scanning is slow-and-accurate by design."
+          "description": "The full-library scan reads a small chunk of files' tags per background task. Lower values are slower but lighter on resources; scanning is thorough by design."
         },
         "runOnlyWhenIdle": {
           "type": "boolean",
           "title": "Only run when nothing is playing",
           "default": true,
-          "description": "Checks Navidrome getNowPlaying before doing work; if playback is active, the run is deferred and retried. Requires a scanUser the plugin can act as."
+          "description": "Only run when nothing is playing; if playback is active, the run waits and retries automatically."
         },
         "rollbackRunId": {
           "type": "string",
@@ -100,8 +107,8 @@
         "logWebhookUrl": {
           "type": "string",
           "title": "Log webhook URL",
-          "default": "",
-          "description": "Optional. Each run's report and status are POSTed here as plain text - use a hosted log/notifier (ntfy, Gotify, Discord webhook, Loki push endpoint, ...). The plugin settings UI cannot render links; open this service's own dashboard/URL to view the log."
+          "default": "http://nd-organizer-webhook:8099",
+          "description": "Optional. URL of the nd-organizer webhook dashboard sidecar (e.g. http://nd-organizer-webhook:8099 on the shared Docker network). Each run's report and status are POSTed here as plain text - use a hosted log/notifier (ntfy, Gotify, Discord webhook, Loki push endpoint, ...) if you prefer. The plugin settings UI cannot render links; open this service's own dashboard/URL to view the log."
         },
         "logWebhookToken": {
           "type": "string",
@@ -113,15 +120,21 @@
           "title": "Persistence backend",
           "default": "host",
           "oneOf": [
-            { "const": "host", "title": "Navidrome KVStore (SQLite)" },
-            { "const": "mysql", "title": "External MySQL / MariaDB" }
+            {
+              "const": "host",
+              "title": "Navidrome KVStore (SQLite)"
+            },
+            {
+              "const": "mysql",
+              "title": "External MySQL / MariaDB"
+            }
           ],
           "description": "Where the plugin keeps its cache/state (scan index, task log, stats, caches). 'host' = the Navidrome-managed SQLite KVStore. 'mysql' = your own database via the mysql sidecar (mysql/docker-compose.yml), so plugin state survives plugin resets."
         },
         "persistenceUrl": {
           "type": "string",
           "title": "MySQL sidecar URL",
-          "default": "",
+          "default": "http://nd-organizer-mysql:8098",
           "description": "URL of the mysql sidecar (e.g. http://nd-organizer-mysql:8098). Required when persistenceBackend = mysql."
         },
         "mysqlHost": {
@@ -135,7 +148,8 @@
           "title": "MySQL port",
           "minimum": 1,
           "maximum": 65535,
-          "default": 3306
+          "default": 3306,
+          "description": "Port your MySQL or MariaDB server listens on (usually 3306)."
         },
         "mysqlName": {
           "type": "string",
@@ -146,39 +160,44 @@
         "mysqlUser": {
           "type": "string",
           "title": "MySQL user",
-          "default": ""
+          "default": "",
+          "description": "A MySQL user with read/write access to the database above."
         },
         "mysqlPassword": {
           "type": "string",
           "title": "MySQL password",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Credentials are sent only to the mysql sidecar over the internal Docker network."
         },
-
         "soundtrackFolder": {
           "type": "string",
           "title": "Soundtrack folder",
-          "default": "Sound Tracks"
+          "default": "Sound Tracks",
+          "description": "Folder name for soundtrack albums when 'Nest soundtracks under Various Artist' is off."
         },
         "variousFolder": {
           "type": "string",
           "title": "Various artist folder",
-          "default": "Various Artist"
+          "default": "Various Artist",
+          "description": "Folder name used for various-artist / compilation albums."
         },
         "singlesFolder": {
           "type": "string",
           "title": "Singles folder",
-          "default": "Singles"
+          "default": "Singles",
+          "description": "Folder name for single tracks and incomplete albums."
         },
         "nestBucketsUnderVarious": {
           "type": "boolean",
-          "title": "Nest soundtracks under the Various Artist folder",
+          "title": "Nest soundtracks under Various Artist",
           "default": true,
           "description": "Soundtracks go under Various Artist/Sound Tracks/... when on, or as a top-level Sound Tracks/ folder when off. (Singles are not affected - they always go under the single's artist per the 'Put singles under the artist' option.)"
         },
         "singlesUnderArtist": {
           "type": "boolean",
-          "title": "Put singles under the artist's own folder",
+          "title": "Put singles under the artist's folder",
           "default": true,
           "description": "Artist/Singles/{title} instead of the Various Artist singles area. Falls back to Various Artist/Singles when the artist is unknown."
         },
@@ -197,12 +216,12 @@
         "fillerKeywords": {
           "type": "string",
           "title": "Filler keywords",
-          "default": "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview",
+          "default": "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke",
           "description": "Comma-separated keywords. A track whose title matches one (whole-word) is ignored from the queue: the filter proxy drops it from auto-play lists (random/search/playlist/genre/top/similar). Albums stay whole - it remains in its album, and files are never moved."
         },
         "playbackStatsEnabled": {
           "type": "boolean",
-          "title": "Enable playback stats (plays vs skips)",
+          "title": "Track playback stats (plays vs skips)",
           "default": false,
           "description": "Tracks full plays and skips (observed via getNowPlaying transitions; works on older Navidrome with no scrobbleretriever host), then builds a 'Top Picks' Navidrome playlist of the highest-weight songs. A full play forgives a skip."
         },
@@ -216,11 +235,11 @@
         },
         "skipThresholdPercent": {
           "type": "integer",
-          "title": "Skip = played less than % of the song",
+          "title": "Skip: played less than this % of the song",
           "minimum": 1,
           "maximum": 100,
           "default": 30,
-          "description": "A track that stops playing before this percentage of its duration counts as a skip."
+          "description": "A track that stops playing before this percentage of its duration counts as a skip - this feeds both the skip-heavy limiter and the star-rating system."
         },
         "topPicksCount": {
           "type": "integer",
@@ -229,29 +248,84 @@
           "default": 50,
           "description": "Number of highest-weight songs to put in the 'nd-organizer: Top Picks' playlist."
         },
-        "skipIgnoreEnabled": {
+        "keywordFilterEnabled": {
           "type": "boolean",
-          "title": "Exclude skip-heavy tracks from playback",
-          "default": false,
-          "description": "Publish weights + skip-heavy track IDs to the Subsonic filter proxy (filterUrl). The proxy re-sorts song lists by weight so skipped tracks sink, and only hard-removes tracks you clearly dislike: skipped more times than ever played in full AND past skipIgnoreRatio. No files are moved."
+          "title": "Keyword filter (drop filler tracks from auto-queues)",
+          "default": true,
+          "description": "Drop filler-keyword tracks (see fillerKeywords) from auto-queues (random/playlist/similar/genre/top/starred) via the filter proxy. Explicit user searches still return them. No files are moved."
         },
-        "skipIgnoreRatio": {
+        "skipContentMode": {
+          "type": "string",
+          "title": "Limit skip-heavy content in queues",
+          "enum": [
+            "exclude",
+            "third",
+            "lessThanHalf",
+            "half",
+            "none"
+          ],
+          "default": "lessThanHalf",
+          "description": "How much skip-heavy content may appear in queued lists: 'none' keeps everything (just weight-sorted); 'exclude' removes it entirely; 'third' / 'lessThanHalf' (default) / 'half' cap the fraction. A song counts as skip-heavy when you've skipped it more often than you've ever played it in full (after a few listens)."
+        },
+        "skipHeavyRatio": {
           "type": "number",
-          "title": "Skip-heavy ratio threshold",
-          "minimum": 0.0,
-          "maximum": 1.0,
+          "title": "How often a song must be skipped to be 'skip-heavy'",
+          "minimum": 0,
+          "maximum": 1,
           "default": 0.6,
-          "description": "For hard removal a track must ALSO be a net negative (skips > full plays, 3+ interactions). A full play forgives one skip, so liking a song again brings it back automatically."
+          "description": "A song becomes 'skip-heavy' (the type limited in your queues) when it meets a clear threshold: after at least 3 interactions, skips make up this fraction or more and you have skipped it more times than you have ever played it in full. 0.6 = skipped 60%+ of the time, and skipped more often than fully played. If you start listening to it fully again, earlier skips are forgiven and the flag clears automatically."
         },
         "filterUrl": {
           "type": "string",
-          "title": "Subsonic filter proxy URL",
-          "default": "",
-          "description": "Base URL of the nd-organizer filter proxy (e.g. http://nd-organizer-proxy:4534). It receives POST /filters and drops flagged tracks from client song lists."
+          "title": "Navidrome filter proxy URL",
+          "default": "http://nd-organizer-proxy:4534",
+          "description": "Base URL of the nd-organizer filter proxy (e.g. http://nd-organizer-proxy:4534). The proxy drops filler-keyword tracks from auto-queues and limits skip-heavy content in queues according to your settings."
+        },
+        "starTallyEnabled": {
+          "type": "boolean",
+          "title": "Enable star rating + playcount tracking",
+          "default": true,
+          "description": "Observes each listen's playback percentage and derives a 0-5 star rating (half-star steps). Rating is kept in the plugin's own storage (use persistenceBackend=mysql for durable external storage) and published to Navidrome's native rating via setRating. Never writes to the audio file."
+        },
+        "starHalfPlayPercent": {
+          "type": "integer",
+          "title": "Half star: played at least this %",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 55,
+          "description": "A listen that reaches at least this % of the track earns a half star (+0.5). Below it, the listen counts as a skip and is a -0.5 penalty."
+        },
+        "starFullPlayPercent": {
+          "type": "integer",
+          "title": "Full star: played at least this %",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 85,
+          "description": "A listen that reaches at least this % of the track earns a full star (+1.0) and +1 playcount, and forgives one earlier skip."
+        },
+        "starMinSamples": {
+          "type": "integer",
+          "title": "Minimum listens before rating publishes",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 3,
+          "description": "A rating is only written to Navidrome once a track has at least this many listens - prevents a single play from assigning a rating.."
+        },
+        "lastfmScrobble": {
+          "type": "boolean",
+          "title": "Scrobble full plays to Last.fm",
+          "default": false,
+          "description": "Important: only enable this if no other scrobbler is running (e.g. Navidrome's built-in Last.fm scrobbling or a music player scrobbler). If one is already active, every full listen gets reported twice and your Last.fm playcounts inflate. RECOMMENDED instead: run the multi-scrobbler project (github.com/foxxmd/multi-scrobbler) - it deduplicates and fans out scrobbles to Last.fm + ListenBrainz + others, so you keep Navidrome's own scrobbling and skip this setting. When you do enable it: every full listen (>= starFullPlayPercent) is scrobbled to Last.fm so its playcount grows along with ours."
+        },
+        "lastfmImportPlaycount": {
+          "type": "boolean",
+          "title": "Import playcount from Last.fm",
+          "default": false,
+          "description": "On a track's first observation, seed its playcount baseline from Last.fm (in addition to Navidrome's own playCount). Uses your Last.fm account playcounts."
         },
         "incompleteAlbumMinTracks": {
           "type": "integer",
-          "title": "Incomplete album min tracks",
+          "title": "Minimum tracks for a complete album",
           "minimum": 1,
           "default": 3,
           "description": "Albums with fewer tracks than this (when no MusicBrainz match exists) are routed to the Singles folder."
@@ -278,7 +352,7 @@
           "type": "boolean",
           "title": "Back up metadata before tag/NFO writes",
           "default": true,
-          "description": "Snapshot previous tags and original .nfo to plugin storage before editing. Metadata only - never copies audio files."
+          "description": "Snapshot the track's tag values and original .nfo to plugin storage before editing, so a rollback can restore them. Metadata only - never copies audio files."
         },
         "backupRetentionDays": {
           "type": "integer",
@@ -294,7 +368,6 @@
           "default": 30,
           "description": "How long apply records + file/nfo backups are kept so a run can be rolled back. After this, old runs are pruned to keep the database lean. 0 = keep forever."
         },
-
         "folderSchema": {
           "type": "string",
           "title": "Album folder schema",
@@ -316,12 +389,14 @@
         "pruneEmptyDirs": {
           "type": "boolean",
           "title": "Delete empty source folders after moving",
-          "default": true
+          "default": true,
+          "description": "After files are moved out of a folder, delete it if it becomes empty."
         },
         "skipHiddenFiles": {
           "type": "boolean",
           "title": "Skip hidden files/folders",
-          "default": true
+          "default": true,
+          "description": "Ignore files and folders whose name starts with a dot (hidden)."
         },
         "illegalCharReplacement": {
           "type": "string",
@@ -334,45 +409,57 @@
           "title": "Max file/folder name length",
           "minimum": 20,
           "maximum": 240,
-          "default": 180
+          "default": 180,
+          "description": "Longest allowed generated file or folder name."
         },
         "excludePaths": {
           "type": "array",
-          "title": "Exclude paths (never touch)",
-          "items": { "type": "string" },
+          "title": "Exclude paths (never touch these)",
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Directory prefixes or \"prefix/*\" globs under the library root that are skipped entirely (e.g. [\"inbox\", \"Downloads/*\"])."
         },
-
         "verifyIdentity": {
           "type": "boolean",
-          "title": "Verify identity before tagging",
+          "title": "Verify identity before changing a track",
           "default": true,
-          "description": "Require multi-signal verification (AcoustID fingerprint, embedded tags, file/folder names, metadata analysis) before writing any tags or renaming."
+          "description": "Only change a track once its identity is confirmed - fingerprint, embedded tags and filenames all agree. Safer, but files with messy tags may be left in place."
         },
         "minConfidence": {
           "type": "number",
-          "title": "Minimum confidence",
+          "title": "Minimum identity confidence",
           "minimum": 0,
           "maximum": 1,
           "default": 0.6,
-          "description": "Below this weighted signal score a track is skipped and reported as unverified."
+          "description": "How sure the identity check must be (0-1). A file scores higher with MusicBrainz IDs / ISRC, lower with none; an AcoustID fingerprint match adds partial confidence. Below this score a track is left unverified."
         },
         "skipUnverified": {
           "type": "boolean",
           "title": "Skip unverified tracks",
           "default": true,
-          "description": "Never tag or rename files that fail verification. They are listed in the report."
+          "description": "Never tag or rename files that fail verification. When off, unverified files are still organized by their tag/folder metadata and listed in the report."
         },
         "acoustidMode": {
           "type": "string",
           "title": "AcoustID mode",
           "default": "fingerprint",
           "oneOf": [
-            { "const": "disabled", "title": "Disabled" },
-            { "const": "lookup", "title": "Lookup (uses MBID/ISRC already in tags)" },
-            { "const": "fingerprint", "title": "Fingerprint (audio content, strongest)" }
-          ]
+            {
+              "const": "disabled",
+              "title": "Disabled"
+            },
+            {
+              "const": "lookup",
+              "title": "Lookup (uses MBID/ISRC already in tags)"
+            },
+            {
+              "const": "fingerprint",
+              "title": "Fingerprint (audio content, strongest)"
+            }
+          ],
+          "description": "How AcoustID is used: 'fingerprint' fingerprints files and looks them up in the AcoustID database; 'lookup' uses existing fingerprints; 'disabled' turns it off."
         },
         "acoustidApiKey": {
           "type": "string",
@@ -382,22 +469,32 @@
         "acoustidUrl": {
           "type": "string",
           "title": "AcoustID fingerprint sidecar URL",
-          "description": "URL of the AcoustID Docker sidecar (acoustid/ in this repo), e.g. http://acoustid:8097. The sidecar fingerprints files so songs without an MBID/ISRC can be accurately paired to their album. Leave empty to skip AcoustID."
+          "description": "URL of the AcoustID Docker sidecar (acoustid/ in this repo). Pre-set to http://nd-organizer-acoustid:8097 (the shared-network container name) - only change it if your sidecar lives elsewhere. The sidecar fingerprints files so songs without an MBID/ISRC can be accurately paired to their album. Clear the field to skip AcoustID.",
+          "default": "http://nd-organizer-acoustid:8097"
         },
-
         "primarySource": {
           "type": "string",
           "title": "Primary metadata source",
           "default": "musicbrainz",
           "oneOf": [
-            { "const": "lidarr", "title": "Lidarr (tracked artists)" },
-            { "const": "musicbrainz", "title": "MusicBrainz" },
-            { "const": "itunes", "title": "iTunes Search API" }
-          ]
+            {
+              "const": "lidarr",
+              "title": "Lidarr (tracked artists)"
+            },
+            {
+              "const": "musicbrainz",
+              "title": "MusicBrainz"
+            },
+            {
+              "const": "itunes",
+              "title": "iTunes Search API"
+            }
+          ],
+          "description": "Which source wins when sources disagree: 'musicbrainz' (default), 'lidarr', or 'itunes'."
         },
         "musicbrainzToken": {
           "type": "string",
-          "title": "MusicBrainz token",
+          "title": "MusicBrainz API token",
           "description": "Optional. Raises the rate limit from ~1 to ~50 requests/sec."
         },
         "lastfmApiKey": {
@@ -413,7 +510,9 @@
         "lastfmPassword": {
           "type": "string",
           "title": "Last.fm password",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Used once to obtain the session key for favorites sync."
         },
         "lastfmUser": {
@@ -421,32 +520,34 @@
           "title": "Last.fm username",
           "description": "Used with lastfmApiKey to pull user playcounts and sync favorites."
         },
-        "favoritesSyncEnabled": {
-          "type": "boolean",
-          "title": "Enable favorites sync",
-          "default": false,
-          "description": "Sync favorites between Navidrome (the hub) and connected platforms."
-        },
         "favoritesSyncLastfm": {
           "type": "boolean",
           "title": "Sync favorites with Last.fm (loved tracks)",
-          "default": true,
-          "description": "Bidirectional: Navidrome stars become Last.fm loves, and Last.fm loves become Navidrome stars."
+          "default": false,
+          "description": "The favorites-sync switch. When on: Navidrome stars become Last.fm loves and Last.fm loves become Navidrome stars (bidirectional). Needs lastfmApiKey + lastfmUser + lastfmApiSecret + lastfmPassword for the session."
         },
         "favoritesSyncMax": {
           "type": "integer",
           "title": "Max favorites to sync per run",
           "minimum": 10,
-          "default": 500
+          "default": 500,
+          "description": "Maximum number of favorites to process per sync pass (a safety cap)."
         },
         "genreFrom": {
           "type": "string",
           "title": "Genre source",
           "default": "musicbrainz",
           "oneOf": [
-            { "const": "musicbrainz", "title": "MusicBrainz" },
-            { "const": "lastfm", "title": "Last.fm" }
-          ]
+            {
+              "const": "musicbrainz",
+              "title": "MusicBrainz"
+            },
+            {
+              "const": "lastfm",
+              "title": "Last.fm"
+            }
+          ],
+          "description": "Where genres come from: 'musicbrainz', 'tags', or 'both'."
         },
         "overwriteExistingTags": {
           "type": "boolean",
@@ -456,20 +557,21 @@
         },
         "writePlaycount": {
           "type": "boolean",
-          "title": "Write playcounts from Last.fm",
+          "title": "Write playback metadata to tracks (playcount, stars, loved)",
           "default": false,
-          "description": "Write user playcount/listener data into tags (POPM counter for MP3, PLAYCOUNT/LISTENERS keys otherwise)."
+          "description": "When enabled (and in apply mode), writes each track's playcount (FMPS_PLAYCOUNT), star rating (RATING, 0-5) and loved/favorite status (LOVED) into its tags. Opt-in - keeps your audio files self-describing for other players. Respects overwriteExistingTags."
         },
-
         "embedArtwork": {
           "type": "boolean",
           "title": "Embed artwork in audio files",
-          "default": true
+          "default": true,
+          "description": "Download album art from the Cover Art Archive and embed it directly into each audio file's tags."
         },
         "writeCoverJpg": {
           "type": "boolean",
           "title": "Write cover.jpg sidecar",
-          "default": false
+          "default": false,
+          "description": "Also save the album art as a cover.jpg in the album folder (Navidrome/Plex/Kodi pick it up on rescan)."
         },
         "overwriteArt": {
           "type": "boolean",
@@ -482,47 +584,67 @@
           "title": "Artwork priority",
           "default": "coverartarchive",
           "oneOf": [
-            { "const": "embedded", "title": "Existing embedded art" },
-            { "const": "coverartarchive", "title": "Cover Art Archive" },
-            { "const": "itunes", "title": "iTunes" }
-          ]
+            {
+              "const": "embedded",
+              "title": "Existing embedded art"
+            },
+            {
+              "const": "coverartarchive",
+              "title": "Cover Art Archive"
+            },
+            {
+              "const": "itunes",
+              "title": "iTunes"
+            }
+          ],
+          "description": "Which artwork to prefer when several exist, in priority order, e.g. 'coverartarchive', 'embedded', 'folder'."
         },
         "artworkFront": {
           "type": "boolean",
           "title": "Download front cover",
-          "default": true
+          "default": true,
+          "description": "Download the album's front cover."
         },
         "artworkBack": {
           "type": "boolean",
           "title": "Download back cover",
-          "default": false
+          "default": false,
+          "description": "Download the album's back cover."
         },
         "artworkCd": {
           "type": "boolean",
           "title": "Download CD art",
-          "default": false
+          "default": false,
+          "description": "Download CD / disc art when available."
         },
         "artworkBooklet": {
           "type": "boolean",
-          "title": "Download booklet/medium art",
-          "default": false
+          "title": "Download booklet art",
+          "default": false,
+          "description": "Download booklet / medium art when available."
         },
         "downloadLyrics": {
           "type": "boolean",
           "title": "Download lyrics files",
           "default": false,
-          "description": "Fetch and save synchronized lyrics (.lrc) next to each track."
+          "description": "Fetch synchronized lyrics from LRCLIB (lrclib.net) and save them next to each track."
         },
         "lyricsFormat": {
           "type": "string",
           "title": "Lyrics format",
           "default": "lrc",
           "oneOf": [
-            { "const": "lrc", "title": "LRC (synchronized)" },
-            { "const": "txt", "title": "Plain text" }
-          ]
+            {
+              "const": "lrc",
+              "title": "LRC (synchronized)"
+            },
+            {
+              "const": "txt",
+              "title": "Plain text"
+            }
+          ],
+          "description": "Lyrics file format: 'lrc' for synchronized lyrics, 'txt' for plain text."
         },
-
         "lidarrUrl": {
           "type": "string",
           "title": "Lidarr URL",
@@ -530,24 +652,34 @@
         },
         "lidarrApiKey": {
           "type": "string",
-          "title": "Lidarr API key"
+          "title": "Lidarr API key",
+          "description": "API key for the Lidarr instance above (Lidarr: Settings > General)."
         },
         "lidarrMode": {
           "type": "string",
           "title": "Lidarr mode",
           "default": "disabled",
           "oneOf": [
-            { "const": "disabled", "title": "Disabled" },
-            { "const": "metadataOnly", "title": "Metadata + classification only" },
-            { "const": "metadataPlusRescan", "title": "Metadata + trigger Lidarr rescan" }
+            {
+              "const": "disabled",
+              "title": "Disabled"
+            },
+            {
+              "const": "metadataOnly",
+              "title": "Metadata + classification only"
+            },
+            {
+              "const": "metadataPlusRescan",
+              "title": "Metadata + trigger Lidarr rescan"
+            }
           ],
-          "description": "For Lidarr-tracked artists the Lidarr layout and tags are authoritative; the plugin reports discrepancies instead of moving/tagging them."
+          "description": "How to treat Lidarr-tracked artists: 'disabled' ignores Lidarr; 'metadataOnly' uses Lidarr metadata but the organizer still lays out the library; 'metadataPlusRescan' also asks Lidarr to refresh the artist after moves."
         },
         "writeTagsForTracked": {
           "type": "boolean",
           "title": "Write tags for Lidarr-tracked albums",
           "default": false,
-          "description": "Escape hatch: allow the plugin to write tags even for tracked albums. Off by default to avoid fighting Lidarr."
+          "description": "Override: allow the plugin to write tags even for Lidarr-tracked albums. Off by default to avoid conflicting with Lidarr."
         },
         "lidarrForceSearchIncomplete": {
           "type": "boolean",
@@ -561,99 +693,175 @@
           "default": false,
           "description": "Use Lidarr's naming config (artistFolderFormat/albumFolderFormat/standardTrackFormat) instead of the organizer's folderSchema/fileSchema. Requires lidarrUrl + lidarrApiKey."
         },
-
         "audiomuseUrl": {
           "type": "string",
           "title": "AudioMuse-AI URL",
-          "description": "e.g. http://192.168.3.203:8000. Empty disables AudioMuse-AI integration."
+          "description": "Base URL of your self-hosted AudioMuse-AI instance (github.com/NeptuneHub/AudioMuse-AI), e.g. http://audiomuse-ai-flask-app:8000 on the shared Docker network. Prefer the container name over a static IP so it survives container recreates. Used for the connectivity check and to trigger analysis after renames."
         },
         "audiomuseToken": {
           "type": "string",
-          "title": "AudioMuse-AI API token"
+          "title": "AudioMuse-AI API token",
+          "description": "API token for the AudioMuse-AI instance above, if it requires one (sent as a bearer token)."
         },
         "notifyAudiomuseAfterRun": {
           "type": "boolean",
           "title": "Trigger AudioMuse-AI re-sync after renames",
           "default": true,
-          "description": "Keeps AudioMuse-AI analysis valid after files move."
+          "description": "After a run that moved files, ask AudioMuse-AI to re-run library analysis (POST /api/analysis/start) so its results stay valid for the new paths."
         },
         "writeAcousticTags": {
           "type": "boolean",
           "title": "Write acoustic tags (BPM/key/mood/energy)",
           "default": false,
-          "description": "Pulls tempo/key/mood/energy from AudioMuse-AI (needs the acoustic-tags side plugin installed there)."
+          "description": "Write BPM/key/mood/energy tags into each track from AudioMuse-AI. NOTE: AudioMuse-AI exposes per-track acoustic features only through its in-process plugin API, not over HTTP - so this is skipped unless your instance (or an acoustic-tags plugin) exposes a per-track endpoint. Fails soft, never blocks a run."
         },
-
         "scanUser": {
           "type": "string",
-          "title": "Scan user",
-          "description": "Navidrome admin username used to trigger startScan."
+          "title": "Scan user (optional)",
+          "description": "Optional. The plugin normally uses the user(s) granted in User Access automatically - only set this to force a specific user for rescans and playback stats."
         },
         "triggerScanAfterRun": {
           "type": "boolean",
-          "title": "Trigger Navidrome scan after each run",
-          "default": true
+          "title": "Rescan after each run",
+          "default": true,
+          "description": "Ask Navidrome to re-scan after a run finishes so changes appear immediately."
         },
         "scanAfterAlbum": {
           "type": "boolean",
-          "title": "Scan after each album with path changes",
+          "title": "Rescan after each moved album",
           "default": true,
           "description": "Instantly rescans so the player never calls old filenames."
         },
         "scanAfterTagWrite": {
           "type": "boolean",
-          "title": "Scan after tag-only writes",
-          "default": false
+          "title": "Rescan after tag-only writes",
+          "default": false,
+          "description": "Also ask Navidrome to re-scan after tag/NFO writes, not just after file moves."
         },
         "scanDebounceSeconds": {
           "type": "integer",
           "title": "Scan debounce (seconds)",
           "minimum": 0,
           "default": 0,
-          "description": "0 = immediate scan after each changed album."
+          "description": "Delay Navidrome rescans by this many seconds so a burst of changes coalesces into a single scan. 0 = rescan immediately after each change."
+        },
+        "octoFiestaUrl": {
+          "type": "string",
+          "title": "Octo-Fiesta proxy URL",
+          "default": "",
+          "description": "URL of the octo-fiesta Subsonic proxy (e.g. http://octo-fiesta:8080 on the shared Docker network). The webhook dashboard reads this from the plugin status to probe its health. Leave empty to hide the octo-fiesta card."
+        },
+        "octoFiestaProvider": {
+          "type": "string",
+          "title": "Octo-Fiesta provider",
+          "default": "SquidWTF",
+          "description": "Display label for the provider octo-fiesta is configured with (SquidWTF, Deezer, Qobuz, Yandex). Shown on the dashboard card."
+        },
+        "maxScanEntries": {
+          "type": "integer",
+          "title": "Max files scanned per pass",
+          "default": 0,
+          "minimum": 0,
+          "description": "Cap on how many files one full-library scan indexes per run (0 = unlimited). When hit, the scan pauses and resumes where it stopped on the next run - useful for very large libraries. Chunking within a run is filesPerScanTask."
+        },
+        "cleanupNoAudioFolders": {
+          "type": "boolean",
+          "title": "Delete folders with no audio files",
+          "default": false,
+          "description": "After organizing, delete any library folder whose entire contents contain no audio files (only images, nfo, lyrics or other misc files). Handles empty folders AND folders left behind after moves. Apply mode only; dry-run reports what would be deleted. Never touches the library root or excluded paths."
         }
       },
-      "required": ["mode"]
+      "required": [
+        "mode"
+      ]
     },
-
     "uiSchema": {
       "type": "VerticalLayout",
       "elements": [
         {
           "type": "Group",
-          "label": "General & scheduling",
+          "label": "General & run scheduling",
           "elements": [
-            { "type": "Control", "scope": "#/properties/mode" },
-            { "type": "Control", "scope": "#/properties/runOnStartup" },
-            { "type": "Control", "scope": "#/properties/scheduleCron" },
-            { "type": "Control", "scope": "#/properties/maxAlbumsPerRun" },
+            {
+              "type": "Control",
+              "scope": "#/properties/mode"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/runOnStartup"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/scheduleCron"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/maxAlbumsPerRun"
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/albumsPerTask" },
-                { "type": "Control", "scope": "#/properties/filesPerScanTask" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/albumsPerTask"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/filesPerScanTask"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/maxScanEntries"
+                }
               ]
             },
-            { "type": "Control", "scope": "#/properties/runOnlyWhenIdle" }
+            {
+              "type": "Control",
+              "scope": "#/properties/runOnlyWhenIdle"
+            }
           ]
         },
         {
           "type": "Group",
-          "label": "Folder structure",
+          "label": "Library organization",
           "elements": [
-            { "type": "Control", "scope": "#/properties/folderSchema" },
-            { "type": "Control", "scope": "#/properties/fileSchema" },
+            {
+              "type": "Control",
+              "scope": "#/properties/folderSchema"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/fileSchema"
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/soundtrackFolder" },
-                { "type": "Control", "scope": "#/properties/variousFolder" },
-                { "type": "Control", "scope": "#/properties/singlesFolder" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/soundtrackFolder"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/variousFolder"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/singlesFolder"
+                }
               ]
             },
-            { "type": "Control", "scope": "#/properties/nestBucketsUnderVarious" },
-            { "type": "Control", "scope": "#/properties/singlesUnderArtist" },
-            { "type": "Control", "scope": "#/properties/singlesEnabled" },
+            {
+              "type": "Control",
+              "scope": "#/properties/nestBucketsUnderVarious"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/singlesUnderArtist"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/singlesEnabled"
+            },
             {
               "type": "Control",
               "scope": "#/properties/incompleteAlbumMinTracks",
@@ -661,36 +869,52 @@
                 "effect": "SHOW",
                 "condition": {
                   "scope": "#/properties/singlesEnabled",
-                  "schema": { "const": true }
+                  "schema": {
+                    "const": true
+                  }
                 }
               }
             },
-            { "type": "Control", "scope": "#/properties/preserveRecordingType" },
-            { "type": "Control", "scope": "#/properties/classifyFromMB" },
+            {
+              "type": "Control",
+              "scope": "#/properties/preserveRecordingType"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/classifyFromMB"
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/renameSidecars" },
-                { "type": "Control", "scope": "#/properties/pruneEmptyDirs" },
-                { "type": "Control", "scope": "#/properties/skipHiddenFiles" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/renameSidecars"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/pruneEmptyDirs"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/skipHiddenFiles"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/cleanupNoAudioFolders"
+                }
               ]
             },
-            { "type": "Control", "scope": "#/properties/illegalCharReplacement" },
-            { "type": "Control", "scope": "#/properties/maxNameLength" },
-            { "type": "Control", "scope": "#/properties/excludePaths" }
-          ]
-        },
-        {
-          "type": "Group",
-          "label": "Identity verification",
-          "elements": [
-            { "type": "Control", "scope": "#/properties/verifyIdentity" },
             {
-              "type": "HorizontalLayout",
-              "elements": [
-                { "type": "Control", "scope": "#/properties/minConfidence" },
-                { "type": "Control", "scope": "#/properties/skipUnverified" }
-              ]
+              "type": "Control",
+              "scope": "#/properties/illegalCharReplacement"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/maxNameLength"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/excludePaths"
             }
           ]
         },
@@ -698,17 +922,35 @@
           "type": "Group",
           "label": "Metadata & tags",
           "elements": [
-            { "type": "Control", "scope": "#/properties/primarySource" },
-            { "type": "Control", "scope": "#/properties/genreFrom" },
+            {
+              "type": "Control",
+              "scope": "#/properties/primarySource"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/genreFrom"
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/readNfo" },
-                { "type": "Control", "scope": "#/properties/writeNfo" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/readNfo"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/writeNfo"
+                }
               ]
             },
-            { "type": "Control", "scope": "#/properties/overwriteExistingTags" },
-            { "type": "Control", "scope": "#/properties/writePlaycount" }
+            {
+              "type": "Control",
+              "scope": "#/properties/overwriteExistingTags"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/writePlaycount"
+            }
           ]
         },
         {
@@ -718,19 +960,43 @@
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/embedArtwork" },
-                { "type": "Control", "scope": "#/properties/writeCoverJpg" },
-                { "type": "Control", "scope": "#/properties/overwriteArt" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/embedArtwork"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/writeCoverJpg"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/overwriteArt"
+                }
               ]
             },
-            { "type": "Control", "scope": "#/properties/artworkPriority" },
+            {
+              "type": "Control",
+              "scope": "#/properties/artworkPriority"
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/artworkFront" },
-                { "type": "Control", "scope": "#/properties/artworkBack" },
-                { "type": "Control", "scope": "#/properties/artworkCd" },
-                { "type": "Control", "scope": "#/properties/artworkBooklet" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/artworkFront"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/artworkBack"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/artworkCd"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/artworkBooklet"
+                }
               ]
             }
           ]
@@ -739,8 +1005,14 @@
           "type": "Group",
           "label": "Lyrics",
           "elements": [
-            { "type": "Control", "scope": "#/properties/downloadLyrics" },
-            { "type": "Control", "scope": "#/properties/lyricsFormat" }
+            {
+              "type": "Control",
+              "scope": "#/properties/downloadLyrics"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lyricsFormat"
+            }
           ]
         },
         {
@@ -751,20 +1023,48 @@
               "type": "Label",
               "text": "Release metadata, classification and artwork links."
             },
-            { "type": "Control", "scope": "#/properties/musicbrainzToken" }
+            {
+              "type": "Control",
+              "scope": "#/properties/musicbrainzToken"
+            }
           ]
         },
         {
           "type": "Group",
-          "label": "AcoustID",
+          "label": "AcoustID (fingerprint sidecar)",
           "elements": [
             {
               "type": "Label",
               "text": "Fingerprint sidecar (Docker) - verifies songs without an MBID/ISRC so they can be paired to their album."
             },
-            { "type": "Control", "scope": "#/properties/acoustidMode" },
-            { "type": "Control", "scope": "#/properties/acoustidUrl" },
-            { "type": "Control", "scope": "#/properties/acoustidApiKey" }
+            {
+              "type": "Control",
+              "scope": "#/properties/acoustidMode"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/acoustidUrl"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/acoustidApiKey"
+            },
+            {
+              "type": "Label",
+              "text": "Identity verification uses this sidecar for files without a MusicBrainz ID/ISRC."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/verifyIdentity"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/minConfidence"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/skipUnverified"
+            }
           ]
         },
         {
@@ -773,12 +1073,46 @@
           "elements": [
             {
               "type": "Label",
-              "text": "Genres, playcounts and favorites sync."
+              "text": "Genres, playcounts, star-rating scrobbles and favorites sync - all from your Last.fm account."
             },
-            { "type": "Control", "scope": "#/properties/lastfmApiKey" },
-            { "type": "Control", "scope": "#/properties/lastfmApiSecret", "options": { "format": "password" } },
-            { "type": "Control", "scope": "#/properties/lastfmPassword", "options": { "format": "password" } },
-            { "type": "Control", "scope": "#/properties/lastfmUser" }
+            {
+              "type": "Control",
+              "scope": "#/properties/lastfmApiKey"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lastfmApiSecret",
+              "options": {
+                "format": "password"
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lastfmPassword",
+              "options": {
+                "format": "password"
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lastfmUser"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lastfmScrobble"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lastfmImportPlaycount"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/favoritesSyncLastfm"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/favoritesSyncMax"
+            }
           ]
         },
         {
@@ -789,15 +1123,36 @@
               "type": "Label",
               "text": "Tracked-artist metadata, naming schema and force-search for incomplete monitored albums."
             },
-            { "type": "Control", "scope": "#/properties/lidarrUrl" },
-            { "type": "Control", "scope": "#/properties/lidarrApiKey", "options": { "format": "password" } },
-            { "type": "Control", "scope": "#/properties/lidarrMode" },
+            {
+              "type": "Control",
+              "scope": "#/properties/lidarrUrl"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lidarrApiKey",
+              "options": {
+                "format": "password"
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lidarrMode"
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/writeTagsForTracked" },
-                { "type": "Control", "scope": "#/properties/lidarrForceSearchIncomplete" },
-                { "type": "Control", "scope": "#/properties/useLidarrNamingSchema" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/writeTagsForTracked"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/lidarrForceSearchIncomplete"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/useLidarrNamingSchema"
+                }
               ]
             }
           ]
@@ -810,34 +1165,84 @@
               "type": "Label",
               "text": "Acoustic tags (BPM/key/mood) and re-sync after renames."
             },
-            { "type": "Control", "scope": "#/properties/audiomuseUrl" },
-            { "type": "Control", "scope": "#/properties/audiomuseToken", "options": { "format": "password" } },
+            {
+              "type": "Control",
+              "scope": "#/properties/audiomuseUrl"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/audiomuseToken",
+              "options": {
+                "format": "password"
+              }
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/notifyAudiomuseAfterRun" },
-                { "type": "Control", "scope": "#/properties/writeAcousticTags" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/notifyAudiomuseAfterRun"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/writeAcousticTags"
+                }
               ]
             }
           ]
         },
         {
           "type": "Group",
-          "label": "Subsonic filter proxy",
+          "label": "Filter proxy (playback sidecar)",
           "elements": [
             {
-              "type": "Label",
-              "text": "Playback filtering without touching files: the proxy drops filler-keyword tracks from client queues and removes net-negative skip-heavy tracks. Deploy proxy/docker-compose.yml, set its URL here, then enable \"Exclude skip-heavy tracks\" in Playback stats - the keyword list below is pushed to the proxy on every stats pass."
+              "type": "Control",
+              "scope": "#/properties/skipThresholdPercent"
             },
-            { "type": "Control", "scope": "#/properties/filterUrl" },
+            {
+              "type": "Label",
+              "text": "Playback filtering without touching files. The KEYWORD filter drops filler-keyword tracks from auto-queues (explicit searches still return them). The SKIP-CONTENT limiter controls how many skip-heavy (low-star) tracks may appear in queued lists: exclude entirely, a third, less than half, or half - or leave them alone (none). Deploy proxy/docker-compose.yml and set its URL below; settings are pushed to the proxy on every stats pass."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/filterUrl"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/keywordFilterEnabled"
+            },
             {
               "type": "Control",
               "scope": "#/properties/fillerKeywords",
               "rule": {
                 "effect": "SHOW",
                 "condition": {
-                  "scope": "#/properties/skipIgnoreEnabled",
-                  "schema": { "const": true }
+                  "scope": "#/properties/keywordFilterEnabled",
+                  "schema": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/skipContentMode"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/skipHeavyRatio",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/skipContentMode",
+                  "schema": {
+                    "enum": [
+                      "exclude",
+                      "third",
+                      "lessThanHalf",
+                      "half"
+                    ]
+                  }
                 }
               }
             }
@@ -845,44 +1250,82 @@
         },
         {
           "type": "Group",
-          "label": "Favorites sync",
+          "label": "Playback stats",
           "elements": [
-            { "type": "Control", "scope": "#/properties/favoritesSyncEnabled" },
-            { "type": "Control", "scope": "#/properties/favoritesSyncLastfm" },
-            { "type": "Control", "scope": "#/properties/favoritesSyncMax" }
+            {
+              "type": "Control",
+              "scope": "#/properties/playbackStatsEnabled"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/statsPollMinutes"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/topPicksCount"
+            }
           ]
         },
         {
           "type": "Group",
-          "label": "Playback stats",
+          "label": "Star ratings & playcount",
           "elements": [
-            { "type": "Control", "scope": "#/properties/playbackStatsEnabled" },
-            { "type": "Control", "scope": "#/properties/statsPollMinutes" },
+            {
+              "type": "Label",
+              "text": "Derives a 0-5 star rating (half-star steps) from each listen's playback percentage. Rating + playcount live in the plugin's own storage (use persistenceBackend=mysql for durable external storage) and the rating is published to Navidrome via setRating - never written to the audio file. Full listens (>= full %) earn a star and +1 playcount; half listens (>= half %) earn 0.5; skips before the half mark are a -0.5 penalty; a full listen forgives one prior skip."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/starTallyEnabled"
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/skipThresholdPercent" },
-                { "type": "Control", "scope": "#/properties/topPicksCount" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/starHalfPlayPercent"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/starFullPlayPercent"
+                }
               ]
             },
-            { "type": "Control", "scope": "#/properties/skipIgnoreEnabled" },
-            { "type": "Control", "scope": "#/properties/skipIgnoreRatio" }
+            {
+              "type": "Control",
+              "scope": "#/properties/starMinSamples"
+            }
           ]
         },
         {
           "type": "Group",
           "label": "Scanning & rescans",
           "elements": [
-            { "type": "Control", "scope": "#/properties/scanUser" },
+            {
+              "type": "Control",
+              "scope": "#/properties/scanUser"
+            },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/triggerScanAfterRun" },
-                { "type": "Control", "scope": "#/properties/scanAfterAlbum" },
-                { "type": "Control", "scope": "#/properties/scanAfterTagWrite" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/triggerScanAfterRun"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/scanAfterAlbum"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/scanAfterTagWrite"
+                }
               ]
             },
-            { "type": "Control", "scope": "#/properties/scanDebounceSeconds" }
+            {
+              "type": "Control",
+              "scope": "#/properties/scanDebounceSeconds"
+            }
           ]
         },
         {
@@ -892,52 +1335,114 @@
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/backupBeforeWrite" },
-                { "type": "Control", "scope": "#/properties/backupRetentionDays" },
-                { "type": "Control", "scope": "#/properties/rollbackRetentionDays" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/backupBeforeWrite"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/backupRetentionDays"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/rollbackRetentionDays"
+                }
               ]
             },
-            { "type": "Control", "scope": "#/properties/rollbackRunId" }
+            {
+              "type": "Control",
+              "scope": "#/properties/rollbackRunId"
+            }
           ]
         },
         {
           "type": "Group",
-          "label": "Logging & status",
+          "label": "Webhook (dashboard)",
           "elements": [
+            {
+              "type": "Label",
+              "text": "The plugin cannot host a web page, so reports/status are POSTed to the nd-organizer webhook sidecar, which renders the dashboard at its URL."
+            },
             {
               "type": "Label",
               "text": "Activity is tracked automatically: latest status/report live in the plugin KVStore and the Navidrome server log. Optionally push each run's report/status to a hosted log."
             },
-            { "type": "Control", "scope": "#/properties/logWebhookUrl" },
-            { "type": "Control", "scope": "#/properties/logWebhookToken", "options": { "format": "password" } }
+            {
+              "type": "Control",
+              "scope": "#/properties/logWebhookUrl"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/logWebhookToken",
+              "options": {
+                "format": "password"
+              }
+            }
           ]
         },
         {
           "type": "Group",
-          "label": "Persistence (MySQL)",
+          "label": "Octo-Fiesta (missing-track proxy)",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Octo-Fiesta (github.com/V1ck3s/octo-fiesta) is a third-party Subsonic proxy that serves songs your library doesn't have from a streaming provider. The webhook dashboard uses these to probe its health and show its activity."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/octoFiestaUrl"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/octoFiestaProvider"
+            }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Storage (MySQL sidecar)",
           "elements": [
             {
               "type": "Label",
               "text": "Store the plugin's cache/state in your own MySQL/MariaDB instead of the Navidrome-managed SQLite. Deploy the mysql sidecar (mysql/docker-compose.yml) and enter your database connection here."
             },
-            { "type": "Control", "scope": "#/properties/persistenceBackend" },
+            {
+              "type": "Control",
+              "scope": "#/properties/persistenceBackend"
+            },
             {
               "type": "Control",
               "scope": "#/properties/persistenceUrl",
               "rule": {
                 "effect": "SHOW",
-                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+                "condition": {
+                  "scope": "#/properties/persistenceBackend",
+                  "schema": {
+                    "const": "mysql"
+                  }
+                }
               }
             },
             {
               "type": "HorizontalLayout",
               "elements": [
-                { "type": "Control", "scope": "#/properties/mysqlHost" },
-                { "type": "Control", "scope": "#/properties/mysqlPort" }
+                {
+                  "type": "Control",
+                  "scope": "#/properties/mysqlHost"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/mysqlPort"
+                }
               ],
               "rule": {
                 "effect": "SHOW",
-                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+                "condition": {
+                  "scope": "#/properties/persistenceBackend",
+                  "schema": {
+                    "const": "mysql"
+                  }
+                }
               }
             },
             {
@@ -945,7 +1450,12 @@
               "scope": "#/properties/mysqlName",
               "rule": {
                 "effect": "SHOW",
-                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+                "condition": {
+                  "scope": "#/properties/persistenceBackend",
+                  "schema": {
+                    "const": "mysql"
+                  }
+                }
               }
             },
             {
@@ -953,16 +1463,28 @@
               "scope": "#/properties/mysqlUser",
               "rule": {
                 "effect": "SHOW",
-                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+                "condition": {
+                  "scope": "#/properties/persistenceBackend",
+                  "schema": {
+                    "const": "mysql"
+                  }
+                }
               }
             },
             {
               "type": "Control",
               "scope": "#/properties/mysqlPassword",
-              "options": { "format": "password" },
+              "options": {
+                "format": "password"
+              },
               "rule": {
                 "effect": "SHOW",
-                "condition": { "scope": "#/properties/persistenceBackend", "schema": { "const": "mysql" } }
+                "condition": {
+                  "scope": "#/properties/persistenceBackend",
+                  "schema": {
+                    "const": "mysql"
+                  }
+                }
               }
             }
           ]
@@ -971,5 +1493,3 @@
     }
   }
 }
-
-

@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import collections
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [acoustid] %(message)s",
@@ -34,9 +36,32 @@ logging.basicConfig(
 )
 log = logging.getLogger("acoustid")
 
+# Ring buffer of recent log lines so the webhook dashboard can read this
+# sidecar's logs (GET /logs) without Docker socket access.
+LOG_BUFFER = collections.deque(maxlen=500)
+
+
+class MemHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            LOG_BUFFER.append(self.format(record))
+        except Exception:
+            pass
+
+
+_mem = MemHandler()
+try:
+    _mem.setFormatter(logging.getLogger().handlers[0].formatter)
+except Exception:
+    pass
+logging.getLogger().addHandler(_mem)
+
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8097
 FPCALC_LENGTH = 120  # seconds; AcoustID recommends ~120s
 SERVICE = "nd-organizer-acoustid"
+
+STARTED = time.time()
+STATS = {"lookups": 0, "matches": 0, "errors": 0, "lastLookup": 0, "lastMatch": 0}
 
 COMMON_MOUNTS = ["/music", "/unsorted", "/mnt/music", "/mnt/unsorted", "/data/music"]
 
@@ -141,6 +166,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.startswith("/logs"):
+            body = "\n".join(LOG_BUFFER).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/status"):
+            self._send(200, {
+                "ok": True, "service": SERVICE,
+                "uptime": int(time.time() - STARTED),
+                "stats": STATS,
+            })
+            return
         if self.path.startswith("/health"):
             mounts = [m for m in COMMON_MOUNTS if os.path.isdir(m)]
             log.info("health check from %s (mounts=%s)", self.client_address[0], mounts)
@@ -163,24 +203,33 @@ class Handler(BaseHTTPRequestHandler):
             log.warning("missing path or acoustidApiKey from %s", self.client_address[0])
             return self._send(400, {"error": "path and acoustidApiKey are required"})
 
+        STATS["lookups"] += 1
+        STATS["lastLookup"] = int(time.time())
         log.info("lookup request from %s for %s", self.client_address[0], path)
         if not os.path.exists(path):
+            STATS["errors"] += 1
             log.error("file not found: %s (is this mount the same path as Navidrome sees?)", path)
             return self._send(200, {"ok": False, "error": "file not found: %s" % path})
 
         data, err = fpcalc(path)
         if err or data is None:
+            STATS["errors"] += 1
             return self._send(200, {"ok": False, "error": err or "could not fingerprint"})
 
         res, err = acoustid_lookup(apikey, data.get("duration", 0), data.get("fingerprint", ""))
         if err:
+            STATS["errors"] += 1
             return self._send(200, {"ok": False, "error": err})
         if not res or res.get("status") != "ok":
             msg = res.get("error", {}).get("message", "lookup failed")
+            STATS["errors"] += 1
             log.warning("AcoustID lookup reported error: %s", msg)
             return self._send(200, {"ok": False, "error": msg})
 
         matches = top_matches(res)
+        if matches:
+            STATS["matches"] += len(matches)
+            STATS["lastMatch"] = int(time.time())
         log.info("AcoustID result for %s: %d match(es) (top: %s)", path, len(matches),
                  matches[0]["title"] if matches else "none")
         return self._send(200, {"ok": True, "matches": matches})

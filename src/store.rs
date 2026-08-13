@@ -57,23 +57,33 @@ pub struct MysqlDb {
 /// re-instantiates the wasm module on a config save/rescan).
 pub fn kv() -> &'static Kv {
     static BACKEND: OnceLock<Kv> = OnceLock::new();
-    BACKEND.get_or_init(|| {
-        let cfg = crate::config::Config::load().unwrap_or_default();
-        if cfg.persistence_backend == "mysql" && !cfg.persistence_url.trim().is_empty() {
-            Kv::Mysql {
-                url: cfg.persistence_url.trim_end_matches('/').to_string(),
-                db: MysqlDb {
-                    host: cfg.mysql_host.clone(),
-                    port: cfg.mysql_port,
-                    name: cfg.mysql_name.clone(),
-                    user: cfg.mysql_user.clone(),
-                    password: cfg.mysql_password.clone(),
-                },
-            }
-        } else {
-            Kv::Host
+    BACKEND.get_or_init(|| build_backend(&crate::config::Config::load().unwrap_or_default()))
+}
+
+/// Backend selected from the config (host SQLite or the mysql sidecar).
+fn build_backend(cfg: &crate::config::Config) -> Kv {
+    if cfg.persistence_backend == "mysql" && !cfg.persistence_url.trim().is_empty() {
+        Kv::Mysql {
+            url: cfg.persistence_url.trim_end_matches('/').to_string(),
+            db: MysqlDb {
+                host: cfg.mysql_host.clone(),
+                port: cfg.mysql_port,
+                name: cfg.mysql_name.clone(),
+                user: cfg.mysql_user.clone(),
+                password: cfg.mysql_password.clone(),
+            },
         }
-    })
+    } else {
+        Kv::Host
+    }
+}
+
+/// A `Kv::Mysql` instance built from config, or None when not on the mysql backend.
+fn mysql_backend(cfg: &crate::config::Config) -> Option<Kv> {
+    match build_backend(cfg) {
+        Kv::Mysql { .. } => Some(build_backend(cfg)),
+        Kv::Host => None,
+    }
 }
 
 impl Kv {
@@ -283,4 +293,110 @@ pub fn append_log(level: &str, msg: &str) {
 /// Store a backup snapshot (original nfo/tag content) in the KVStore.
 pub fn save_backup(key: &str, bytes: Vec<u8>) -> Result<(), String> {
     kv().set(key, bytes)
+}
+
+// ------------------------------------------------------------- host -> mysql migration
+
+const MIGRATED_MARKER: &str = "db.migrated";
+const MIGRATE_CURSOR: &str = "dbmigrate.cursor";
+
+/// Result of one migration chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrateStatus {
+    /// Backend is not mysql - nothing to do.
+    NoMysql,
+    /// Already migrated, or there was no local data to copy.
+    Done,
+    /// Copied `usize` keys this chunk; more remain (call again).
+    Copied(usize),
+}
+
+/// True when the plugin is on the mysql backend and the local data has not
+/// been copied over yet (no `db.migrated` marker in the target database).
+pub fn mysql_migration_needed(cfg: &crate::config::Config) -> bool {
+    let Some(kv) = mysql_backend(cfg) else {
+        return false;
+    };
+    match kv.mysql_op("has", json!({ "key": MIGRATED_MARKER })) {
+        Ok(r) => !r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false),
+        Err(_) => false, // sidecar unreachable - don't loop forever
+    }
+}
+
+/// Copy one chunk of the local (host SQLite) KVStore into the mysql backend.
+/// Resumable: the last copied key is stored as a cursor in mysql, and a
+/// `db.migrated` marker is written when every key has been copied. The host
+/// data is never deleted, so switching back to 'host' keeps the original.
+/// Safe to call repeatedly (each pass copies `chunk` keys).
+pub fn migrate_mysql_chunk(cfg: &crate::config::Config, chunk: usize) -> Result<MigrateStatus, String> {
+    let Some(kv) = mysql_backend(cfg) else {
+        return Ok(MigrateStatus::NoMysql);
+    };
+    // Already migrated?
+    let done = kv
+        .mysql_op("has", json!({ "key": MIGRATED_MARKER }))
+        .map(|r| r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false))
+        .unwrap_or(false);
+    if done {
+        return Ok(MigrateStatus::Done);
+    }
+    // Everything currently in the local store.
+    let keys = host::kvstore::list("").map_err(|e| e.to_string())?;
+    if keys.is_empty() {
+        let _ = kv.mysql_op(
+            "set",
+            json!({ "key": MIGRATED_MARKER, "value": BASE64.encode(b"1".to_vec()), "ttlSeconds": 0 }),
+        );
+        return Ok(MigrateStatus::Done);
+    }
+    let mut sorted = keys;
+    sorted.sort();
+    // Where we left off (if the previous chunk was interrupted mid-way).
+    let cursor: Option<String> = kv
+        .mysql_op("get", json!({ "key": MIGRATE_CURSOR }))
+        .ok()
+        .and_then(|r| r.get("value").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|b64| BASE64.decode(b64).ok())
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|s| !s.is_empty());
+    let start = cursor
+        .as_ref()
+        .map(|c| sorted.partition_point(|k| k <= c))
+        .unwrap_or(0);
+
+    let mut copied = 0usize;
+    for k in sorted.iter().skip(start).take(chunk) {
+        if let Ok(Some(v)) = host::kvstore::get(k) {
+            let _ = kv.mysql_op(
+                "set",
+                json!({ "key": k, "value": BASE64.encode(v), "ttlSeconds": 0 }),
+            );
+            copied += 1;
+        }
+    }
+    let next = start + copied;
+    if next >= sorted.len() {
+        let _ = kv.mysql_op(
+            "set",
+            json!({ "key": MIGRATED_MARKER, "value": BASE64.encode(b"1".to_vec()), "ttlSeconds": 0 }),
+        );
+        let _ = kv.mysql_op("delete", json!({ "key": MIGRATE_CURSOR }));
+        crate::wasm::log_info(&format!(
+            "db: migrated {} keys from the local store to MySQL",
+            sorted.len()
+        ));
+        Ok(MigrateStatus::Done)
+    } else {
+        let next_key = &sorted[next];
+        let _ = kv.mysql_op(
+            "set",
+            json!({ "key": MIGRATE_CURSOR, "value": BASE64.encode(next_key.as_bytes().to_vec()), "ttlSeconds": 0 }),
+        );
+        crate::wasm::log_info(&format!(
+            "db: migrated {} keys to MySQL ({} remaining)",
+            copied,
+            sorted.len() - next
+        ));
+        Ok(MigrateStatus::Copied(copied))
+    }
 }
