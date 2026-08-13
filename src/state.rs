@@ -41,6 +41,33 @@ pub fn now_ts() -> i64 {
         .unwrap_or(0)
 }
 
+/// AcoustID circuit breaker windows (seconds).
+/// Retry: pause the batch and wait for the sidecar to come back.
+/// Cooldown: keep waiting, run fully stopped.
+/// After both expire the run resumes WITHOUT fingerprinting.
+pub const ACOUSTID_RETRY_SECS: i64 = 5 * 60;
+pub const ACOUSTID_COOLDOWN_SECS: i64 = 30 * 60;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AcoustidStage {
+    Retry,
+    Cooldown,
+    Degraded,
+}
+
+/// Which circuit stage a failure from `since` is in at `now`. Pure function so
+/// it can be host-tested; the KVStore glue lives in scan.rs.
+pub fn acoustid_stage(since: i64, now: i64) -> AcoustidStage {
+    let age = (now - since).max(0);
+    if age < ACOUSTID_RETRY_SECS {
+        AcoustidStage::Retry
+    } else if age < ACOUSTID_RETRY_SECS + ACOUSTID_COOLDOWN_SECS {
+        AcoustidStage::Cooldown
+    } else {
+        AcoustidStage::Degraded
+    }
+}
+
 /// Stable FNV-1a 64-bit hash for cache keys (deterministic across restarts).
 pub fn fnv1a64(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -105,7 +132,6 @@ pub fn rollback_record(
 #[cfg(target_arch = "wasm32")]
 pub mod host_state {
     use super::*;
-    use nd_pdk::host;
 
     pub fn new_run_id() -> String {
         format!("run-{}", now_ts())
@@ -215,9 +241,27 @@ pub mod host_state {
     }
 }
 
-/// Helper for `host_state`: build a backup key for a run+seq snapshot.
+/// KVStore key for a backup snapshot (original nfo/tag content).
 pub fn backup_key(run_id: &str, seq: i64) -> String {
     format!("backup:{run_id}:{seq}")
+}
+
+/// Snapshot a file's managed tag values before a tag write (`backupBeforeWrite`).
+/// Stored under `backup:{run}:{seq}` (same namespace as nfo backups) so a later
+/// tag restore can put them back. Metadata only - never copies audio.
+#[cfg(target_arch = "wasm32")]
+pub fn backup_tag_state(run_id: &str, path: &str, tags: &crate::tags::TrackTags) -> Option<String> {
+    let seq = host_state::next_seq(run_id).ok()?;
+    let key = backup_key(run_id, seq);
+    let data = serde_json::json!({
+        "kind": "tags",
+        "path": path,
+        "mbidAlbum": tags.mbid_album,
+        "mbidRecording": tags.mbid_recording,
+    })
+    .to_string();
+    crate::store::save_backup(&key, data.into_bytes()).ok()?;
+    Some(key)
 }
 
 /// Extract the unix timestamp from a run id like "run-1755123456".
@@ -380,6 +424,27 @@ mod tests {
         assert!(root.join("Album/a.flac").exists());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&storage);
+    }
+
+    #[test]
+    fn acoustid_circuit_stage_progression() {
+        let now = 1_000_000;
+        assert_eq!(
+            acoustid_stage(now - 60, now),
+            AcoustidStage::Retry,
+            "fresh failure: retry window, run paused"
+        );
+        assert_eq!(
+            acoustid_stage(now - ACOUSTID_RETRY_SECS - 1, now),
+            AcoustidStage::Cooldown,
+            "past retry: cooldown"
+        );
+        assert_eq!(
+            acoustid_stage(now - ACOUSTID_RETRY_SECS - ACOUSTID_COOLDOWN_SECS - 1, now),
+            AcoustidStage::Degraded,
+            "past both windows: resume without fingerprinting"
+        );
+        assert_eq!(acoustid_stage(now, now), AcoustidStage::Retry);
     }
 }
 

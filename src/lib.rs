@@ -9,9 +9,17 @@
 #![allow(dead_code)]
 
 mod config;
+#[cfg(target_arch = "wasm32")]
+mod artwork;
+#[cfg(target_arch = "wasm32")]
+mod audiomuse;
 mod favorites;
 mod identity;
 mod lidarr;
+#[cfg(target_arch = "wasm32")]
+mod lyrics;
+#[cfg(target_arch = "wasm32")]
+mod musicbrainz;
 mod nfo;
 mod organizer;
 mod report;
@@ -98,6 +106,10 @@ pub(crate) mod wasm {
         enqueue("group", library_id, "", "")
     }
 
+    pub(crate) fn enqueue_cleanup_task(library_id: i32) -> Result<(), String> {
+        enqueue("cleanup", library_id, "", "")
+    }
+
     pub(crate) fn enqueue_plan_tasks(
         cfg: &Config,
         library_id: i32,
@@ -159,6 +171,8 @@ pub(crate) mod wasm {
                     "mode": mode_label(&cfg),
                     "inProgress": false,
                     "integrations": integration_health(&cfg),
+            "octoFiestaUrl": cfg.octo_fiesta_url,
+            "octoFiestaProvider": cfg.octo_fiesta_provider,
                     "warnings": collect_warnings(&cfg),
                 })
                 .to_string();
@@ -214,6 +228,12 @@ pub(crate) mod wasm {
                 }
                 return Ok(());
             }
+            if req.payload == "rescan" {
+                if let Err(e) = rescan_now(&cfg) {
+                    log_warn(&format!("debounced rescan failed: {e}"));
+                }
+                return Ok(());
+            }
             match run_pass(&cfg) {
                 Ok(()) => log_info("run pass completed"),
                 Err(e) => log_error(&e),
@@ -240,12 +260,29 @@ pub(crate) mod wasm {
             record_task(kind, payload.library_id, "running", "");
             let r: Result<String, String> = match kind {
                 "scan" => match super::scan::scan_step(&cfg, payload.library_id) {
-                    Ok(true) => Ok("scan chunk done (more remain)".into()),
-                    Ok(false) => Ok("scan complete".into()),
+                    Ok((outcome, n)) => {
+                        let total: i64 = crate::store::kv()
+                            .get(&format!("scan.count.{}", payload.library_id))
+                            .ok()
+                            .flatten()
+                            .and_then(|v| String::from_utf8_lossy(&v).parse().ok())
+                            .unwrap_or(n as i64);
+                        Ok(match outcome {
+                            super::scan::ScanOutcome::More => format!(
+                                "scanned {n} files this chunk ({total} indexed so far - more remain)"
+                            ),
+                            super::scan::ScanOutcome::Done => format!(
+                                "scan complete: {n} files in the final chunk ({total} indexed)"
+                            ),
+                            super::scan::ScanOutcome::Paused => format!(
+                                "scan paused at maxScanEntries: {n} this chunk ({total} indexed - resumes next run)"
+                            ),
+                        })
+                    }
                     Err(e) => Err(e),
                 },
                 "group" => super::scan::group_step(&cfg, payload.library_id)
-                    .map(|n| format!("grouped into {n} plan tasks")),
+                    .map(|(n, files)| format!("grouped {files} files into {n} plan tasks")),
                 "plan" => super::scan::plan_step(
                     &cfg,
                     payload.library_id,
@@ -266,8 +303,30 @@ pub(crate) mod wasm {
                         s.nav_to_lastfm, s.lastfm_to_nav, s.errors
                     )
                 }),
+                "cleanup" => super::scan::cleanup_step(&cfg, payload.library_id).map(|n| {
+                    format!(
+                        "cleanup: {n} no-audio folder(s) {}",
+                        if cfg.mode == crate::config::Mode::Apply {
+                            "deleted"
+                        } else {
+                            "would be deleted (dry-run)"
+                        }
+                    )
+                }),
+                "migrate" => match crate::store::migrate_mysql_chunk(&cfg, 400) {
+                    Ok(crate::store::MigrateStatus::Copied(_)) => {
+                        // More local keys to copy - keep going on the next pass.
+                        if let Err(e) = enqueue("migrate", 0, "", "") {
+                            log_warn(&format!("re-enqueue migrate: {e}"));
+                        }
+                        Ok("db migration in progress (batch copied)".into())
+                    }
+                    Ok(crate::store::MigrateStatus::Done) => Ok("db migration complete".into()),
+                    Ok(crate::store::MigrateStatus::NoMysql) => Ok("not on mysql backend".into()),
+                    Err(e) => Err(e),
+                },
                 "stats" => match crate::stats::host_stats::poll(&cfg) {
-                    Ok((plays, skips)) => {
+                    Ok(report) => {
                         let picks = if cfg.top_picks_count > 0 {
                             crate::stats::host_stats::refresh_top_picks(&cfg, cfg.top_picks_count)
                                 .unwrap_or(0)
@@ -275,6 +334,14 @@ pub(crate) mod wasm {
                             0
                         };
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
+                        let ratings = crate::stats::host_stats::publish_star_ratings(&cfg).unwrap_or(0);
+                        let meta_writes = crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0);
+                        let top_rated: Vec<serde_json::Value> = crate::stats::host_stats::top_rated(12)
+                            .into_iter()
+                            .map(|(name, path, stars, plays)| {
+                                serde_json::json!({"name": name, "path": path, "stars": stars, "plays": plays})
+                            })
+                            .collect();
                         // Heartbeat: keep the webhook dashboard alive between runs
                         // (scan/batch status only posts on run events).
                         let heartbeat = serde_json::json!({
@@ -282,17 +349,23 @@ pub(crate) mod wasm {
                             "mode": mode_label(&cfg),
                             "inProgress": false,
                             "phase": "stats",
-                            "plays": plays,
-                            "skips": skips,
+                            "plays": report.plays,
+                            "skips": report.skips,
                             "topPicks": picks,
                             "filtered": filtered,
+                            "ratings": ratings,
+                            "metaWrites": meta_writes,
+                            "nowPlaying": report.now_playing,
+                            "topRated": top_rated,
                             "warnings": collect_warnings(&cfg),
                             "integrations": integration_health(&cfg),
+            "octoFiestaUrl": cfg.octo_fiesta_url,
+            "octoFiestaProvider": cfg.octo_fiesta_provider,
                             "tasks": task_log(),
                         })
                         .to_string();
                         post_webhook(&cfg, &heartbeat);
-                        Ok(format!("playback stats: {plays} plays, {skips} skips, {picks} top picks, {filtered} skip-heavy tracks removed by the filter proxy"))
+                        Ok(crate::stats::describe(&report, picks, filtered, ratings, meta_writes))
                     }
                     Err(e) => Err(e),
                 },
@@ -307,10 +380,12 @@ pub(crate) mod wasm {
     }
 
     /// Libraries to process: every library the plugin has been granted access
-    /// to via the Navidrome "Library Access" permission (the authority).
-    /// Any legacy `libraries`/`libraryId` config value is ignored.
-    fn target_libraries(cfg: &Config) -> Vec<i32> {
-        use std::collections::HashSet;
+    /// to via the Navidrome "Library Access" permission (the check marks in the
+    /// plugin settings) - the sole authority. `get_all_libraries` may list every
+    /// library, but `get_library(id)` enforces the permission, so we filter to
+    /// the genuinely accessible set. Legacy `libraries`/`libraryId` config values
+    /// are ignored.
+    fn target_libraries() -> Vec<i32> {
         let libs = match host::library::get_all_libraries() {
             Ok(libs) if !libs.is_empty() => libs,
             Ok(_) => {
@@ -322,21 +397,15 @@ pub(crate) mod wasm {
                 return Vec::new();
             }
         };
-        let granted: Vec<i32> = libs.into_iter().map(|l| l.id).collect();
-        // Empty `libraries` = organize every granted library. Otherwise only the
-        // configured ids are organized - warn loudly when one is not granted.
-        if cfg.libraries.is_empty() {
-            return granted;
-        }
-        let wanted: HashSet<i32> = cfg.libraries.iter().cloned().collect();
-        let targets: Vec<i32> = granted.iter().filter(|id| wanted.contains(id)).cloned().collect();
-        for id in &cfg.libraries {
-            if !targets.contains(id) {
-                log_warn(&format!(
-                    "library {id} is configured but NOT granted in the plugin's Library Access; \
-                     grant it in Navidrome plugin settings (or clear the libraries setting)"
-                ));
-            }
+        // Only libraries the plugin can actually reach count - this is exactly
+        // what the check marks in Library Access control.
+        let targets: Vec<i32> = libs
+            .into_iter()
+            .filter(|l| host::library::get_library(l.id).ok().flatten().is_some())
+            .map(|l| l.id)
+            .collect();
+        if targets.is_empty() {
+            log_warn("no accessible libraries; grant Library Access in the plugin settings");
         }
         targets
     }
@@ -356,15 +425,56 @@ pub(crate) mod wasm {
     }
 
     /// True when nothing is actually playing. Gated by `runOnlyWhenIdle`; uses
+    /// True when we may write tags for an artist's files. Lidarr-tracked artists
+    /// are left untouched unless `writeTagsForTracked` is enabled (Lidarr stays
+    /// the source of truth for its tracked artists).
+    pub(crate) fn should_write_tags(cfg: &Config, artist: &str) -> bool {
+        if cfg.lidarr_mode == crate::config::LidarrMode::Disabled || cfg.write_tags_for_tracked {
+            return true;
+        }
+        !crate::lidarr::host_lidarr::artist_tracked(cfg, artist)
+    }
+
+    /// The user the plugin acts as for Navidrome calls. Prefers the configured
+    /// `scanUser` when it's among the granted users; otherwise falls back to the
+    /// first granted admin (then first granted user). When Navidrome exposes no
+    /// user list, the configured scanUser is used as-is. This is what makes the
+    /// plugin work when a single user is selected in User Access instead of
+    /// requiring "all users".
+    pub(crate) fn scan_user(cfg: &Config) -> String {
+        let configured = cfg.scan_user.trim();
+        match host::users::get_users() {
+            Ok(users) if !users.is_empty() => {
+                if !configured.is_empty() && users.iter().any(|u| u.user_name == configured) {
+                    return configured.to_string();
+                }
+                if let Ok(admins) = host::users::get_admins() {
+                    if let Some(a) = admins.first() {
+                        if !a.user_name.is_empty() {
+                            return a.user_name.clone();
+                        }
+                    }
+                }
+                if let Some(u) = users.first() {
+                    if !u.user_name.is_empty() {
+                        return u.user_name.clone();
+                    }
+                }
+                configured.to_string()
+            }
+            _ => configured.to_string(),
+        }
+    }
+
     /// the Subsonic getNowPlaying API. Paused/stopped players count as idle -
     /// only entries whose `state` is "playing"/"starting" count as active.
     fn is_idle(cfg: &Config) -> bool {
         if !cfg.run_only_when_idle {
             return true;
         }
-        let user = cfg.scan_user.trim();
+        let user = scan_user(cfg);
         if user.is_empty() {
-            log_warn("runOnlyWhenIdle is on but scanUser is empty; treating as idle");
+            log_warn("runOnlyWhenIdle is on but no scan user is available; treating as idle");
             return true;
         }
         match host::subsonicapi::call(&format!("getNowPlaying?u={user}")) {
@@ -396,6 +506,60 @@ pub(crate) mod wasm {
                 true
             }
         }
+    }
+
+    /// First required external metadata provider that is currently unreachable.
+    /// Only providers this config actually relies on for identification /
+    /// album-track metadata count: AcoustID (verifyIdentity fingerprint),
+    /// MusicBrainz (classification / genres / primary source), Lidarr (tracked
+    /// artists). Artwork/lyrics/acoustic are enrichment - they stay fail-soft.
+    /// Returns the provider name so the run can skip and retry later.
+    fn required_meta_unreachable(cfg: &Config) -> Option<&'static str> {
+        use crate::config::{AcoustIdMode, LidarrMode, PrimarySource};
+        let empty = HashMap::new();
+        if cfg.verify_identity
+            && cfg.acoustid_mode != AcoustIdMode::Disabled
+            && !cfg.acoustid_url.trim().is_empty()
+        {
+            let url = format!("{}/health", cfg.acoustid_url.trim_end_matches('/'));
+            if !crate::net::circuit_check("acoustid", &url, &empty, 10_000) {
+                return Some("AcoustID");
+            }
+        }
+        let uses_mb = cfg.classify_from_mb
+            || cfg.genre_from == "musicbrainz"
+            || cfg.genre_from == "both"
+            || cfg.primary_source == PrimarySource::MusicBrainz;
+        if uses_mb {
+            if !crate::net::circuit_check(
+                "musicbrainz",
+                "https://musicbrainz.org/ws/2/",
+                &empty,
+                15_000,
+            ) {
+                return Some("MusicBrainz");
+            }
+        }
+        if cfg.lidarr_mode != LidarrMode::Disabled && !cfg.lidarr_url.trim().is_empty() {
+            let mut h = HashMap::new();
+            if !cfg.lidarr_api_key.trim().is_empty() {
+                h.insert("X-Api-Key".to_string(), cfg.lidarr_api_key.clone());
+            }
+            // Resolve through the same candidates as the health check (host
+            // LAN / docker host alias / subnet gateway) so a stale container
+            // IP doesn't block runs when the port is host-published.
+            let base = resolve_url_base(
+                "lidarr",
+                cfg.lidarr_url.trim_end_matches('/'),
+                "/api/v1/system/status",
+                &h,
+            );
+            let url = format!("{base}/api/v1/system/status");
+            if !crate::net::circuit_check("lidarr", &url, &h, 10_000) {
+                return Some("Lidarr");
+            }
+        }
+        None
     }
 
     /// Build the activity status JSON persisted under `status:latest`.
@@ -437,6 +601,8 @@ pub(crate) mod wasm {
             "totalFileMoves": total_moves,
             "warnings": collect_warnings(cfg),
             "integrations": integration_health(cfg),
+            "octoFiestaUrl": cfg.octo_fiesta_url,
+            "octoFiestaProvider": cfg.octo_fiesta_provider,
             "tasks": task_log(),
         })
         .to_string()
@@ -474,11 +640,76 @@ pub(crate) mod wasm {
             .unwrap_or_else(|| serde_json::json!([]))
     }
 
+    /// Navidrome server's own host[:port], derived from its base URL config.
+    /// Used to reach host-published sidecar ports (e.g. AudioMuse-AI's 8000)
+    /// when a configured container IP is unreachable from inside the Navidrome
+    /// container because they sit on different docker networks.
+    pub(crate) fn server_host() -> Option<String> {
+        let probe = |k: &str| -> Option<String> {
+            host::config::get(k)
+                .ok()
+                .flatten()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .and_then(|v| host_of_baseurl(&v))
+        };
+        for key in ["BaseUrl", "baseurl", "URL", "url"] {
+            if let Some(h) = probe(key) {
+                return Some(h);
+            }
+        }
+        if let Ok(keys) = host::config::keys("") {
+            for k in keys {
+                let l = k.to_lowercase();
+                if l.ends_with("baseurl") || l == "url" || l.ends_with("base_url") {
+                    if let Some(h) = probe(&k) {
+                        return Some(h);
+                    }
+                }
+            }
+        }
+        // Fall back to the bind address when it's a real LAN IP (not a wildcard).
+        for key in ["Address", "address", "BindAddress"] {
+            if let Ok(Some(v)) = host::config::get(key) {
+                let v = v.trim().to_string();
+                if !v.is_empty() && v != "0.0.0.0" && v != "::" && v != "localhost" {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    fn host_of_baseurl(baseurl: &str) -> Option<String> {
+        let rest = baseurl.split("://").nth(1)?;
+        let host_port = rest.split(['/', '?']).next()?.trim();
+        // Host only - the caller appends the target service's own port.
+        let host = host_port.split(':').next()?.trim();
+        if host.is_empty() {
+            None
+        } else {
+            Some(host.to_string())
+        }
+    }
+
     /// Probe a service URL (cached 1h) and return a warning when it's bad.
     pub(crate) fn probe_ok(
         key: &str,
         url: &str,
         headers: &HashMap<String, String>,
+    ) -> Option<String> {
+        probe_ok_timeout(key, url, headers, 5_000, 3600)
+    }
+
+    /// Probe a service URL with an explicit timeout + cache TTL. Slow services
+    /// (e.g. AudioMuse-AI, a heavy Flask app) get a longer timeout and a shorter
+    /// cache so a transient slow response doesn't stick as "unreachable".
+    pub(crate) fn probe_ok_timeout(
+        key: &str,
+        url: &str,
+        headers: &HashMap<String, String>,
+        timeout_ms: i32,
+        cache_ttl: i64,
     ) -> Option<String> {
         let cache_key = format!("probe:{}:{}", key, url);
         if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
@@ -495,10 +726,13 @@ pub(crate) mod wasm {
             headers: headers.clone(),
             no_follow_redirects: false,
             body: vec![],
-            timeout_ms: 5_000,
+            timeout_ms,
         };
         let result = match host::http::send(req) {
-            Ok(Some(resp)) if resp.status_code == 200 => Ok(()),
+            // 2xx AND 3xx mean the server answered - a 302 redirect (e.g. a
+            // login page) still proves the service is UP and reachable. Only a
+            // transport failure (no response / refused / timeout) is "offline".
+            Ok(Some(resp)) if resp.status_code < 400 => Ok(()),
             Ok(Some(resp)) => Err(format!(
                 "unreachable or wrong credentials (HTTP {})",
                 resp.status_code
@@ -510,7 +744,7 @@ pub(crate) mod wasm {
             Ok(()) => "ok".to_string(),
             Err(w) => format!("warn:{w}"),
         };
-        let _ = crate::store::kv().set_with_ttl(&cache_key, cached.into_bytes(), 3600);
+        let _ = crate::store::kv().set_with_ttl(&cache_key, cached.into_bytes(), cache_ttl);
         match result {
             Ok(()) => None,
             Err(w) => Some(format!("{key}: {w}")),
@@ -573,12 +807,15 @@ pub(crate) mod wasm {
             }
         }
 
-        // AudioMuse-AI
+        // AudioMuse-AI (heavy Flask app - slow to respond, so use a longer
+        // timeout and a shorter cache so recovery shows quickly). Uses the
+        // resolved base: configured URL, falling back to the server host's
+        // published port when the container IP isn't reachable from Navidrome.
         if cfg.audiomuse_url.trim().is_empty() {
             arr.push(json!({"name":"AudioMuse-AI","state":"notConfigured","detail":"audiomuseUrl not set"}));
         } else {
-            let url = cfg.audiomuse_url.trim_end_matches('/').to_string();
-            match probe_ok("audiomuse", &url, &empty) {
+            let url = crate::audiomuse::resolve_base(cfg);
+            match probe_ok_timeout("audiomuse", &url, &empty, 20_000, 300) {
                 None => arr.push(json!({"name":"AudioMuse-AI","state":"ok","detail":url})),
                 Some(w) => {
                     arr.push(json!({"name":"AudioMuse-AI","state":"unreachable","detail":w}))
@@ -586,7 +823,8 @@ pub(crate) mod wasm {
             }
         }
 
-        // MusicBrainz
+        // MusicBrainz (slow API - give it a real timeout and a short cache so a
+        // transient slow response doesn't stick as "unreachable" for an hour).
         {
             let url = "https://musicbrainz.org/ws/2/";
             let detail = if cfg.musicbrainz_token.trim().is_empty() {
@@ -594,7 +832,7 @@ pub(crate) mod wasm {
             } else {
                 "token set".to_string()
             };
-            match probe_ok("musicbrainz", url, &empty) {
+            match probe_ok_timeout("musicbrainz-hc", url, &empty, 15_000, 300) {
                 None => arr.push(json!({"name":"MusicBrainz","state":"ok","detail":detail})),
                 Some(w) => arr.push(json!({"name":"MusicBrainz","state":"unreachable","detail":w})),
             }
@@ -603,8 +841,7 @@ pub(crate) mod wasm {
         // Last.fm
         if cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty() {
             arr.push(json!({"name":"Last.fm","state":"notConfigured","detail":"set lastfmApiKey + lastfmUser"}));
-        } else if cfg.favorites_sync_enabled
-            && cfg.favorites_sync_lastfm
+        } else if cfg.favorites_sync_lastfm
             && !cfg.lastfm_api_secret.trim().is_empty()
             && !cfg.lastfm_password.trim().is_empty()
         {
@@ -633,7 +870,7 @@ pub(crate) mod wasm {
     /// Cached 5 min (shared by health + warnings) so the auth endpoint is not
     /// hammered on every status post.
     fn lastfm_auth_issue(cfg: &Config) -> Option<String> {
-        if !cfg.favorites_sync_enabled || !cfg.favorites_sync_lastfm {
+        if !cfg.favorites_sync_lastfm {
             return None;
         }
         if cfg.lastfm_api_secret.trim().is_empty() || cfg.lastfm_password.trim().is_empty() {
@@ -651,7 +888,7 @@ pub(crate) mod wasm {
     /// in the status JSON so users notice wrong API keys or IP addresses.
     fn collect_warnings(cfg: &Config) -> Vec<String> {
         let mut w = Vec::new();
-        if target_libraries(cfg).is_empty() {
+        if target_libraries().is_empty() {
             w.push(
                 "no libraries are accessible - grant Library Access in the plugin permissions"
                     .into(),
@@ -680,7 +917,15 @@ pub(crate) mod wasm {
         {
             w.push("writePlaycount requires lastfmApiKey and lastfmUser".into());
         }
-        if cfg.favorites_sync_enabled && cfg.favorites_sync_lastfm {
+        if cfg.lastfm_scrobble || cfg.lastfm_import_playcount {
+            if cfg.lastfm_api_key.trim().is_empty()
+                || cfg.lastfm_api_secret.trim().is_empty()
+                || cfg.lastfm_password.trim().is_empty()
+            {
+                w.push("lastfmScrobble / lastfmImportPlaycount need lastfmApiKey + lastfmApiSecret + lastfmPassword (Last.fm session)".into());
+            }
+        }
+        if cfg.favorites_sync_lastfm {
             if cfg.lastfm_api_secret.trim().is_empty() || cfg.lastfm_password.trim().is_empty() {
                 w.push("favorites sync (Last.fm) is on but needs lastfmApiSecret + lastfmPassword (for the session key)".into());
             } else if let Some(issue) = lastfm_auth_issue(cfg) {
@@ -688,8 +933,8 @@ pub(crate) mod wasm {
                     "favorites sync (Last.fm) cannot log in: {issue}. Check lastfmPassword (and lastfmApiSecret)."
                 ));
             }
-            if cfg.scan_user.trim().is_empty() {
-                w.push("favorites sync needs scanUser (a Navidrome user)".into());
+            if scan_user(cfg).is_empty() {
+                w.push("favorites sync needs a Navidrome user (grant one in User Access, or set scanUser)".into());
             }
         }
         if cfg.genre_from == "lastfm" && cfg.lastfm_api_key.trim().is_empty() {
@@ -700,8 +945,8 @@ pub(crate) mod wasm {
         {
             w.push("useLidarrNamingSchema is on but Lidarr URL/API key are not configured".into());
         }
-        if cfg.trigger_scan_after_run && cfg.scan_user.trim().is_empty() {
-            w.push("triggerScanAfterRun is on but scanUser is empty (startScan needs a Navidrome admin user)".into());
+        if cfg.trigger_scan_after_run && scan_user(cfg).is_empty() {
+            w.push("triggerScanAfterRun is on but no Navidrome user is available (grant one in User Access, or set scanUser)".into());
         }
         if !cfg.lidarr_url.trim().is_empty() {
             let mut h = HashMap::new();
@@ -723,16 +968,11 @@ pub(crate) mod wasm {
             }
         }
         if !cfg.audiomuse_url.trim().is_empty() {
-            let base = resolve_url_base(
-                "audiomuse",
-                cfg.audiomuse_url.trim_end_matches('/'),
-                "",
-                &HashMap::new(),
-            );
+            let base = crate::audiomuse::resolve_base(cfg);
             if crate::net::throttle("warn-probe-audiomuse", 60_000) {
                 if let Some(war) = probe_ok("audiomuse", &base, &HashMap::new()) {
                     w.push(format!(
-                        "AudioMuse-AI: {war}. If AudioMuse-AI runs in a Docker container, set audiomuseUrl to its container name on the same network (e.g. http://audiomuse:8000)."
+                        "AudioMuse-AI: {war}. If AudioMuse-AI runs in a Docker container, set audiomuseUrl to its container name on the same network (e.g. http://audiomuse-ai-flask-app:8000)."
                     ));
                 }
             }
@@ -771,15 +1011,29 @@ pub(crate) mod wasm {
     }
 
     /// Trigger a Navidrome rescan so the player never points at moved files.
-    /// Scans are incremental and coalesced by Navidrome, so calling after each
-    /// changed album is cheap and safe.
+    /// When `scanDebounceSeconds` > 0 the scan is scheduled instead of fired
+    /// immediately, so bursts of changes coalesce into one rescan. Scans are
+    /// incremental and also coalesced by Navidrome itself.
     pub(crate) fn trigger_navidrome_scan(cfg: &Config) -> Result<(), String> {
         if !cfg.trigger_scan_after_run {
             return Ok(());
         }
-        let user = cfg.scan_user.trim();
+        if cfg.scan_debounce_seconds > 0 {
+            let _ = host::scheduler::schedule_one_time(
+                cfg.scan_debounce_seconds.max(1),
+                "rescan",
+                "nd-organizer-rescan",
+            );
+            return Ok(());
+        }
+        rescan_now(cfg)
+    }
+
+    /// Fire `startScan` immediately (used by the debounced callback too).
+    fn rescan_now(cfg: &Config) -> Result<(), String> {
+        let user = scan_user(cfg);
         if user.is_empty() {
-            log_warn("triggerScanAfterRun is on but scanUser is empty");
+            log_warn("triggerScanAfterRun is on but no scan user is available");
             return Ok(());
         }
         match host::subsonicapi::call(&format!("startScan?u={user}")) {
@@ -808,12 +1062,28 @@ pub(crate) mod wasm {
             return do_rollback(cfg);
         }
         log_library_inventory();
+        // If the user switched persistenceBackend to mysql, copy the existing
+        // local data over (chunked task; re-enqueues itself until done).
+        if crate::store::mysql_migration_needed(cfg) {
+            log_info("persistenceBackend=mysql: migrating existing local data to MySQL");
+            if let Err(e) = enqueue("migrate", 0, "", "") {
+                log_warn(&format!("enqueue migrate: {e}"));
+            }
+        }
+        // Reset the per-run album budget so group_step can cap how many albums
+        // this pass plans (maxAlbumsPerRun; 0 = unlimited).
+        if cfg.max_albums_per_run > 0 {
+            let _ = crate::store::kv().set(
+                "run.albums.remaining",
+                cfg.max_albums_per_run.to_string().into_bytes(),
+            );
+        }
         // Prune rollback data older than the retention window (default 30d).
         let pruned = crate::state::host_state::prune_rollback(cfg.rollback_retention_days as i64);
         if pruned > 0 {
             log_info(&format!("pruned {pruned} stale rollback keys (retention {}d)", cfg.rollback_retention_days));
         }
-        let target_libs = target_libraries(cfg);
+        let target_libs = target_libraries();
         if target_libs.is_empty() {
             log_error("nothing to organize: no libraries are accessible");
             store::write_status(&status_json(cfg, false, &[], None, None));
@@ -828,6 +1098,8 @@ pub(crate) mod wasm {
                 "deferredUntilIdle": true,
                 "warnings": collect_warnings(cfg),
                 "integrations": integration_health(cfg),
+            "octoFiestaUrl": cfg.octo_fiesta_url,
+            "octoFiestaProvider": cfg.octo_fiesta_provider,
                 "tasks": task_log(),
             })
             .to_string();
@@ -839,8 +1111,38 @@ pub(crate) mod wasm {
             let _ = host::scheduler::schedule_one_time(120, "idle-retry", "");
             return Ok(());
         }
+        // A required external metadata provider (MusicBrainz / Lidarr /
+        // AcoustID, per this config) being unreachable means we can't build
+        // proper identities or album/track metadata. Skip the run and retry
+        // later instead of organizing on degraded data.
+        if let Some(provider) = required_meta_unreachable(cfg) {
+            log_info(&format!(
+                "run skipped: {provider} offline - retrying later (no actions without required metadata)"
+            ));
+            let status = serde_json::json!({
+                "ts": state::now_ts(),
+                "mode": mode_label(cfg),
+                "inProgress": false,
+                "metaSkipped": provider,
+                "warnings": collect_warnings(cfg),
+                "integrations": integration_health(cfg),
+                "octoFiestaUrl": cfg.octo_fiesta_url,
+                "octoFiestaProvider": cfg.octo_fiesta_provider,
+                "tasks": task_log(),
+            })
+            .to_string();
+            store::write_status(&status);
+            post_webhook(
+                cfg,
+                &format!(
+                    "nd-organizer: run skipped - {provider} is offline; retrying later so it never acts on missing metadata.\n{status}"
+                ),
+            );
+            let _ = host::scheduler::schedule_one_time(300, "meta-retry", "");
+            return Ok(());
+        }
         store::write_status(&status_json(cfg, true, &[], None, None));
-        if cfg.favorites_sync_enabled {
+        if cfg.favorites_sync_lastfm {
             if let Err(e) = enqueue("favsync", 0, "", "") {
                 log_warn(&format!("enqueue favsync: {e}"));
             }
@@ -852,6 +1154,9 @@ pub(crate) mod wasm {
         }
         let mut enqueued = 0;
         for &library_id in &target_libs {
+            // A fresh scan pass: reset the maxScanEntries per-pass counter so
+            // the cap applies per run, not cumulatively forever.
+            let _ = crate::store::kv().delete(&format!("scan.pass.{library_id}"));
             match enqueue_scan_task(library_id) {
                 Ok(()) => enqueued += 1,
                 Err(e) => log_warn(&format!("enqueue scan for library {library_id}: {e}")),
@@ -873,7 +1178,7 @@ pub(crate) mod wasm {
             return Ok(());
         }
         let mut errors = Vec::new();
-        let target_libs = target_libraries(cfg);
+        let target_libs = target_libraries();
         for &library_id in &target_libs {
             let lib = host::library::get_library(library_id)
                 .map_err(|e| e.to_string())?
@@ -959,7 +1264,7 @@ pub(crate) mod wasm {
     }
 
     /// Replace the host part of a URL (used to try docker host aliases).
-    fn host_replace(url: &str, new_host: &str) -> Option<String> {
+    pub(crate) fn host_replace(url: &str, new_host: &str) -> Option<String> {
         let idx = url.find("://")?;
         let scheme_end = idx + 3;
         let after = &url[scheme_end..];
@@ -979,10 +1284,10 @@ pub(crate) mod wasm {
     }
 
     /// Derive the subnet gateway of a URL's host (replace the last octet with 1,
-    /// e.g. http://172.99.0.12:8000 -> http://172.99.0.1:8000). Docker's bridge
+    /// e.g. http://172.18.0.5:8000 -> http://172.18.0.1:8000). Docker's bridge
     /// gateway can reach host-published ports, so this helps reach services on
     /// the container's own network without any Docker changes.
-    fn subnet_gateway(url: &str) -> Option<String> {
+    pub(crate) fn subnet_gateway(url: &str) -> Option<String> {
         let idx = url.find("://")? + 3;
         let after = &url[idx..];
         let path_start = after.find('/').unwrap_or(after.len());
@@ -1013,8 +1318,39 @@ pub(crate) mod wasm {
         headers: &HashMap<String, String>,
     ) -> String {
         let mut candidates = vec![configured.to_string()];
+        // The Navidrome host's own LAN address (from its BaseUrl/address) can
+        // reach host-published ports of containers on OTHER docker networks.
+        if let Some(host) = server_host() {
+            let port = configured
+                .rsplit(':')
+                .next()
+                .map(|p| p.split('/').next().unwrap_or(p))
+                .filter(|p| p.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or("");
+            let alt = if port.is_empty() {
+                configured
+                    .rsplit_once(':')
+                    .map(|(pre, _)| format!("{pre}:{host}"))
+                    .unwrap_or_else(|| configured.to_string())
+            } else {
+                format!("http://{host}:{port}")
+            };
+            if !candidates.contains(&alt) {
+                candidates.push(alt);
+            }
+        }
         for host in ["host.docker.internal", "172.17.0.1"] {
             if let Some(alt) = host_replace(configured, host) {
+                if !candidates.contains(&alt) {
+                    candidates.push(alt);
+                }
+            }
+        }
+        // Container name on the shared Docker network - once the user connects
+        // Lidarr to the same network as Navidrome (docker network connect ...),
+        // this resolves even though the configured static IP is stale.
+        if key == "lidarr" {
+            if let Some(alt) = host_replace(configured, "lidarr") {
                 if !candidates.contains(&alt) {
                     candidates.push(alt);
                 }

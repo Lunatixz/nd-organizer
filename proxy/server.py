@@ -37,25 +37,64 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
+
+import collections
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [filter] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger("filter")
 
+# Ring buffer of recent log lines so the webhook dashboard can read this
+# sidecar's logs (GET /logs) without Docker socket access.
+LOG_BUFFER = collections.deque(maxlen=500)
+
+
+class MemHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            LOG_BUFFER.append(self.format(record))
+        except Exception:
+            pass
+
+
+_mem = MemHandler()
+try:
+    _mem.setFormatter(logging.getLogger().handlers[0].formatter)
+except Exception:
+    pass
+logging.getLogger().addHandler(_mem)
+
 NAVIDROME_URL = os.environ.get("NAVIDROME_URL", "http://navidrome:4533").rstrip("/")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 4534
-KEYWORDS = [k.strip().lower() for k in os.environ.get("FILTER_KEYWORDS", "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview").split(",") if k.strip()]
-EXCLUDED = set()      # track IDs published by the organizer plugin (skip-heavy, removed entirely)
+KEYWORDS = [k.strip().lower() for k in os.environ.get("FILTER_KEYWORDS", "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke").split(",") if k.strip()]
+EXCLUDED = set()      # skip-heavy track IDs published by the organizer plugin
 WEIGHTS = {}          # track ID -> weight (plays - 2*skips); used to reorder returned song lists
-# Response containers whose song/entry lists are QUEUE sources: filler-keyword
-# tracks are dropped and lists are re-sorted by weight (skipped tracks sink).
+KEYWORD_FILTER_ENABLED = True   # pushed by the plugin; startup default
+SKIP_MODE = "none"              # none|exclude|third|lessThanHalf|half - pushed by the plugin
+
+STARTED = time.time()
+REQUESTS = 0
+LAST_REQUEST_TS = 0.0
+LAST_PUBLISH_TS = 0.0
+STREAMS = collections.deque(maxlen=20)  # recent stream requests: {ts, id}
+FILTERED = collections.deque(maxlen=50)  # recent dropped tracks: {ts, id, song, artist}
+# Response containers whose song/entry lists are QUEUE sources: lists are
+# re-sorted by weight (skipped tracks sink) so auto-queues push better songs.
 # Covers every documented Subsonic/OpenSubsonic song-list endpoint except
 # getAlbum (track order) and getNowPlaying / getPlayQueue (live/active queues).
 REORDER_CONTAINERS = {
     "randomSongs", "searchResult3", "starred2", "playlist",
     "similarSongs", "similarSongs2", "songsByGenre", "topSongs",
 }
+
+# Filler-keyword tracks are dropped from AUTO-QUEUE sources so intros/outros
+# never get queued for playback - but an EXPLICIT user search still returns
+# them (the user asked for those tracks). Search containers are re-sorted by
+# weight but keep their keyword tracks; hard-excluded tracks are removed
+# everywhere regardless (see should_drop).
+KEYWORD_DROP_CONTAINERS = REORDER_CONTAINERS - {"searchResult", "searchResult2", "searchResult3"}
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -77,17 +116,9 @@ def is_song(item):
     return isinstance(item, dict) and not item.get("isDir", False) and ("path" in item or "title" in item)
 
 
-def should_drop(item, drop_filler):
-    if not isinstance(item, dict):
-        return False
-    # Hard-excluded tracks (net-negative skips, past the cap): removed everywhere,
-    # including albums.
-    if item.get("id") in EXCLUDED:
-        return True
-    # Filler keywords are ignored from the QUEUE: dropped from auto-queue lists
-    # (random/search/playlist/genre/top/similar) but an album's track list stays
-    # whole so intros/outros remain visible in their album.
-    return drop_filler and is_filler_title(item.get("title", ""))
+def is_skip_heavy(item):
+    """A skip-heavy (low-star) track, per the organizer's published ID set."""
+    return isinstance(item, dict) and item.get("id") in EXCLUDED
 
 
 def weight_of(item):
@@ -98,13 +129,48 @@ def weight_of(item):
         return 0.0
 
 
+def _record_drop(item, reason):
+    try:
+        FILTERED.appendleft({
+            "ts": int(time.time()),
+            "reason": reason,
+            "id": str(item.get("id", "")),
+            "song": item.get("title", "") or item.get("path", ""),
+            "artist": item.get("artist", ""),
+        })
+    except Exception:
+        pass
+
+
+def _limit_skip_heavy(lst):
+    """Cap how many skip-heavy tracks may remain in a queued list (per SKIP_MODE:
+    exclude=0, third=1/3, lessThanHalf=0.4, half=1/2, none=no limit). Keeps the
+    highest-weight skip-heavy tracks and drops the rest."""
+    if SKIP_MODE in ("none", "exclude"):
+        return lst
+    sh = [it for it in lst if is_song(it) and is_skip_heavy(it)]
+    if not sh:
+        return lst
+    frac = {"third": 1.0 / 3.0, "lessThanHalf": 0.4, "half": 0.5}.get(SKIP_MODE, 0.0)
+    allowed = int(len(lst) * frac)
+    if len(sh) <= allowed:
+        return lst
+    drop = sorted(sh, key=weight_of)[: len(sh) - allowed]
+    drop_ids = {id(x) for x in drop}
+    for it in drop:
+        _record_drop(it, "excluded")
+    return [it for it in lst if id(it) not in drop_ids]
+
+
 def filter_json(obj, own_key=None):
     """Drop filtered song entries and reorder song lists inside auto-queue containers.
 
     `own_key` is the dict key under which the current object sits. Containers in
-    REORDER_CONTAINERS (queue sources) drop filler-keyword tracks and re-sort by
-    weight; album / now-playing / play-queue views stay whole (only hard-excluded
-    and path-marker tracks are removed there).
+    REORDER_CONTAINERS (queue + search sources) are weight re-sorted; containers
+    in KEYWORD_DROP_CONTAINERS (auto-queues only) additionally drop filler-keyword
+    tracks, so an explicit user search still returns them. Skip-heavy content is
+    limited per SKIP_MODE (exclude / third / lessThanHalf / half) in queue
+    containers only - albums stay whole and never drop skip-heavy tracks.
     """
     if isinstance(obj, dict):
         new = {k: filter_json(v, k) for k, v in obj.items()}
@@ -112,12 +178,25 @@ def filter_json(obj, own_key=None):
             lst = new.get(ck)
             if not isinstance(lst, list):
                 continue
-            if own_key in REORDER_CONTAINERS:
-                lst = [it for it in lst if not is_song(it) or not should_drop(it, True)]
-                lst = sorted(lst, key=weight_of, reverse=True)
-            else:
-                lst = [it for it in lst if not is_song(it) or not should_drop(it, False)]
-            new[ck] = lst
+            drop_keyword = own_key in KEYWORD_DROP_CONTAINERS and KEYWORD_FILTER_ENABLED
+            reorder = own_key in REORDER_CONTAINERS
+            kept = []
+            for it in lst:
+                if not is_song(it):
+                    kept.append(it)
+                    continue
+                if is_skip_heavy(it):
+                    if reorder and SKIP_MODE == "exclude":
+                        _record_drop(it, "excluded")
+                        continue
+                elif drop_keyword and is_filler_title(it.get("title", "")):
+                    _record_drop(it, "keyword")
+                    continue
+                kept.append(it)
+            if reorder:
+                kept = _limit_skip_heavy(kept)
+                kept = sorted(kept, key=weight_of, reverse=True)
+            new[ck] = kept
         return new
     if isinstance(obj, list):
         return [filter_json(it, None) for it in obj]
@@ -151,9 +230,52 @@ class Handler(BaseHTTPRequestHandler):
         log.info("http %s", fmt % args)
 
     def _handle(self, method):
+        global REQUESTS, LAST_REQUEST_TS
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = parsed.query
+        # Sidecar log reader for the webhook dashboard (never forwarded).
+        if method == "GET" and path.rstrip("/").endswith("/logs"):
+            body = "\n".join(LOG_BUFFER).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        # Rich status for the webhook dashboard (never forwarded).
+        if method == "GET" and path.rstrip("/").endswith("/status"):
+            info = {
+                "service": "nd-organizer-proxy",
+                "uptime": int(time.time() - STARTED),
+                "requests": REQUESTS,
+                "lastRequest": int(LAST_REQUEST_TS) if LAST_REQUEST_TS else 0,
+                "lastPublish": int(LAST_PUBLISH_TS) if LAST_PUBLISH_TS else 0,
+                "inUse": bool(LAST_REQUEST_TS and time.time() - LAST_REQUEST_TS < 300),
+                "keywords": list(KEYWORDS),
+                "excluded": len(EXCLUDED),
+                "weights": len(WEIGHTS),
+                "keywordFilter": KEYWORD_FILTER_ENABLED,
+                "skipMode": SKIP_MODE,
+                "streams": list(STREAMS),
+                "filtered": list(FILTERED),
+            }
+            body = json.dumps(info).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        REQUESTS += 1
+        LAST_REQUEST_TS = time.time()
+        if method == "GET" and path.rstrip("/").endswith("/stream"):
+            ids = urllib.parse.parse_qs(query).get("id")
+            if ids:
+                try:
+                    STREAMS.appendleft({"ts": int(time.time()), "id": ids[0]})
+                except Exception:
+                    pass
         if method == "POST" and path.rstrip("/").endswith("/filters"):
             self._publish_filters()
             return
@@ -224,7 +346,8 @@ class Handler(BaseHTTPRequestHandler):
         self._handle("DELETE")
 
     def _publish_filters(self):
-        global EXCLUDED, WEIGHTS, KEYWORDS
+        global EXCLUDED, WEIGHTS, KEYWORDS, KEYWORD_FILTER_ENABLED, SKIP_MODE, LAST_PUBLISH_TS
+        LAST_PUBLISH_TS = time.time()
         try:
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length else b"{}"
@@ -246,14 +369,21 @@ class Handler(BaseHTTPRequestHandler):
                 pushed = [str(k).strip().lower() for k in kw if str(k).strip()]
                 if pushed:
                     KEYWORDS = pushed
+            if "keywordFilter" in body:
+                KEYWORD_FILTER_ENABLED = bool(body["keywordFilter"])
+            mode = body.get("skipMode")
+            if isinstance(mode, str) and mode in ("none", "exclude", "third", "lessThanHalf", "half"):
+                SKIP_MODE = mode
             log.info(
-                "filter set updated: %d excluded track IDs, %d weights, %d keywords",
+                "filter set updated: %d skip-heavy IDs, %d weights, %d keywords, keywordFilter=%s, skipMode=%s",
                 len(EXCLUDED),
                 len(WEIGHTS),
                 len(KEYWORDS),
+                KEYWORD_FILTER_ENABLED,
+                SKIP_MODE,
             )
             out = json.dumps(
-                {"ok": True, "excluded": len(EXCLUDED), "weights": len(WEIGHTS), "keywords": len(KEYWORDS)}
+                {"ok": True, "excluded": len(EXCLUDED), "weights": len(WEIGHTS), "keywords": len(KEYWORDS), "skipMode": SKIP_MODE}
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -311,8 +441,10 @@ if __name__ == "__main__":
     log.info("listening on 0.0.0.0:%d", PORT)
     log.info("forwarding to %s", NAVIDROME_URL)
     log.info("filter keywords: %s", KEYWORDS or "(none)")
-    log.info("POST /filters {'excluded':[ids], 'weights':[[id,w,plays,skips],...]} to flag/reorder")
-    log.info("queue containers (keywords dropped + weight re-sort): %s", ", ".join(sorted(REORDER_CONTAINERS)))
+    log.info("POST /filters {'excluded':[ids], 'weights':[[id,w,plays,skips],...], 'skipMode':..., 'keywordFilter':...} to flag/reorder")
+    log.info("queue containers (weight re-sort): %s", ", ".join(sorted(REORDER_CONTAINERS)))
+    log.info("keyword tracks dropped from auto-queues (not from explicit search): %s", ", ".join(sorted(KEYWORD_DROP_CONTAINERS)))
+    log.info("skip-heavy limit mode: %s (exclude/third/lessThanHalf/half/none)", SKIP_MODE)
     log.info("keywords ignored from the queue; albums stay whole")
     log.info("point a Subsonic-compatible client at http://<host>:%d/rest/ using Navidrome credentials", PORT)
     log.info("=" * 60)

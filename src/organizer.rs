@@ -70,6 +70,9 @@ pub struct AlbumInfo {
     pub distinct_artists: Vec<String>,
     /// Uniform recording source (Live/Bootleg) or Mixed when tracks disagree.
     pub recording: Recording,
+    /// MusicBrainz release type ("Soundtrack"/"Compilation"/"Single") when
+    /// classifyFromMB found one; empty otherwise.
+    pub release_type: String,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +245,7 @@ fn album_info_raw(album: &AlbumDir) -> AlbumInfo {
         track_count: album.tracks.len(),
         distinct_artists,
         recording,
+        release_type: String::new(),
     }
 }
 
@@ -326,6 +330,15 @@ fn folder_name(rel: &str) -> String {
 pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
     let genre = info.genre.to_ascii_lowercase();
     let album = info.album.to_ascii_lowercase();
+    // MusicBrainz release type wins when classifyFromMB is on.
+    if cfg.classify_from_mb {
+        match info.release_type.to_ascii_lowercase().as_str() {
+            "soundtrack" | "score" => return Bucket::Soundtrack,
+            "compilation" | "live" => return Bucket::Various,
+            "single" | "ep" | "mixtape" if cfg.singles_enabled => return Bucket::Singles,
+            _ => {}
+        }
+    }
     let is_soundtrack = genre.contains("soundtrack")
         || genre.contains("ost")
         || album.contains("soundtrack")
@@ -718,6 +731,7 @@ pub fn album_info_from_tags(files: &[(String, TrackTags)]) -> AlbumInfo {
         track_count: files.len(),
         distinct_artists,
         recording,
+        release_type: String::new(),
     }
 }
 
@@ -837,8 +851,12 @@ pub fn build_group_plan(
     cfg: &Config,
     files: &[(String, TrackTags)],
     folder_hint: &str,
+    mb_release_type: &str,
 ) -> GroupPlan {
     let mut info = album_info_from_tags(files);
+    if !mb_release_type.trim().is_empty() {
+        info.release_type = mb_release_type.to_string();
+    }
     if info.album.is_empty() {
         info.album = folder_hint.to_string();
     }
@@ -1237,6 +1255,7 @@ mod tests {
                 vec![]
             },
             recording: Recording::Studio,
+            release_type: String::new(),
         };
 
         assert_eq!(
@@ -1263,6 +1282,23 @@ mod tests {
             classify(&info("Solo", "X", "Rock", 1, false), &c),
             Bucket::Singles
         );
+        // MusicBrainz release type drives classification when classifyFromMB is on.
+        let mut c2 = cfg();
+        c2.classify_from_mb = true;
+        let mb_info = |t: &str| AlbumInfo {
+            album: "Whatever".into(),
+            album_artist: "X".into(),
+            year: None,
+            genre: String::new(),
+            track_count: 14,
+            distinct_artists: vec![],
+            recording: Recording::Studio,
+            release_type: t.to_string(),
+        };
+        assert_eq!(classify(&mb_info("Soundtrack"), &c2), Bucket::Soundtrack);
+        assert_eq!(classify(&mb_info("Compilation"), &c2), Bucket::Various);
+        assert_eq!(classify(&mb_info("Single"), &c2), Bucket::Singles);
+        assert_eq!(classify(&mb_info("Album"), &c2), Bucket::Normal);
         assert_eq!(
             classify(&info("Partial", "X", "Rock", 2, false), &c),
             Bucket::Singles
@@ -1339,6 +1375,7 @@ mod tests {
             track_count: 1,
             distinct_artists: vec![],
             recording: Recording::Studio,
+            release_type: String::new(),
         };
         assert_eq!(
             target_album_dir(Bucket::Singles, &info, &c, "Crazy"),
@@ -1556,7 +1593,7 @@ mod tests {
             ("Album/01 - Intro.flac".to_string(), t1),
             ("Album/02 - Real Song.flac".to_string(), t2),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "");
         assert_eq!(plan.fillers.len(), 1);
         assert!(plan.fillers[0].contains("01 - Intro.flac"));
         // Albums stay whole: no subfolder routing, every file moves to album root.
@@ -1625,7 +1662,7 @@ mod tests {
             ("A/03 - Song.flac".to_string(), t1.clone()),
             ("B/03 - Song.flac".to_string(), t1),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "");
         assert_eq!(plan.duplicates.len(), 1, "one duplicate pair");
         // Winner is the first file; the loser routes to the artist's Singles folder.
         assert_eq!(plan.duplicates[0].winner, "A/03 - Song.flac");
@@ -1662,7 +1699,7 @@ mod tests {
             ("A/03 - Song.flac".to_string(), t1.clone()),
             ("B/03 - Song.flac".to_string(), t1),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "");
         assert!(
             plan.duplicates.is_empty(),
             "not 100% same -> not a confirmed duplicate"
@@ -1695,7 +1732,7 @@ mod tests {
             ("One/1.flac".to_string(), tags),
             ("Two/2.flac".to_string(), tags2),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "");
         assert_eq!(plan.moves.len(), 2);
         // Both land in the same target album dir.
         assert!(plan

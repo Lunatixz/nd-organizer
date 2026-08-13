@@ -95,6 +95,50 @@ pub mod host_lidarr {
         )
     }
 
+    /// Circuit-aware HTTP send. Distinguishes OFFLINE (transport failure / no
+    /// response / 5xx) from a live API that just returned no data (4xx/404):
+    /// only offline trips the circuit. 2xx clears it.
+    fn lidarr_send(
+        cfg: &Config,
+        method: &str,
+        url: String,
+        body: Vec<u8>,
+    ) -> Result<Option<host::http::HTTPResponse>, String> {
+        if !crate::net::circuit_probe(
+            "lidarr",
+            &format!("{}/api/v1/system/status", base_url(cfg)),
+            &headers_with_key(cfg),
+            10_000,
+        ) {
+            return Err("Lidarr offline (cooldown)".into());
+        }
+        let mut headers = headers_with_key(cfg);
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        let req = host::http::HTTPRequest {
+            method: method.into(),
+            url,
+            headers,
+            no_follow_redirects: false,
+            body,
+            timeout_ms: 15_000,
+        };
+        match host::http::send(req) {
+            Ok(Some(resp)) if (200..300).contains(&resp.status_code) => {
+                crate::net::circuit_clear("lidarr");
+                Ok(Some(resp))
+            }
+            Ok(Some(resp)) if resp.status_code >= 500 => {
+                crate::net::circuit_mark_failed("lidarr");
+                Ok(Some(resp))
+            }
+            Ok(other) => Ok(other), // 4xx / 404 / 401 -> live API, no data
+            Err(e) => {
+                crate::net::circuit_mark_failed("lidarr");
+                Err(e.to_string())
+            }
+        }
+    }
+
     /// Find a Lidarr album by title+artist. Cached for 24h (including "not
     /// found"). Fetches the album detail for the track count when the lookup
     /// does not include statistics.
@@ -117,15 +161,7 @@ pub mod host_lidarr {
             "{base}/api/v1/album/lookup?term={}",
             url_encode(&format!("{artist} {album}"))
         );
-        let req = host::http::HTTPRequest {
-            method: "GET".into(),
-            url,
-            headers: headers_with_key(cfg),
-            no_follow_redirects: false,
-            body: vec![],
-            timeout_ms: 15_000,
-        };
-        let mut found: Option<LidarrAlbum> = match host::http::send(req) {
+        let mut found: Option<LidarrAlbum> = match lidarr_send(cfg, "GET", url, vec![]) {
             Ok(Some(resp)) if resp.status_code == 200 => {
                 let body = String::from_utf8_lossy(&resp.body).into_owned();
                 serde_json::from_str::<Value>(&body)
@@ -150,15 +186,7 @@ pub mod host_lidarr {
         if let Some(a) = &found {
             if a.track_count.is_none() {
                 let url = format!("{base}/api/v1/album/{}", a.id);
-                let req = host::http::HTTPRequest {
-                    method: "GET".into(),
-                    url,
-                    headers: headers_with_key(cfg),
-                    no_follow_redirects: false,
-                    body: vec![],
-                    timeout_ms: 15_000,
-                };
-                if let Ok(Some(resp)) = host::http::send(req) {
+                if let Ok(Some(resp)) = lidarr_send(cfg, "GET", url, vec![]) {
                     if resp.status_code == 200 {
                         if let Ok(v) = serde_json::from_slice::<Value>(&resp.body) {
                             if let Some(mut a2) = parse_album(&v) {
@@ -203,6 +231,42 @@ pub mod host_lidarr {
         }
     }
 
+    /// Is this artist tracked in Lidarr? Cached 10 min so tag-write gating
+    /// doesn't hammer Lidarr once per album.
+    pub fn artist_tracked(cfg: &Config, artist: &str) -> bool {
+        let artist = artist.trim();
+        if artist.is_empty()
+            || cfg.lidarr_url.trim().is_empty()
+            || cfg.lidarr_api_key.trim().is_empty()
+        {
+            return false;
+        }
+        crate::net::cached(&format!("lidarr-artist:{}", artist.to_lowercase()), 600, || {
+            let base = base_url(cfg);
+            let url = format!("{base}/api/v1/artist/search?term={}", url_encode(artist));
+            let found = match lidarr_send(cfg, "GET", url, vec![]) {
+                Ok(Some(resp)) if resp.status_code == 200 => {
+                    let body = String::from_utf8_lossy(&resp.body).into_owned();
+                    serde_json::from_str::<Value>(&body)
+                        .ok()
+                        .and_then(|v| v.as_array().cloned())
+                        .map(|items| {
+                            items.iter().any(|a| {
+                                a.get("artistName")
+                                    .and_then(|n| n.as_str())
+                                    .map(|n| n.eq_ignore_ascii_case(artist))
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false)
+                }
+                _ => false,
+            };
+            Some(found)
+        })
+        .unwrap_or(false)
+    }
+
     /// Trigger a Lidarr AlbumSearch for the given album id (searches only the
     /// missing tracks).
     pub fn force_search(cfg: &Config, album_id: i64) -> Result<(), String> {
@@ -218,21 +282,11 @@ pub mod host_lidarr {
     /// POST a command body to Lidarr's /api/v1/command endpoint.
     fn send_command(cfg: &Config, body: &str) -> Result<(), String> {
         let base = base_url(cfg);
-        let mut headers = headers_with_key(cfg);
-        headers.insert("Content-Type".to_string(), "application/json".to_string());
-        let req = host::http::HTTPRequest {
-            method: "POST".into(),
-            url: format!("{base}/api/v1/command"),
-            headers,
-            no_follow_redirects: false,
-            body: body.as_bytes().to_vec(),
-            timeout_ms: 15_000,
-        };
-        match host::http::send(req) {
+        match lidarr_send(cfg, "POST", format!("{base}/api/v1/command"), body.as_bytes().to_vec()) {
             Ok(Some(resp)) if resp.status_code < 300 => Ok(()),
             Ok(Some(resp)) => Err(format!("Lidarr command returned HTTP {}", resp.status_code)),
             Ok(None) => Err("no response".into()),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(e),
         }
     }
 }

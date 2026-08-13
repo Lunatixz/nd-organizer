@@ -30,9 +30,13 @@
 import base64
 import json
 import logging
+import os
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import collections
 
 try:
     import pymysql
@@ -43,7 +47,33 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [mysqlkv] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger("mysqlkv")
 
+# Ring buffer of recent log lines so the webhook dashboard can read this
+# sidecar's logs (GET /logs) without Docker socket access.
+LOG_BUFFER = collections.deque(maxlen=500)
+
+
+class MemHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            LOG_BUFFER.append(self.format(record))
+        except Exception:
+            pass
+
+
+_mem = MemHandler()
+try:
+    _mem.setFormatter(logging.getLogger().handlers[0].formatter)
+except Exception:
+    pass
+logging.getLogger().addHandler(_mem)
+
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8098
+
+STARTED = time.time()
+OPS = 0
+LAST_OP = ""
+LAST_OP_TS = 0
+_LAST_DB = None  # db params from the most recent successful op (never persisted)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kvstore (
@@ -156,13 +186,68 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("http %s", fmt % args)
 
+    def do_GET(self):
+        if self.path.startswith("/logs"):
+            body = "\n".join(LOG_BUFFER).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/status"):
+            info = {
+                "service": "nd-organizer-mysql",
+                "uptime": int(time.time() - STARTED),
+                "ops": OPS,
+                "lastOp": LAST_OP,
+                "lastOpTs": LAST_OP_TS,
+                "db": None,
+            }
+            if _LAST_DB:
+                try:
+                    conn = connect(_LAST_DB)
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT COUNT(*), COALESCE(MAX(updated_at), MAX(created_at)) FROM kvstore"
+                        )
+                        rows, last_upd = cur.fetchone()
+                        cur.execute(
+                            "SELECT COALESCE(SUM(data_length + index_length), 0) "
+                            "FROM information_schema.tables "
+                            "WHERE table_schema = DATABASE() AND table_name = 'kvstore'"
+                        )
+                        size = cur.fetchone()[0]
+                    conn.close()
+                    info["db"] = {
+                        "rows": int(rows or 0),
+                        "bytes": int(size or 0),
+                        "lastUpdate": last_upd.strftime("%Y-%m-%d %H:%M:%S") if last_upd else None,
+                    }
+                except Exception as e:
+                    info["dbError"] = str(e)
+            body = json.dumps(info).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_POST(self):
+        global OPS, LAST_OP, LAST_OP_TS, _LAST_DB
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length).decode("utf-8", "replace")) if length else {}
         op = body.get("op")
         db = body.get("db") or {}
+        OPS += 1
+        LAST_OP = str(op)
+        LAST_OP_TS = int(time.time())
         try:
             result = handle(db, op, body)
+            _LAST_DB = db
             out = json.dumps({"result": result}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

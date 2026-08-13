@@ -165,6 +165,14 @@ pub mod host_favorites {
     }
 
     fn lastfm_get(cfg: &Config, method: &str, params: &[(&str, &str)]) -> Option<Value> {
+        if !crate::net::circuit_probe(
+            "lastfm",
+            "https://ws.audioscrobbler.com/2.0/",
+            &HashMap::new(),
+            10_000,
+        ) {
+            return None; // offline - fail fast (auto-recovers via probe)
+        }
         let mut q = format!("method={method}&api_key={}&format=json", cfg.lastfm_api_key);
         for (k, v) in params {
             q.push_str(&format!("&{k}={}", urlencode(v)));
@@ -179,9 +187,14 @@ pub mod host_favorites {
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
+                crate::net::circuit_clear("lastfm");
                 serde_json::from_slice::<Value>(&resp.body).ok()
             }
-            _ => None,
+            Ok(Some(_)) => None, // API error (auth etc.) - live, not an outage
+            Ok(None) | Err(_) => {
+                crate::net::circuit_mark_failed("lastfm");
+                None
+            }
         }
     }
 
@@ -223,11 +236,13 @@ pub mod host_favorites {
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
+                crate::net::circuit_clear("lastfm");
                 serde_json::from_slice::<Value>(&resp.body).map_err(|e| e.to_string())
             }
             Ok(Some(resp)) => {
                 // Last.fm replies with XML error bodies (e.g. code 4 "Authentication
                 // Failed") - surface them so a bad API key/password is obvious.
+                // An API error means Last.fm is LIVE, not an outage - no circuit trip.
                 let hint = String::from_utf8_lossy(&resp.body)
                     .chars()
                     .filter(|c| !c.is_control())
@@ -235,8 +250,14 @@ pub mod host_favorites {
                     .collect::<String>();
                 Err(format!("Last.fm HTTP {}: {}", resp.status_code, hint.trim()))
             }
-            Ok(None) => Err("Last.fm no response".into()),
-            Err(e) => Err(format!("Last.fm request failed: {e}")),
+            Ok(None) => {
+                crate::net::circuit_mark_failed("lastfm");
+                Err("Last.fm no response".into())
+            }
+            Err(e) => {
+                crate::net::circuit_mark_failed("lastfm");
+                Err(format!("Last.fm request failed: {e}"))
+            }
         }
     }
 
@@ -307,9 +328,9 @@ pub mod host_favorites {
     }
 
     fn nav_call(cfg: &Config, uri: &str) -> Result<Value, String> {
-        let user = cfg.scan_user.trim();
+        let user = crate::wasm::scan_user(cfg);
         if user.is_empty() {
-            return Err("scanUser is empty (needed for favorites sync)".into());
+            return Err("no Navidrome user available (grant one in User Access) for favorites sync".into());
         }
         let sep = if uri.contains('?') { "&" } else { "?" };
         let json =
@@ -370,10 +391,6 @@ pub mod host_favorites {
         nav_call(cfg, &format!("star?id={id}")).map(|_| ())
     }
 
-    fn nav_unstar(cfg: &Config, id: &str) -> Result<(), String> {
-        nav_call(cfg, &format!("unstar?id={id}")).map(|_| ())
-    }
-
     fn lastfm_love(cfg: &Config, sk: &str, artist: &str, title: &str) -> Result<(), String> {
         lastfm_post(
             cfg,
@@ -384,14 +401,47 @@ pub mod host_favorites {
         .map(|_| ())
     }
 
-    fn lastfm_unlove(cfg: &Config, sk: &str, artist: &str, title: &str) -> Result<(), String> {
-        lastfm_post(
+    /// Scrobble a full listen to Last.fm so its playcount grows too. Best-effort
+    /// (fails silently on auth/config problems - session() logs the issue).
+    /// Callers should only invoke this when the user opted into lastfmScrobble,
+    /// since scrobbling alongside Navidrome's own scrobbler double-counts plays.
+    pub(crate) fn scrobble(cfg: &Config, artist: &str, title: &str, album: &str, ts: i64) {
+        let Ok(sk) = session(cfg) else {
+            return;
+        };
+        let params: Vec<(String, String)> = vec![
+            ("artist".to_string(), artist.to_string()),
+            ("track".to_string(), title.to_string()),
+            ("album".to_string(), album.to_string()),
+            ("timestamp".to_string(), ts.to_string()),
+        ];
+        let p: Vec<(&str, &str)> = params
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        if let Err(e) = lastfm_post(cfg, &sk, "track.scrobble", &p) {
+            crate::wasm::log_warn(&format!("Last.fm scrobble failed: {e}"));
+        }
+    }
+
+    /// Last.fm playcount for a track (used to seed the star-tally baseline).
+    pub(crate) fn playcount(cfg: &Config, artist: &str, title: &str) -> i64 {
+        let res = lastfm_get(
             cfg,
-            sk,
-            "track.unlove",
-            &[("artist", artist), ("track", title)],
-        )
-        .map(|_| ())
+            "track.getInfo",
+            &[
+                ("artist", artist),
+                ("track", title),
+                ("username", &cfg.lastfm_user),
+                ("autocorrect", "0"),
+            ],
+        );
+        res.and_then(|v| {
+            v.pointer("/track/userplaycount")
+                .and_then(|p| p.as_str())
+                .and_then(|s| s.parse::<i64>().ok())
+        })
+        .unwrap_or(0)
     }
 
     fn lastfm_loved(cfg: &Config) -> Vec<LovedTrack> {
@@ -440,9 +490,6 @@ pub mod host_favorites {
     /// Bidirectional favorites sync: Navidrome stars <-> Last.fm loved tracks.
     pub fn sync(cfg: &Config) -> Result<SyncSummary, String> {
         let mut summary = SyncSummary::default();
-        if !cfg.favorites_sync_enabled {
-            return Ok(summary);
-        }
         if !cfg.favorites_sync_lastfm {
             crate::wasm::log_info("favorites sync: Last.fm disabled (favoritesSyncLastfm off)");
             return Ok(summary);
@@ -522,10 +569,6 @@ pub mod host_favorites {
             summary.nav_to_lastfm, summary.lastfm_to_nav, summary.errors
         ));
         Ok(summary)
-    }
-
-    pub fn unstar(cfg: &Config, id: &str) -> Result<(), String> {
-        nav_unstar(cfg, id)
     }
 }
 

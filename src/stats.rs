@@ -9,11 +9,21 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct NowPlayingEntry {
     pub id: String,
     pub position_ms: i64,
     pub duration: i64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub play_count: i64,
 }
 
 /// A track played for less than `threshold_pct`% of its duration counts as a skip.
@@ -69,6 +79,11 @@ pub fn parse_nowplaying(json: &str) -> Vec<NowPlayingEntry> {
                 id,
                 position_ms: e.get("positionMs").and_then(|x| x.as_i64()).unwrap_or(0),
                 duration: e.get("duration").and_then(|x| x.as_i64()).unwrap_or(0),
+                title: e.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                artist: e.get("artist").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                album: e.get("album").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                path: e.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                play_count: e.get("playCount").and_then(|x| x.as_i64()).unwrap_or(0),
             })
         })
         .collect()
@@ -82,9 +97,122 @@ pub fn parse_playlist_id(json: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+// ---------------------------------------------------------------- star rating
+
+/// Per-file playback tally for the 0-5 star system. `full` is also the
+/// playcount (only full listens >= starFullPlayPercent increment it).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct StarTally {
+    /// Absolute library path + filename the tally belongs to.
+    pub path: String,
+    /// Last-known Navidrome media file id (for setRating / baseline reads).
+    #[serde(default)]
+    pub id: String,
+    /// Title/artist captured at listen time (for display in dashboards).
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    /// Full listens (>= full%): +1.0 star AND +1 playcount.
+    pub full: i64,
+    /// Half listens (half%..full%): +0.5 star, no playcount.
+    pub half: i64,
+    /// Skips (< half%): -0.5 star penalty, no playcount.
+    pub skips: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StarBand {
+    Skip,
+    Half,
+    Full,
+}
+
+/// Classify a listen that ended at `played_pct` of its duration.
+pub fn star_band(played_pct: f64, half_pct: i32, full_pct: i32) -> StarBand {
+    if played_pct >= full_pct.max(half_pct) as f64 {
+        StarBand::Full
+    } else if played_pct >= half_pct as f64 {
+        StarBand::Half
+    } else {
+        StarBand::Skip
+    }
+}
+
+/// Apply one observed listen to a tally. A full listen also forgives one prior
+/// skip (removes a pending -0.5 penalty), so sustained listening can recover a
+/// rating. `full` is the playcount and is only ever incremented by Full.
+pub fn apply_band(mut t: StarTally, band: StarBand) -> StarTally {
+    match band {
+        StarBand::Full => {
+            t.full += 1;
+            if t.skips > 0 {
+                t.skips -= 1;
+            }
+        }
+        StarBand::Half => t.half += 1,
+        StarBand::Skip => t.skips += 1,
+    }
+    t
+}
+
+/// Star credit in 0.5 steps: full +1.0, half +0.5, skip -0.5.
+pub fn star_credit(t: &StarTally) -> f64 {
+    t.full as f64 + t.half as f64 * 0.5 - t.skips as f64 * 0.5
+}
+
+/// 0-5.0 rating, half-star granularity, capped at 5.0.
+pub fn star_rating(t: &StarTally) -> f64 {
+    let c = star_credit(t).clamp(0.0, 5.0);
+    (c * 2.0).round() / 2.0
+}
+
+/// One full stats pass result: per-track events observed this cycle plus
+/// cumulative counters so the task log reads as a real, detailed report.
+    pub struct StatsReport {
+        pub plays: usize,
+        pub skips: usize,
+        pub events: Vec<String>,
+        pub total_plays: i64,
+        pub total_skips: i64,
+        pub tracked: usize,
+        /// What is currently playing (from the getNowPlaying snapshot).
+        pub now_playing: Vec<NowPlayingEntry>,
+    }
+
+/// Human-readable summary of a stats pass for the task log / dashboard.
+pub fn describe(r: &StatsReport, picks: usize, filtered: usize, ratings: usize, meta_writes: usize) -> String {
+    let mut lines = vec![format!(
+        "stats: {} play(s), {} skip(s) observed",
+        r.plays, r.skips
+    )];
+    if r.events.is_empty() {
+        lines.push("  no playback activity observed this cycle".into());
+    } else {
+        lines.extend(r.events.iter().map(|e| format!("  - {e}")));
+    }
+    lines.push(format!(
+        "  cumulative: {} full plays, {} skips across {} tracked songs",
+        r.total_plays, r.total_skips, r.tracked
+    ));
+    if picks > 0 {
+        lines.push(format!("  Top Picks playlist refreshed with {picks} tracks"));
+    }
+        if filtered > 0 {
+            lines.push(format!("  filter proxy: {filtered} skip-heavy track(s) removed"));
+        }
+        if ratings > 0 {
+            lines.push(format!("  star: {ratings} rating(s) published to Navidrome"));
+        }
+        if meta_writes > 0 {
+            lines.push(format!("  meta: wrote playcount/stars/loved to {meta_writes} track(s)"));
+        }
+        lines.join("\n")
+    }
+
 #[cfg(target_arch = "wasm32")]
 pub mod host_stats {
-    use crate::config::Config;
+    use crate::config::{Config, SkipContentMode};
     use nd_pdk::host;
 
     use super::*;
@@ -116,7 +244,8 @@ pub mod host_stats {
     /// getNowPlaying returns every active session, so a single pass covers all
     /// users. Plays from observations are incremental (no historical scrobble
     /// ingestion), so weights build up over time on older hosts.
-    fn observe(user: &str, threshold_pct: i32) -> Result<(usize, usize), String> {
+    /// The same pass also feeds the 0-5 star tally (per filepath+filename).
+    fn observe(cfg: &Config, user: &str) -> Result<StatsReport, String> {
         let uri = format!("getNowPlaying?u={user}");
         let json = host::subsonicapi::call(&uri).map_err(|e| e.to_string())?;
         let current = parse_nowplaying(&json);
@@ -128,23 +257,274 @@ pub mod host_stats {
             .unwrap_or_default();
         let mut plays = 0usize;
         let mut skips = 0usize;
+        let mut events: Vec<String> = Vec::new();
         let current_ids: Vec<String> = current.iter().map(|e| e.id.clone()).collect();
         for prev in &previous {
             // A previously-playing track is no longer playing -> it ended.
             if !current_ids.contains(&prev.id) {
-                if is_skip(prev.duration, prev.position_ms, threshold_pct) {
+                let label = if prev.artist.is_empty() && prev.title.is_empty() {
+                    format!("track {}", prev.id)
+                } else {
+                    format!("{} - {} [{}]", prev.artist, prev.title, prev.album)
+                };
+                let pct = if prev.duration > 0 {
+                    (prev.position_ms as f64) / (prev.duration as f64 * 1000.0) * 100.0
+                } else {
+                    0.0
+                };
+                if is_skip(prev.duration, prev.position_ms, cfg.skip_threshold_percent) {
                     bump(&skip_key(&prev.id), 1);
                     skips += 1;
+                    events.push(format!(
+                        "skipped: {label} (stopped at {pct:.0}% of {}s)",
+                        prev.duration
+                    ));
                 } else {
                     // Played through the skip threshold: full play + forgiveness.
                     bump(&play_key(&prev.id), 1);
                     bump(&skip_key(&prev.id), -1);
                     plays += 1;
+                    events.push(format!("full play: {label}"));
+                }
+                // Star tally (0-5 rating) - independent of the filter weights.
+                if cfg.star_tally_enabled && !prev.path.is_empty() {
+                    record_star_listen(cfg, &prev, pct);
                 }
             }
         }
         let _ = crate::store::kv().set(&key, serde_json::to_vec(&current).unwrap_or_default());
-        Ok((plays, skips))
+        let (total_plays, total_skips, tracked) = totals();
+        Ok(StatsReport {
+            plays,
+            skips,
+            events,
+            total_plays,
+            total_skips,
+            tracked,
+            now_playing: current,
+        })
+    }
+
+    /// Highest-rated tracks (by star rating, then playcount) from the tally, for
+    /// the dashboard's "playcounts & stars" view.
+    pub fn top_rated(count: usize) -> Vec<(String, String, f64, i64)> {
+        let mut rows = Vec::new();
+        if let Ok(keys) = crate::store::kv().list("star.tally.") {
+            for k in keys {
+                let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
+                let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                if t.full + t.half + t.skips <= 0 {
+                    continue;
+                }
+                let name = if !t.title.is_empty() {
+                    format!("{} - {}", t.artist, t.title)
+                } else {
+                    t.path.clone()
+                };
+                rows.push((name, t.path.clone(), star_rating(&t), t.full));
+            }
+        }
+        rows.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.3.cmp(&a.3))
+        });
+        rows.truncate(count.max(0));
+        rows
+    }
+
+    fn star_tally_key(path: &str) -> String {
+        format!("star.tally.{:016x}", crate::state::fnv1a64(path))
+    }
+
+    fn load_star(path: &str) -> Option<StarTally> {
+        crate::store::kv()
+            .get(&star_tally_key(path))
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice::<StarTally>(&v).ok())
+            .filter(|t| !t.path.is_empty())
+    }
+
+    fn save_star(t: &StarTally) {
+        let _ = crate::store::kv().set(
+            &star_tally_key(&t.path),
+            serde_json::to_vec(t).unwrap_or_default(),
+        );
+    }
+
+    /// Apply one observed listen to the star tally. Seeds the baseline once per
+    /// file from Navidrome's playCount (plus Last.fm when opted in), scrobbles
+    /// full listens to Last.fm when enabled, and records the star band.
+    fn record_star_listen(cfg: &Config, prev: &NowPlayingEntry, played_pct: f64) {
+        let mut t = load_star(&prev.path).unwrap_or_else(|| StarTally {
+            path: prev.path.clone(),
+            id: prev.id.clone(),
+            ..Default::default()
+        });
+        // Keep display info fresh so dashboards can show names without lookups.
+        if !prev.title.is_empty() {
+            t.title = prev.title.clone();
+        }
+        if !prev.artist.is_empty() {
+            t.artist = prev.artist.clone();
+        }
+        t.id = if t.id.is_empty() { prev.id.clone() } else { t.id.clone() };
+        // First sight of this file: seed the playcount baseline.
+        if t.full + t.half + t.skips == 0 {
+            t.id = if t.id.is_empty() { prev.id.clone() } else { t.id.clone() };
+            let mut baseline = prev.play_count.max(0);
+            if cfg.lastfm_import_playcount && !prev.artist.is_empty() && !prev.title.is_empty() {
+                baseline = baseline.max(crate::favorites::host_favorites::playcount(
+                    cfg,
+                    &prev.artist,
+                    &prev.title,
+                ));
+            }
+            if baseline > t.full {
+                t.full = baseline;
+            }
+        }
+        let band = star_band(played_pct, cfg.star_half_play_percent, cfg.star_full_play_percent);
+        if band == StarBand::Full && cfg.lastfm_scrobble {
+            crate::favorites::host_favorites::scrobble(
+                cfg,
+                &prev.artist,
+                &prev.title,
+                &prev.album,
+                crate::state::now_ts(),
+            );
+        }
+        let before = star_rating(&t);
+        t = apply_band(t, band);
+        let after = star_rating(&t);
+        if before != after {
+            crate::wasm::log_info(&format!(
+                "star: {} - {} [{:?}] {before} -> {after} stars (full={} half={} skips={})",
+                prev.artist, prev.title, prev.album, t.full, t.half, t.skips
+            ));
+        }
+        save_star(&t);
+    }
+
+    /// Current rating + playcount for a file (None if untracked).
+    pub fn star_summary(abs_path: &str) -> Option<(f64, i64)> {
+        let t = load_star(abs_path)?;
+        Some((star_rating(&t), t.full))
+    }
+
+    /// Re-key a tally when the organizer moves a file (old abs -> new abs),
+    /// carrying the published-rating cache along so the rating survives.
+    pub fn migrate_star_tally(from_abs: &str, to_abs: &str) {
+        if from_abs == to_abs || from_abs.is_empty() || to_abs.is_empty() {
+            return;
+        }
+        let Some(mut t) = load_star(from_abs) else { return };
+        t.path = to_abs.to_string();
+        save_star(&t);
+        let _ = crate::store::kv().delete(&star_tally_key(from_abs));
+        let fk = format!("star.pub.{:016x}", crate::state::fnv1a64(from_abs));
+        let tk = format!("star.pub.{:016x}", crate::state::fnv1a64(to_abs));
+        if let Ok(Some(v)) = crate::store::kv().get(&fk) {
+            let _ = crate::store::kv().set(&tk, v);
+            let _ = crate::store::kv().delete(&fk);
+        }
+    }
+
+    /// Drop tallies whose file no longer exists on disk. Returns removed count.
+    pub fn prune_star_tallies() -> usize {
+        let mut removed = 0;
+        if let Ok(keys) = crate::store::kv().list("star.tally.") {
+            for k in keys {
+                let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
+                let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                if t.path.is_empty() {
+                    continue;
+                }
+                if std::path::Path::new(&t.path).exists() {
+                    continue;
+                }
+                let _ = crate::store::kv().delete(&k);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// Publish computed star ratings to Navidrome's native rating (setRating).
+    /// Apply mode only; only tracks with >= starMinSamples listens; only when
+    /// the published value would change (cached per file, capped per pass).
+    pub fn publish_star_ratings(cfg: &Config) -> Result<usize, String> {
+        use crate::config::Mode;
+        if !cfg.star_tally_enabled || cfg.mode != Mode::Apply {
+            return Ok(0);
+        }
+        let user = crate::wasm::scan_user(cfg);
+        if user.is_empty() {
+            return Ok(0);
+        }
+        let mut published = 0usize;
+        if let Ok(keys) = crate::store::kv().list("star.tally.") {
+            for k in keys {
+                if published >= 250 {
+                    break; // cap per pass; the rest publish on later passes
+                }
+                let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
+                let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                if t.id.is_empty() || t.path.is_empty() {
+                    continue;
+                }
+                if t.full + t.half + t.skips < cfg.star_min_samples as i64 {
+                    continue;
+                }
+                let stars = star_rating(&t);
+                let int_rating = stars.round() as u8;
+                let pub_key = format!("star.pub.{:016x}", crate::state::fnv1a64(&t.path));
+                if let Ok(Some(prev)) = crate::store::kv().get(&pub_key) {
+                    if String::from_utf8_lossy(&prev) == int_rating.to_string() {
+                        continue;
+                    }
+                }
+                let uri = format!("setRating?id={}&rating={}&u={user}", t.id, int_rating);
+                match host::subsonicapi::call(&uri) {
+                    Ok(_) => {
+                        let _ = crate::store::kv().set(&pub_key, int_rating.to_string().into_bytes());
+                        published += 1;
+                    }
+                    Err(e) => crate::wasm::log_warn(&format!(
+                        "setRating {} ({}): {e}",
+                        t.path, t.id
+                    )),
+                }
+            }
+        }
+        if published > 0 {
+            crate::wasm::log_info(&format!("star: published {published} rating(s) to Navidrome"));
+        }
+        Ok(published)
+    }
+
+    /// Cumulative play/skip counters + how many distinct songs are tracked.
+    fn totals() -> (i64, i64, usize) {
+        let mut plays = 0i64;
+        let mut tracked = 0usize;
+        if let Ok(keys) = crate::store::kv().list("stat.play.") {
+            tracked = keys.len();
+            for k in keys {
+                if let Ok(Some(v)) = crate::store::kv().get(&k) {
+                    plays += String::from_utf8_lossy(&v).parse::<i64>().unwrap_or(0);
+                }
+            }
+        }
+        let mut skips = 0i64;
+        if let Ok(keys) = crate::store::kv().list("stat.skip.") {
+            for k in keys {
+                if let Ok(Some(v)) = crate::store::kv().get(&k) {
+                    skips += String::from_utf8_lossy(&v).parse::<i64>().unwrap_or(0);
+                }
+            }
+        }
+        (plays, skips, tracked)
     }
 
     fn all_weights() -> Vec<(String, f64, i64, i64)> {
@@ -166,11 +546,85 @@ pub mod host_stats {
         weights
     }
 
+    /// Write playback metadata (playcount, star rating, loved status) into each
+    /// tracked file's tags. Opt-in via `writePlaycount`, apply mode only. The
+    /// loved set comes from Navidrome's starred songs (fetched once per pass).
+    pub fn write_playback_meta_tags(cfg: &Config) -> Result<usize, String> {
+        use crate::config::Mode;
+        if !cfg.write_playcount || cfg.mode != Mode::Apply {
+            return Ok(0);
+        }
+        let loved_ids: std::collections::HashSet<String> =
+            match host::subsonicapi::call("getStarred2?") {
+                Ok(json) => parse_starred_ids(&json),
+                Err(_) => std::collections::HashSet::new(),
+            };
+        let mut written = 0usize;
+        if let Ok(keys) = crate::store::kv().list("star.tally.") {
+            for k in keys {
+                let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
+                let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                if t.path.is_empty() || !std::path::Path::new(&t.path).exists() {
+                    continue;
+                }
+                let total = t.full + t.half + t.skips;
+                let stars = if total >= cfg.star_min_samples as i64 {
+                    Some(star_rating(&t))
+                } else {
+                    None
+                };
+                let loved = if t.id.is_empty() {
+                    None
+                } else {
+                    Some(loved_ids.contains(&t.id))
+                };
+                let abs = t.path.clone();
+                let artist = t.artist.clone();
+                if !crate::wasm::should_write_tags(cfg, &artist) {
+                    continue; // Lidarr-tracked artist, writeTagsForTracked off
+                }
+                if cfg.backup_before_write {
+                    if let Some(tags) = crate::tags::read_tags(std::path::Path::new(&abs)) {
+                        let _ = crate::state::backup_tag_state(
+                            &crate::state::host_state::new_run_id(),
+                            &abs,
+                            &tags,
+                        );
+                    }
+                }
+                match crate::tags::write_playback_meta(
+                    std::path::Path::new(&abs),
+                    stars,
+                    t.full,
+                    loved,
+                    cfg.overwrite_existing_tags,
+                ) {
+                    Ok(()) => written += 1,
+                    Err(e) => crate::wasm::log_warn(&format!("write playback meta {abs}: {e}")),
+                }
+            }
+        }
+        Ok(written)
+    }
+
+    fn parse_starred_ids(json: &str) -> std::collections::HashSet<String> {
+        let Ok(v) = serde_json::from_str::<Value>(json) else {
+            return std::collections::HashSet::new();
+        };
+        v.pointer("/subsonic-response/starred2/song")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|s| s.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .collect()
+    }
+
     /// Rebuild the "nd-organizer: Top Picks" Navidrome playlist from the weights.
     pub fn refresh_top_picks(cfg: &Config, count: usize) -> Result<usize, String> {
-        let user = cfg.scan_user.trim();
+        let user = crate::wasm::scan_user(cfg);
         if user.is_empty() {
-            return Err("scanUser needed for Top Picks playlist".into());
+            return Err("no Navidrome user available (grant one in User Access) for Top Picks playlist".into());
         }
         let weights = all_weights();
         let top: Vec<(String, f64)> = weights
@@ -218,40 +672,58 @@ pub mod host_stats {
 
     /// One stats pass: observe full plays + skips from now-playing transitions.
     /// No scrobbleretriever/users host services needed (older Navidrome).
-    pub fn poll(cfg: &Config) -> Result<(usize, usize), String> {
-        let user = cfg.scan_user.trim();
+    pub fn poll(cfg: &Config) -> Result<StatsReport, String> {
+        let user = crate::wasm::scan_user(cfg);
         if user.is_empty() {
-            return Ok((0, 0));
+            return Ok(StatsReport {
+                plays: 0,
+                skips: 0,
+                events: vec![],
+                total_plays: 0,
+                total_skips: 0,
+                tracked: 0,
+                now_playing: vec![],
+            });
         }
-        observe(user, cfg.skip_threshold_percent)
+        observe(cfg, &user)
     }
 
-    /// Publish play/skip weights + frequently-skipped track IDs to the Subsonic
-    /// filter proxy. The proxy reorders returned song lists by weight (so skipped
-    /// tracks sink) and removes tracks past the skip cap. No files are moved.
-    /// Opt-in (skipIgnoreEnabled + apply mode) and needs filterUrl configured.
+    /// Publish play/skip weights + skip-heavy track IDs + keywords to the
+    /// Subsonic filter proxy. The proxy re-sorts returned song lists by weight
+    /// (skipped tracks sink) and limits how many skip-heavy tracks can be queued
+    /// per the configured mode (exclude/third/lessThanHalf/half). No files moved.
+    /// Needs apply mode + filterUrl; runs when keyword filtering or skip-content
+    /// limiting is enabled.
     pub fn publish_filters(cfg: &Config) -> Result<usize, String> {
         use crate::config::Mode;
         use std::collections::HashMap;
-        if !cfg.skip_ignore_enabled || cfg.mode != Mode::Apply {
+        if cfg.mode != Mode::Apply {
             return Ok(0);
         }
         let base = cfg.filter_url.trim().trim_end_matches('/');
         if base.is_empty() {
             return Ok(0);
         }
-        let ratio = cfg.skip_ignore_ratio.clamp(0.0, 1.0);
+        let kw_on = cfg.keyword_filter_enabled;
+        let mode = cfg.skip_content_mode;
+        if !kw_on && mode == SkipContentMode::None {
+            return Ok(0);
+        }
+        let ratio = cfg.skip_heavy_ratio.clamp(0.0, 1.0);
         const MIN_SAMPLES: i64 = 3;
         let all = all_weights();
-        // Hard-remove only when the song is a NET NEGATIVE: skipped strictly more
-        // often than it was ever played in full AND its skip fraction passes the
-        // cap. A song you like that you occasionally skip (plays >= skips) stays
-        // hearable - it just sinks in priority via the weight reordering.
-        let excluded: Vec<String> = all
-            .iter()
-            .filter(|(_, _, plays, skips)| hard_exclude(*plays, *skips, ratio, MIN_SAMPLES))
-            .map(|(mfid, _, _, _)| mfid.clone())
-            .collect();
+        // Skip-heavy = NET NEGATIVE: skipped strictly more often than ever played
+        // in full (full plays forgive skips), 3+ interactions, and a skip
+        // fraction at/above skipHeavyRatio. Only computed when the user wants
+        // skip-content limiting at all.
+        let excluded: Vec<String> = if mode == SkipContentMode::None {
+            vec![]
+        } else {
+            all.iter()
+                .filter(|(_, _, plays, skips)| hard_exclude(*plays, *skips, ratio, MIN_SAMPLES))
+                .map(|(mfid, _, _, _)| mfid.clone())
+                .collect()
+        };
         let weights: Vec<serde_json::Value> = all
             .into_iter()
             .map(|(mfid, w, plays, skips)| serde_json::json!([mfid, w, plays, skips]))
@@ -259,10 +731,19 @@ pub mod host_stats {
         // Push the Navidrome fillerKeywords setting so it drives the proxy's
         // queue filtering (single source of truth; FILTER_KEYWORDS env is just
         // the startup default).
-        let keywords = crate::organizer::filler_keyword_list(cfg);
-        let payload =
-            serde_json::json!({ "excluded": excluded, "weights": weights, "keywords": keywords })
-                .to_string();
+        let keywords = if kw_on {
+            crate::organizer::filler_keyword_list(cfg)
+        } else {
+            Vec::new()
+        };
+        let payload = serde_json::json!({
+            "excluded": excluded,
+            "weights": weights,
+            "keywords": keywords,
+            "keywordFilter": kw_on,
+            "skipMode": mode.as_str(),
+        })
+        .to_string();
         let req = host::http::HTTPRequest {
             method: "POST".into(),
             url: format!("{base}/filters"),
@@ -274,10 +755,11 @@ pub mod host_stats {
         match host::http::send(req) {
             Ok(Some(resp)) if (200..300).contains(&resp.status_code) => {
                 crate::wasm::log_info(&format!(
-                    "published {} skip-heavy flags + {} weights + {} keywords to filter proxy at {base}",
+                    "published {} skip-heavy flags + {} weights + {} keywords (mode {}) to filter proxy at {base}",
                     excluded.len(),
                     weights.len(),
-                    keywords.len()
+                    keywords.len(),
+                    mode.as_str()
                 ));
                 Ok(excluded.len())
             }
@@ -334,18 +816,103 @@ mod tests {
     #[test]
     fn parses_nowplaying_and_playlist_id() {
         let np = r#"{"subsonic-response":{"nowPlaying":{"entry":[
-            {"id":"s1","positionMs":10000,"duration":180},
+            {"id":"s1","positionMs":10000,"duration":180,"title":"Alright","artist":"Electric Light Orchestra","album":"All Over the World"},
             {"id":"s2","positionMs":120000,"duration":240}
         ]}}}"#;
         let entries = parse_nowplaying(np);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].position_ms, 10_000);
         assert_eq!(entries[1].duration, 240);
+        assert_eq!(entries[0].title, "Alright");
+        assert_eq!(entries[0].artist, "Electric Light Orchestra");
+        assert_eq!(entries[0].album, "All Over the World");
+        assert_eq!(entries[1].title, "", "missing fields default to empty");
 
         assert_eq!(
             parse_playlist_id(r#"{"subsonic-response":{"playlist":{"id":"pl-9"}}}"#),
             Some("pl-9".into())
         );
+    }
+
+    #[test]
+    fn describe_is_detailed_even_when_idle() {
+        let r = StatsReport {
+            plays: 1,
+            skips: 2,
+            events: vec![
+                "full play: Electric Light Orchestra - Alright [All Over the World]".into(),
+                "skipped: Radiohead - Creep [Pablo Honey] (stopped at 12% of 238s)".into(),
+            ],
+            total_plays: 40,
+            total_skips: 9,
+            tracked: 27,
+            now_playing: vec![],
+        };
+        let msg = describe(&r, 12, 3, 2, 4);
+        assert!(msg.contains("1 play(s), 2 skip(s) observed"), "{}", msg);
+        assert!(msg.contains("Electric Light Orchestra - Alright"), "{}", msg);
+        assert!(msg.contains("40 full plays, 9 skips across 27 tracked songs"), "{}", msg);
+        assert!(msg.contains("Top Picks playlist refreshed with 12 tracks"), "{}", msg);
+        assert!(msg.contains("3 skip-heavy track(s) removed"), "{}", msg);
+        assert!(msg.contains("2 rating(s) published to Navidrome"), "{}", msg);
+        // Idle cycle still reports useful cumulative state.
+        let idle = StatsReport { plays: 0, skips: 0, events: vec![], total_plays: 40, total_skips: 9, tracked: 27, now_playing: vec![] };
+        let idle_msg = describe(&idle, 0, 0, 0, 0);
+        assert!(idle_msg.contains("no playback activity observed"), "{}", idle_msg);
+        assert!(idle_msg.contains("40 full plays, 9 skips across 27 tracked songs"), "{}", idle_msg);
+    }
+
+    #[test]
+    fn star_band_boundaries() {
+        // 55 half / 85 full.
+        assert_eq!(star_band(50.0, 55, 85), StarBand::Skip);
+        assert_eq!(star_band(54.9, 55, 85), StarBand::Skip);
+        assert_eq!(star_band(55.0, 55, 85), StarBand::Half);
+        assert_eq!(star_band(84.0, 55, 85), StarBand::Half);
+        assert_eq!(star_band(85.0, 55, 85), StarBand::Full);
+        assert_eq!(star_band(100.0, 55, 85), StarBand::Full);
+    }
+
+    #[test]
+    fn star_accumulates_with_penalty_and_cap() {
+        // 3 full listens -> 3.0 stars (a single play can't max the rating).
+        let t = apply_band(StarTally { full: 2, ..Default::default() }, StarBand::Full);
+        assert_eq!(star_rating(&t), 3.0);
+        // 5 full listens -> capped at 5.0.
+        let t = StarTally { full: 5, half: 2, skips: 1, ..Default::default() };
+        assert_eq!(star_credit(&t), 5.0 + 1.0 - 0.5);
+        assert_eq!(star_rating(&t), 5.0);
+        // 2 full + 2 half -> 3.0; skips penalize.
+        let t = apply_band(apply_band(StarTally { full: 2, ..Default::default() }, StarBand::Half), StarBand::Half);
+        assert_eq!(star_rating(&t), 3.0);
+        // All skips -> 0.0 (penalty).
+        let mut t = StarTally::default();
+        for _ in 0..3 {
+            t = apply_band(t, StarBand::Skip);
+        }
+        assert_eq!(star_rating(&t), 0.0);
+    }
+
+    #[test]
+    fn star_full_listen_forgives_one_skip() {
+        // 1 skip then 1 full: skip penalty is forgiven.
+        let t = apply_band(StarTally::default(), StarBand::Skip);
+        let t = apply_band(t, StarBand::Full);
+        assert_eq!(t.skips, 0);
+        assert_eq!(t.full, 1);
+        assert_eq!(star_rating(&t), 1.0);
+        // Half-step precision: 2 full + 1 skip -> 1.5 (not 1.0).
+        let t = apply_band(StarTally { full: 2, ..Default::default() }, StarBand::Skip);
+        assert_eq!(star_rating(&t), 1.5);
+    }
+
+    #[test]
+    fn star_playcount_is_full_listens_only() {
+        // Half listens and skips never increment the playcount.
+        let t = apply_band(StarTally::default(), StarBand::Half);
+        let t = apply_band(t, StarBand::Skip);
+        assert_eq!(t.full, 0, "half/skip must not touch playcount");
+        assert_eq!(star_credit(&t), 0.0);
     }
 }
 

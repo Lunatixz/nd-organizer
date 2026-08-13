@@ -139,3 +139,98 @@ pub fn read_tags(path: &Path) -> Option<TrackTags> {
         mbid_artist: mbid(ItemKey::MusicBrainzArtistId),
     })
 }
+
+/// Should a tag item be (re)written? With `overwrite=false` only missing fields
+/// are filled (existing values are preserved); `overwrite=true` replaces them.
+/// Always skips when the value is unchanged (no rewrite churn).
+pub fn should_write(existing: &str, new: &str, overwrite: bool) -> bool {
+    if existing == new {
+        return false;
+    }
+    if !overwrite && !existing.is_empty() {
+        return false;
+    }
+    true
+}
+
+/// Persist a resolved identity into the file's own tags. Once the file carries
+/// an MBID, every later run reads it straight out of the tags (confidence ->
+/// Verified), so AcoustID is never re-queried for it - even after the ident
+/// cache expires or the file is moved/renamed by the organizer. Idempotent:
+/// files that already have the album MBID are left untouched (no rewrite churn).
+pub fn write_mbids(
+    path: &Path,
+    album_mbid: &str,
+    recording_mbid: Option<&str>,
+    overwrite: bool,
+) -> Result<(), String> {
+    if album_mbid.is_empty() {
+        return Ok(());
+    }
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    let existing_album = tag.get_string(&ItemKey::MusicBrainzReleaseId).unwrap_or("");
+    if !should_write(existing_album, album_mbid, overwrite) {
+        return Ok(());
+    }
+    tag.insert_text(ItemKey::MusicBrainzReleaseId, album_mbid.to_string());
+    if let Some(rec) = recording_mbid.filter(|r| !r.is_empty()) {
+        if should_write(
+            tag.get_string(&ItemKey::MusicBrainzRecordingId).unwrap_or(""),
+            rec,
+            overwrite,
+        ) {
+            tag.insert_text(ItemKey::MusicBrainzRecordingId, rec.to_string());
+        }
+    }
+    let _ = tagged.insert_tag(tag);
+    tagged
+        .save_to_path(path, lofty::config::WriteOptions::default())
+        .map_err(|e| e.to_string())
+}
+
+/// Write playback metadata into a track's tags (opt-in, `writePlaycount`):
+/// `FMPS_PLAYCOUNT` (playcount), `RATING` (0.0-5.0 star value), and `LOVED`
+/// (1/0 favorite status). Idempotent + respects the fill-only/overwrite policy.
+pub fn write_playback_meta(
+    path: &Path,
+    stars: Option<f64>,
+    playcount: i64,
+    loved: Option<bool>,
+    overwrite: bool,
+) -> Result<(), String> {
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    let mut changed = false;
+    if playcount > 0 {
+        let pc = playcount.to_string();
+        let existing = tag.get_string(&ItemKey::Unknown("FMPS_PLAYCOUNT".into())).unwrap_or("");
+        if should_write(existing, &pc, overwrite) {
+            tag.insert_text(ItemKey::Unknown("FMPS_PLAYCOUNT".into()), pc);
+            changed = true;
+        }
+    }
+    if let Some(s) = stars {
+        let val = format!("{s}");
+        let existing = tag.get_string(&ItemKey::Unknown("RATING".into())).unwrap_or("");
+        if should_write(existing, &val, overwrite) {
+            tag.insert_text(ItemKey::Unknown("RATING".into()), val);
+            changed = true;
+        }
+    }
+    if let Some(l) = loved {
+        let val = if l { "1" } else { "0" };
+        let existing = tag.get_string(&ItemKey::Unknown("LOVED".into())).unwrap_or("");
+        if should_write(existing, val, overwrite) {
+            tag.insert_text(ItemKey::Unknown("LOVED".into()), val.to_string());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let _ = tagged.insert_tag(tag);
+    tagged
+        .save_to_path(path, lofty::config::WriteOptions::default())
+        .map_err(|e| e.to_string())
+}

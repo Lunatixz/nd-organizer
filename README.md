@@ -24,8 +24,12 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   `Singles` folder (filename disambiguated, e.g. `Title (from Album).flac`, so it
   never overwrites existing singles).
 - **Filler tracks**: intro/outro/interlude tracks (keyword-configurable) are
-  detected and flagged so the **Subsonic filter proxy** drops them from client
-  playback. **Albums stay whole and files are never moved.**
+  detected and dropped from **auto-queues** by the **Navidrome filter proxy**
+  (an explicit search still returns them). **Albums stay whole and files are
+  never moved.**
+- **Skip-content limiter**: skip-heavy (low-star) tracks never dominate your
+  queues — choose `exclude` / `third` / `lessThanHalf` (default) / `half` /
+  `none` for how much may appear. No files moved.
 - **Favorites sync**: Navidrome (the hub, Subsonic stars) <-> Last.fm loved
   tracks; any Subsonic-compatible client participates automatically through
   server-side stars.
@@ -36,6 +40,17 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   skip, and only net-negative tracks (skipped more than ever played fully, past
   a user-set cap) are removed — songs you occasionally skip stay hearable, and
   **no files are moved**.
+- **Star rating + playcount (0–5.0)**: every listen is classified by its playback
+  percentage into a **full star** (≥ `starFullPlayPercent`, default 85%), a
+  **half star** (≥ `starHalfPlayPercent`, default 55%), or a **skip penalty**
+  (below it). Full listens earn **+1.0★ and +1 playcount**; half listens **+0.5★**;
+  skips are a **−0.5★ penalty** that a later full listen **forgives**. The rating
+  is stored in the plugin's own storage (durable via `persistenceBackend = mysql`)
+  and **published to Navidrome's native rating** (`setRating`) once a track has
+  ≥ `starMinSamples` listens — the 0.5 precision lives in the plugin DB. Full
+  plays can optionally be **scrobbled to Last.fm** (`lastfmScrobble`) and the
+  baseline can be **imported from Last.fm** (`lastfmImportPlaycount`).
+  **No audio-file tags are written.**
 - **Refreshes metadata + artwork** from MusicBrainz, Cover Art Archive, iTunes
   and Last.fm; reads/writes Kodi-style `album.nfo`/`artist.nfo` sidecars.
 - **Integrates with Lidarr** (metadata/classification source, optional Lidarr
@@ -68,47 +83,123 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
 **Safety model:** `mode: dryRun` is the default — it plans and reports but writes
 nothing. Review the report/status, then switch to `apply`.
 
+## Star rating & playcount (0–5.0)
+
+A universal 5-star rating derived from how you actually listen, at half-star
+granularity:
+
+| Listen ends at | Playcount | Star credit |
+|---|---|---|
+| ≥ `starFullPlayPercent` (85%) | **+1** | **+1.0 ★** |
+| `starHalfPlayPercent`–`starFullPlayPercent` (55–84%) | — | **+0.5 ★** |
+| < `starHalfPlayPercent` (55%) | — | **−0.5 ★** (penalty) |
+
+- **Playcount is full listens only.** A skip never increments it, so it acts as a
+  pure penalty against the rating.
+- **A full listen forgives one prior skip** — sustain full listening and a
+  rating recovers.
+- Rating is capped at **5.0** and rounded to the nearest **0.5**.
+- Stored in the plugin's KVStore, keyed by **file path + filename** — so it
+  survives restarts, and if you enable `persistenceBackend = mysql` it lives in
+  your own durable database.
+- **Published to Navidrome** (`setRating`) once a track has ≥ `starMinSamples`
+  observed listens (prevents a single play from stamping a rating). Navidrome's
+  rating is whole-star; the half-star precision is kept in the plugin DB and
+  shown in the webhook dashboard / dry-run preview.
+- **Follows file renames**: when the organizer moves a file the tally is migrated
+  to the new path, and orphaned tallies are pruned automatically.
+- **Last.fm (optional)**: `lastfmScrobble` scrobbles full listens so Last.fm's
+  playcount grows too (keep off if Navidrome already scrobbles — it would
+  double-count); `lastfmImportPlaycount` seeds each track's baseline from
+  Last.fm. Last.fm has no rating API, so only playcount is synced.
+- **Never writes to the audio file** — the rating/playcount live in the plugin
+  DB and Navidrome only.
+- The **dry-run report** previews each tracked file's current stars + playcount,
+  so you see exactly what an apply run would publish.
+
 ## Docker setup (docker-compose)
 
-The plugin itself is a `.ndp` file in Navidrome's plugins folder. Three optional
+The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 **sidecar images** run as containers:
 
 | Image | Purpose |
 |---|---|
+| `ghcr.io/v1ck3s/octo-fiesta` | Missing-track proxy (third-party, GPL-3.0) — when a requested song isn't in the library, fetches it from the configured provider and streams it. Supports SquidWTF (free, no creds), Deezer, Qobuz, Yandex. |
 | `ghcr.io/lunatixz/nd-organizer/acoustid:latest` | Fingerprints songs (AcoustID) so unverified files can be paired to their album. |
 | `ghcr.io/lunatixz/nd-organizer/webhook:latest` | A web dashboard showing status + reports (auto-refreshing). |
-| `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler tracks from the queue and skip-heavy tracks past the cap, re-sorts lists by weight, without touching files. |
+| `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from **auto-queues** (random/playlist/similar/genre/top/starred, but **not** explicit user searches), removes skip-heavy tracks past the cap everywhere, and re-sorts returned lists by weight, without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
+| `ghcr.io/neptunehub/audiomuse-ai-musicserver:latest` | Optional Subsonic music server (third-party, AGPL-3.0) — an open-source alternative to Navidrome showcasing AudioMuse-AI's sonic analysis. Web UI `:3000`, Open Subsonic API `:8080`. **Commented out** in the compose. |
+| `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
-The compose files below reference the published GHCR images — `docker compose up`
+The compose files reference the published GHCR images — `docker compose up`
 pulls them (no local build, no build context needed). Tags: `:latest`, `:main`,
 and `vX.Y.Z` semver tags per release.
 
-### Step 1 — a shared Docker network
-
-Create one user-defined network so Navidrome can reach the sidecars (and your
-other containers) **by container name**:
-
-```bash
-docker network create stack_network
-```
-
-### Step 2 — Navidrome (mount every library read-write, join the network)
-
-With multiple libraries, mount **each library path** as its own volume and note
-the guest path (that becomes the library's path in Navidrome, e.g. `/music`,
-`/unsorted`). `docker-compose.yml`:
+Here is the **complete `docker-compose.yml`** — Navidrome plus all five sidecars
+(octo-fiesta, acoustid, webhook, filter proxy, mysql) on one shared network.
+Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
 
 ```yaml
+# nd-organizer full stack - Navidrome plus all five sidecars, one command:
+#   docker compose up -d
+#
+# Services:
+#   navidrome                  (4533)  the music server (plugins enabled)
+#   octo-fiesta                (4535)  missing-track proxy (multi-provider)
+#   nd-organizer-acoustid (8097)  fingerprint sidecar - powers identity verification
+#   nd-organizer-webhook  (8099)  dashboard + log/status receiver
+#   nd-organizer-proxy    (4534)  Subsonic filter proxy
+#   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
+#
+# Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
+# normal Navidrome user/password - credentials pass through unchanged):
+#   player -> octo-fiesta (4535) -> nd-organizer-proxy (4534) -> navidrome (4533)  [full stack]
+#   player -> nd-organizer-proxy (4534) -> navidrome (4533)                        [filtering only]
+#   player -> navidrome (4533)                                                     [no proxy]
+# Point the player at http://<your-nas>:4535/rest/ to get queue filtering AND
+# missing-track fallback. octo-fiesta is transparent for songs Navidrome already
+# has; only tracks NOT in the library are fetched from the configured provider.
+#
+# Providers (octo-fiesta supports all of these; fill credentials in a .env
+# file next to this compose and pick one via MUSIC_SERVICE):
+#   SquidWTF - no credentials (free, proxies Qobuz/Tidal/Amazon/Deemix)
+#   Deezer   - DEEZER_ARL (see octo-fiesta wiki "Getting-Deezer-Credentials")
+#   Qobuz    - QOBUZ_USER_AUTH_TOKEN + QOBUZ_USER_ID (paid account)
+#   Yandex   - YANDEX_OAUTH_TOKEN (see wiki "Getting-Yandex-Credentials")
+#
+# Prerequisites:
+#   - a user-defined Docker network named `stack_network`:
+#         docker network create stack_network
+#   - if you ALREADY run Navidrome separately, remove the `navidrome` service
+#     below and just connect your existing container to the network instead:
+#         docker network connect stack_network navidrome
+#   - acoustid: mirror EVERY library mount at the SAME guest paths Navidrome uses.
+#   - mysql: optional - only if you set persistenceBackend=mysql in the plugin.
+#
+# Plugin settings to match:
+#   logWebhookUrl = http://nd-organizer-webhook:8099
+#   acoustidUrl   = http://nd-organizer-acoustid:8097
+#   filterUrl     = http://nd-organizer-proxy:4534
+#   persistenceUrl= http://nd-organizer-mysql:8098   (if using mysql backend)
+#   octoFiestaUrl = http://octo-fiesta:8080         (or your NAS:4535; webhook health)
+
 services:
   navidrome:
     image: deluan/navidrome:latest
     container_name: navidrome
+    restart: unless-stopped
     ports:
       - "4533:4533"
     environment:
       - ND_PLUGINS_ENABLED=true
       - ND_PLUGINS_AUTORELOAD=true
+      # Default library. Additional libraries are added in the UI
+      # (Settings -> Libraries) pointing at the mounted guest paths below.
+      - ND_MUSICFOLDER=/music
+      # Import playlists (.m3u) from this folder, relative to ND_MUSICFOLDER.
+      # Colon-separated for multiple folders/globs. Empty = scan the whole library.
+      - ND_PLAYLISTSPATH=playlists
       # Optional: agents the plugin can power for the UI (see README/agents):
       # - ND_AGENTS=nd-organizer
     volumes:
@@ -119,47 +210,356 @@ services:
     networks:
       - stack_network
 
-networks:
-  stack_network:
-    external: true
-    name: stack_network
-```
+  # ===== AudioMuse-AI (OPTIONAL - sonic analysis / metadata server) =====
+  # Uncomment these three services to deploy AudioMuse-AI
+  # (ghcr.io/neptunehub/audiomuse-ai, AGPL-3.0) on this stack, then set the
+  # plugin's audiomuseUrl = http://audiomuse-ai-flask-app:8000 and run its setup
+  # wizard once (admin user + connect your Navidrome server).
+  # Container names match AudioMuse-AI's own deployment example.
+  # Requires ~8 GB RAM and a 4-core CPU with AVX2 (see AudioMuse-AI docs);
+  # a heavy service - that's why this block is commented out by default.
+  # audiomuse-postgres:
+  #   image: postgres:15-alpine
+  #   container_name: audiomuse-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     TZ: UTC
+  #     POSTGRES_USER: audiomuse
+  #     POSTGRES_PASSWORD: changeme
+  #     POSTGRES_DB: audiomusedb
+  #   volumes:
+  #     - audiomuse-postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - stack_network
+  #
+  # audiomuse-ai-flask:
+  #   image: ghcr.io/neptunehub/audiomuse-ai:latest
+  #   container_name: audiomuse-ai-flask-app
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     SERVICE_TYPE: flask
+  #     TZ: UTC
+  #     POSTGRES_USER: audiomuse
+  #     POSTGRES_PASSWORD: changeme
+  #     POSTGRES_DB: audiomusedb
+  #     POSTGRES_HOST: audiomuse-postgres
+  #     POSTGRES_PORT: "5432"
+  #     TEMP_DIR: /app/temp_audio
+  #   volumes:
+  #     - audiomuse-temp-flask:/app/temp_audio
+  #   depends_on:
+  #     - audiomuse-postgres
+  #   networks:
+  #     - stack_network
+  #
+  # audiomuse-ai-worker:
+  #   image: ghcr.io/neptunehub/audiomuse-ai:latest
+  #   container_name: audiomuse-ai-worker-instance
+  #   restart: unless-stopped
+  #   environment:
+  #     SERVICE_TYPE: worker
+  #     TZ: UTC
+  #     POSTGRES_USER: audiomuse
+  #     POSTGRES_PASSWORD: changeme
+  #     POSTGRES_DB: audiomusedb
+  #     POSTGRES_HOST: audiomuse-postgres
+  #     POSTGRES_PORT: "5432"
+  #     TEMP_DIR: /app/temp_audio
+  #   volumes:
+  #     - audiomuse-temp-worker:/app/temp_audio
+  #   depends_on:
+  #     - audiomuse-postgres
+  #   networks:
+  #     - stack_network
 
-- **`rw`** is required (the plugin renames/tags files).
-- Copy `nd-organizer.ndp` into `./navidrome-data/plugins/`.
-- Create the libraries in the Navidrome UI (**Settings → Libraries**) with those
-  paths.
+  # ===== AudioMuse-AI MusicServer (OPTIONAL - Subsonic music server) =====
+  # A Subsonic/OpenSubsonic music server showcasing AudioMuse-AI's sonic
+  # analysis - an optional alternative to Navidrome (or run both side by side).
+  # Commented out by default. Uncomment to use:
+  #   - web UI:      http://<your-nas>:3000
+  #   - Subsonic API http://<your-nas>:8080/rest/  (first login admin/admin)
+  #   - mount the SAME library paths Navidrome uses, then add them in the UI
+  #     (admin tab) and start the scan. Configure AudioMuse-AI's URL in the
+  #     admin tab to enable the sonic features.
+  # audiomuse:
+  #   image: ghcr.io/neptunehub/audiomuse-ai-musicserver:latest
+  #   container_name: audiomuse
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3000:3000"   # web UI
+  #     - "8080:8080"   # Open Subsonic API
+  #   volumes:
+  #     - /path/to/music:/music        # same library as Navidrome
+  #     - ./audiomuse-ms-config:/config  # DB + settings persist here
+  #   networks:
+  #     - stack_network
 
-### Step 3 — Acoustid sidecar (recommended, powers identity verification)
+  octo-fiesta:
+    image: ghcr.io/v1ck3s/octo-fiesta
+    container_name: octo-fiesta
+    restart: unless-stopped
+    ports:
+      - "4535:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      # Internal listening port (must match the port in "ports" mapping above)
+      - ASPNETCORE_URLS=http://+:${INTERNAL_PORT:-8080}
+      # Download path inside container
+      - Library__DownloadPath=/app/downloads
+      
+      # ===== SUBSONIC SETTINGS =====
+      # Navidrome/Subsonic server URL
+      - Subsonic__Url=http://nd-organizer-proxy:4534
+      # Admin username to perform actions on navidrome server that require admin permissions (optional)
+      - Subsonic__AdminUsername=${SUBSONIC_ADMIN_USERNAME:-}
+      # Admin Password to perform actions on navidrome server that require admin permissions (optional)
+      - Subsonic__AdminPassword=${SUBSONIC_ADMIN_PASSWORD:-}
+      # Music service to use: Deezer, Qobuz, or SquidWTF (default: SquidWTF)
+      - Subsonic__MusicService=${MUSIC_SERVICE:-SquidWTF}
+      # Storage mode: Permanent (saved to library), Cache (temporary, auto-cleanup)
+      - Subsonic__StorageMode=${STORAGE_MODE:-Permanent}
+      # Cache duration in hours when StorageMode=Cache (default: 1)
+      - Subsonic__CacheDurationHours=${CACHE_DURATION_HOURS:-1}
+      # Enable external playlist search and download (default: true)
+      - Subsonic__EnableExternalPlaylists=${ENABLE_EXTERNAL_PLAYLISTS:-true}
+      # Directory name for playlist .m3u files (default: playlists)
+      - Subsonic__PlaylistsDirectory=${PLAYLISTS_DIRECTORY:-playlists}
+      # Explicit content filter: All, ExplicitOnly, CleanOnly (default: All)
+      - Subsonic__ExplicitFilter=${EXPLICIT_FILTER:-All}
+      # Download mode: Track (only requested track), Album (full album when playing a track)
+      - Subsonic__DownloadMode=${DOWNLOAD_MODE:-Track}
+      # Auto upgrade quality: re-download tracks when higher quality is available (default: false)
+      - Subsonic__AutoUpgradeQuality=${AUTO_UPGRADE_QUALITY:-false}
+      # Disable triggering a library scan after a download completes (default: false)
+      # Useful if your Subsonic server or an external automation already picks up new files
+      - Subsonic__DisableLibraryScan=${DISABLE_LIBRARY_SCAN:-false}
+      # Folder template for organizing downloaded files (default: {artist}/{album}/{track} - {title})
+      # Available placeholders: {artist}, {album}, {title}, {track}, {disc}, {year}, {genre}, {quality}
+      - Subsonic__FolderTemplate=${FOLDER_TEMPLATE}
+      
+      # ===== DEEZER SETTINGS =====
+      # Deezer ARL token (required if using Deezer)
+      - Deezer__Arl=${DEEZER_ARL:-}
+      # Fallback ARL token (optional)
+      - Deezer__ArlFallback=${DEEZER_ARL_FALLBACK:-}
+      # Preferred audio quality: FLAC, MP3_320, MP3_128 (optional, defaults to highest available)
+      - Deezer__Quality=${DEEZER_QUALITY:-}
+      
+      # ===== QOBUZ SETTINGS =====
+      # Qobuz user authentication token (required if using Qobuz)
+      - Qobuz__UserAuthToken=${QOBUZ_USER_AUTH_TOKEN:-}
+      # Qobuz user ID (required if using Qobuz)
+      - Qobuz__UserId=${QOBUZ_USER_ID:-}
+      # Preferred audio quality: FLAC, FLAC_24_HIGH, FLAC_24_LOW, FLAC_16, MP3_320 (optional)
+      - Qobuz__Quality=${QOBUZ_QUALITY:-}
+      
+      # ===== SQUIDWTF SETTINGS =====
+      # Backend source: Qobuz, Tidal, AmazonMusic, or Deemix (default: Qobuz)
+      - SquidWTF__Source=${SQUIDWTF_SOURCE:-Qobuz}
+      # Preferred audio quality (optional)
+      # Qobuz: 27 (FLAC 24-bit/192kHz), 7 (FLAC 24-bit/96kHz), 6 (FLAC 16-bit/44kHz), 5 (MP3 320kbps)
+      # Tidal: HI_RES_LOSSLESS (FLAC 24-bit/192kHz), LOSSLESS (FLAC 16-bit/44kHz), HIGH (AAC 320kbps), LOW (AAC 96kbps)
+      # AmazonMusic: FLAC_24 (24-bit), FLAC_16 (16-bit), AAC (256kbps), OPUS, ATMOS
+      # Deemix: FLAC, MP3_320 / 320, MP3_128 / 128 (the public instance controls the effective stream quality)
+      - SquidWTF__Quality=${SQUIDWTF_QUALITY:-}
+      # Instance timeout in seconds for Tidal backend (default: 5)
+      # Switches to next instance if current one doesn't respond in time
+      - SquidWTF__InstanceTimeoutSeconds=${SQUIDWTF_INSTANCE_TIMEOUT:-5}
+      # Force a specific Tidal API instance (e.g. a self-hosted hifi-api). When set,
+      # the remote instances.json is NOT fetched — only this URL is used.
+      # For multiple custom instances, use SquidWTF__Instances__0, __1, ... directly
+      # instead of this variable.
+      - SquidWTF__Instances__0=${SQUIDWTF_INSTANCE:-}
+      # Override URL of the remote instances.json (ignored if SQUIDWTF_INSTANCE is set).
+      # Defaults to https://tidal-uptime.geeked.wtf/ if empty.
+      - SquidWTF__InstancesUrl=${SQUIDWTF_INSTANCES_URL:-}
 
-Fingerprints audio files so songs without an MBID/ISRC can be accurately paired
-to their album. **It must mount EVERY library at the SAME guest paths Navidrome
-uses**, so the file paths the plugin sends match. `acoustid/docker-compose.yml`:
+      # ===== YANDEX MUSIC SETTINGS =====
+      # OAuth token for API access.
+      # Obtained from browser #access_token fragment after authenticating on 
+      # https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d
+      - Yandex__OAuthToken=${YANDEX_OAUTH_TOKEN:-}
+      # Preferred audio quality (optional)
+      # Default: FLAC (16-bit/44.1kHz)
+      # Available: AAC_64, MP3_192, AAC_192, AAC_256, MP3_320, FLAC
+      - Yandex__Quality=${YANDEX_QUALITY:-}
+      # Language for the API responses.
+      # Curated playlists and some album titles will be translated into that language.
+      # Default: ru
+      # Available: en/uz/uk/us/ru/kk/hy
+      - Yandex__Language=${YANDEX_LANGUAGE:-}
+      # Some tracks are included in the API responses but are marked unavailable for listening
+      # This setting allows to show such tracks in search results, playlists and albums
+      # Default: false
+      # Available: true, false
+      - Yandex__IncludeUnavailable=${YANDEX_INCLUDE_UNAVAILABLE_TRACKS:-false}
+    networks:
+      - stack_network
+    # OPTIONAL - Permanent mode saves fetched tracks into a Navidrome-scanned
+    # library folder (host path must match a Navidrome library mount):
+    #   volumes:
+    #     - ${DOWNLOAD_PATH:-/path/to/music/Octo-Fiesta}:/app/downloads
+    #   environment:
+    #     - Subsonic__StorageMode=Permanent
 
-```yaml
-services:
   nd-organizer-acoustid:
     image: ghcr.io/lunatixz/nd-organizer/acoustid:latest
     container_name: nd-organizer-acoustid
     restart: unless-stopped
     ports:
       - "8097:8097"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
     volumes:
-      - /path/to/music:/music:ro        # mirror library 1, same path as Navidrome
-      - /path/to/unsorted:/unsorted:ro  # mirror library 2, same path as Navidrome
-      # mirror every library from Step 2 here, with the SAME guest paths
+      # Mirror every library mount from your Navidrome stack, SAME guest path.
+      - /path/to/music:/music:ro
+      - /path/to/unsorted:/unsorted:ro
+    networks:
+      - stack_network
+
+  nd-organizer-webhook:
+    image: ghcr.io/lunatixz/nd-organizer/webhook:latest
+    container_name: nd-organizer-webhook
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./data:/data          # webhook.log persists here
+      # Read-only Docker socket: lets the dashboard read octo-fiesta's logs
+      # (octo exposes only the Subsonic API, no /logs endpoint).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # octo-fiesta's URL + provider come from the plugin's Navidrome config
+      # (octoFiestaUrl / octoFiestaProvider), reported in status POSTs. Only the
+      # docker-log container name stays here (it's infrastructure, not a URL).
+      - OCTO_FIESTA_CONTAINER=octo-fiesta
+    networks:
+      - stack_network
+    # The dashboard pulls each sidecar's /logs by container name (same
+    # network required), so this one UI shows plugin status + all sidecar logs.
+
+  nd-organizer-proxy:
+    image: ghcr.io/lunatixz/nd-organizer/proxy:latest
+    container_name: nd-organizer-proxy
+    restart: unless-stopped
+    ports:
+      - "4534:4534"
+    environment:
+      - NAVIDROME_URL=http://navidrome:4533
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+      # - FILTER_KEYWORDS=intro,outro,interlude
+    networks:
+      - stack_network
+
+  nd-organizer-mysql:
+    image: ghcr.io/lunatixz/nd-organizer/mysql:latest
+    container_name: nd-organizer-mysql
+    restart: unless-stopped
+    ports:
+      - "8098:8098"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
     networks:
       - stack_network
 
 networks:
   stack_network:
     external: true
-    name: stack_network
+
+# Uncomment the volumes below (with the AudioMuse-AI services above) to persist
+# AudioMuse-AI's PostgreSQL data and worker temp files:
+# volumes:
+#   audiomuse-postgres-data:
+#   audiomuse-temp-flask:
+#   audiomuse-temp-worker:
 ```
 
 ```bash
-cd acoustid && docker compose up -d        # pulls the GHCR image
+docker network create stack_network                 # once
+docker network connect stack_network navidrome      # Navidrome must be on it
+docker compose up -d                                # deploy everything
 ```
+
+To deploy just one service, `docker compose up -d <name>` (the per-service files
+in `acoustid/`, `webhook/`, `proxy/`, `mysql/` still work independently).
+The `.env` file next to this compose supplies the `${VAR}` values
+(provider tokens, storage mode, ...).
+
+### Shared network
+
+One user-defined network lets every container reach the others **by container
+name** (`navidrome`, `octo-fiesta`, `nd-organizer-proxy`, ...). Create it once
+before `docker compose up`:
+
+```bash
+docker network create stack_network
+```
+
+The compose above deploys Navidrome too. If you already run Navidrome with its
+own compose, **remove the `navidrome` service** from the file and connect your
+existing container to the network instead:
+
+```bash
+docker network connect stack_network navidrome
+```
+
+### Navidrome
+
+- Mount **each library** read-write (`:rw`) — the plugin renames/tags files. The
+  guest path (`/music`, `/unsorted`, ...) becomes the library's path in Navidrome.
+- `ND_MUSICFOLDER=/music` sets the **default** library. Add more libraries in the
+  Navidrome UI (**Settings → Libraries**) pointing at the other mounted guest
+  paths — multi-library is UI-configured, not env-driven.
+- `ND_PLAYLISTSPATH=playlists` imports `.m3u` playlists from `/music/playlists`
+  (relative to `ND_MUSICFOLDER`; colon-separated for several folders/globs).
+  Leave empty to import from anywhere in the library.
+- Copy `nd-organizer.ndp` into `./navidrome-data/plugins/`.
+- Set Navidrome's **BaseUrl** to your NAS address (e.g. `http://<your-nas>:4533`).
+  The plugin uses it to reach host-published sidecar ports (e.g. AudioMuse-AI's
+  `8000`) when a configured container IP isn't routable from inside Navidrome.
+
+### Octo-Fiesta (missing-track playback)
+
+[Octo-Fiesta](https://github.com/V1ck3s/octo-fiesta) (GPL-3.0) is a third-party
+Subsonic proxy that serves **songs your library doesn't have** from a streaming
+provider. It supports **SquidWTF (free, no credentials)**, Deezer, Qobuz and
+Yandex:
+
+- **Streaming chain** (all on `stack_network`):
+  `Subsonic client → octo-fiesta (4535) → nd-organizer-proxy (4534) → navidrome (4533)`.
+  Songs Navidrome already has pass through transparently; only missing tracks
+  are fetched on demand.
+- **Provider** = `MUSIC_SERVICE` (default `SquidWTF` — zero credentials). For
+  Deezer/Qobuz/Yandex, put the tokens in `.env` and set `MUSIC_SERVICE`:
+  - `DEEZER_ARL` — [getting Deezer credentials](https://github.com/V1ck3s/octo-fiesta/wiki/Getting-Deezer-Credentials-(ARL-Token))
+  - `QOBUZ_USER_AUTH_TOKEN` + `QOBUZ_USER_ID` — paid Qobuz account
+  - `YANDEX_OAUTH_TOKEN` — [Yandex OAuth](https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d)
+  - SquidWTF extras: `SQUIDWTF_SOURCE` (Qobuz/Tidal/AmazonMusic/Deemix),
+    `SQUIDWTF_QUALITY` (default `6` = FLAC 16-bit)
+- **Cache mode (default)**: fetched tracks are streamed and auto-cleaned after
+  1h — **nothing is written to the library**. Set `STORAGE_MODE=Permanent` and
+  uncomment the `/app/downloads` mount to keep downloaded albums (the organizer
+  then tags/organizes them like any other album).
+- **Client setup**: server type `Subsonic/OpenSubsonic`, URL
+  `http://<your-nas>:4535/rest/` (or keep `:4534` for filtered-only, no missing
+  tracks).
+- **Dashboard**: set the plugin's `octoFiestaUrl` (e.g.
+  `http://octo-fiesta:8080` on the shared network) and
+  `octoFiestaProvider` (SquidWTF/Deezer/Qobuz/Yandex). The webhook reads them
+  from the plugin status to probe octo-fiesta's health and show its Docker logs
+  (via the read-only socket mount).
+- **Optional admin creds** (`SUBSONIC_ADMIN_USERNAME/PASSWORD`) are only needed
+  for Permanent-mode library registration; Cache mode works without them.
+- Note: SquidWTF is a free third-party service and can be slow or intermittently
+  down — octo-fiesta handles that with instance timeouts, but missing-track
+  playback is best-effort.
+
+### Acoustid (identity verification)
+
+Fingerprints audio files so songs without an MBID/ISRC can be accurately paired
+to their album.
 
 > **Critical rule:** the sidecar's guest paths must **exactly match** the library
 > paths Navidrome reports. The plugin sends `{library.path}/{relative}` (e.g.
@@ -168,47 +568,20 @@ cd acoustid && docker compose up -d        # pulls the GHCR image
 > that library. Mirror every `- host:guest` line.
 
 Then in the plugin settings: `acoustidUrl = http://nd-organizer-acoustid:8097`
-and `acoustidApiKey = <your AcoustID client key>` (get one free at
+and `acoustidApiKey = <your AcoustID client key>` (free at
 <https://acoustid.org/new-application>).
 
-### Step 4 — Log dashboard (optional)
+### Log dashboard (webhook)
 
-A tiny web UI that shows the plugin's status + reports (auto-refreshing).
-`webhook/docker-compose.yml`:
+A tiny web UI showing the plugin's status + reports (auto-refreshing). Open
+`http://<your-nas>:8099/`. Plugin setting: `logWebhookUrl = http://<your-nas>:8099/`.
 
-```yaml
-services:
-  nd-organizer-webhook:
-    image: ghcr.io/lunatixz/nd-organizer/webhook:latest
-    container_name: nd-organizer-webhook
-    restart: unless-stopped
-    ports:
-      - "8099:8099"
-    networks:
-      - stack_network
+### Navidrome filter proxy
 
-networks:
-  stack_network:
-    external: true
-    name: stack_network
-```
-
-```bash
-cd webhook && docker compose up -d
-```
-
-Then in the plugin settings: `logWebhookUrl = http://<your-nas>:8099/`.
-Open `http://<your-nas>:8099/` in a browser to watch activity.
-
-### Step 5 - Subsonic filter proxy (optional, playback filtering)
-
-Drops filler tracks from the queue and skip-heavy tracks past the cap, and
-re-sorts song lists by weight — all **without touching files**. Deploy it and
-point your Subsonic-compatible client at it instead of Navidrome:
-
-```bash
-cd proxy && docker compose up -d
-```
+Drops filler-keyword tracks from auto-queues and limits skip-heavy content in
+queued lists (exclude/third/lessThanHalf/half), re-sorts song lists by weight —
+all **without touching files**. Point your Subsonic-compatible client at
+`http://<your-nas>:4534/rest/` (or let octo-fiesta sit in front of it).
 
 - **It's a faithful mirror**: every request is forwarded to Navidrome unchanged
   (same method, path, query, body, safe headers) — nothing is rewritten or
@@ -217,14 +590,37 @@ cd proxy && docker compose up -d
   cover art and errors pass back byte-for-byte, so non-JSON clients see an exact
   Navidrome. Only clients that request JSON (`f=json`) get filtering.
 - Credentials pass through — use your normal Navidrome user/password in the client.
-- Client setup: server type `Subsonic/OpenSubsonic`, URL `http://<your-nas>:4534/rest/`.
-- Plugin flagging: set `filterUrl = http://nd-organizer-proxy:4534` and enable
-  `skipIgnoreEnabled` so weights + skip-heavy IDs are published via `POST /filters`
-  (re-sorts lists, hard-removes only net-negative tracks).
+- Plugin flagging: set `filterUrl = http://nd-organizer-proxy:4534`; the plugin
+  pushes the keyword list (`keywordFilterEnabled`), the skip-heavy ID set + limit
+  mode (`skipContentMode`) and every track's weight via `POST /filters`.
 - Optional env on the proxy: `FILTER_KEYWORDS` — startup default only. The
   plugin pushes Navidrome's `fillerKeywords` setting on every stats pass, so the
   Navidrome UI is the single source of truth for keyword filtering.
 - Streaming (`stream`, `getCoverArt`, HLS) passes through byte-for-byte.
+
+### Player setup (Subsonic clients)
+
+All three entry points serve the **same Navidrome library** with your **normal
+Navidrome user/password** (credentials pass through unchanged). In every player
+set the server type to **`Subsonic/OpenSubsonic`** (Symfonium, DSub, Feishin,
+Substreamer, Navidrome's own apps, ...).
+
+| Port | What you get | Chain |
+|---|---|---|
+| **`4535`** — recommended | Full stack: queue filtering **and** missing-track fallback | player → octo-fiesta → filter proxy → navidrome |
+| `4534` | Filtering only (filler-keyword drop + skip-content limits + weight re-sort), no missing-track fallback | player → filter proxy → navidrome |
+| `4533` | Raw Navidrome, no proxy | player → navidrome |
+
+URL format: `http://<your-nas>:<port>/rest/`.
+
+- **`4535`** needs octo-fiesta deployed (and the plugin's `octoFiestaUrl` set so
+  the webhook can monitor it). Songs Navidrome already has stream straight
+  through; only tracks missing from the library are fetched on demand. This is
+  the one to give your player.
+- **`4534`** is a faithful mirror — responses are touched only when they are
+  JSON song lists (keyword/skip filtering, reordering). Files are never moved.
+- One URL per player — pick `4535` for the full experience; `4534` is the
+  fallback if octo-fiesta is ever down (keep it as a second profile if you like).
 
 ### Building / publishing the images yourself
 
@@ -261,11 +657,11 @@ Docker network and live in Navidrome's config store, never in Docker env vars.
 ### Networking notes (containers reaching each other)
 
 - Containers reach each other by **container name** only when they share a
-  **user-defined network** (the `stack_network` network above). The host's LAN IP (e.g.
-  `192.168.0.21`) usually is **not** reachable from inside a container.
+  **user-defined network** (the `stack_network` network above). The host's LAN IP
+  usually is **not** reachable from inside a container.
 - If **Lidarr** or **AudioMuse-AI** also run as containers, attach them to the
   same `stack_network` network and set their URLs to container names:
-  `lidarrUrl = http://lidarr:8686`, `audiomuseUrl = http://audiomuse:8000`.
+  `lidarrUrl = http://lidarr:8686`, `audiomuseUrl = http://audiomuse-ai-flask-app:8000`.
 - To attach an already-running container to the network without recreating it:
   ```bash
   docker network connect stack_network <container-name>
@@ -293,6 +689,9 @@ Docker network and live in Navidrome's config store, never in Docker env vars.
      `getNowPlaying` idle checks and the per-album `startScan`).
    - **Identity verification**: set `acoustidUrl` + `acoustidApiKey` (see Step 3).
    - **Metadata sources / Lidarr / AudioMuse**: enter your URLs and API keys.
+     AudioMuse-AI is optional — a commented-out deploy block is included in the
+     compose above (uncomment it, then set `audiomuseUrl =
+     http://audiomuse-ai-flask-app:8000`); it needs ~8 GB RAM + a 4-core CPU.
 5. Run a dry-run pass, review `report-*` / the webhook dashboard, then switch
    `mode: apply`.
 
@@ -350,38 +749,57 @@ dashboard stays fresh between runs.
 ## Playback filtering (no file moves)
 
 Nothing is ever moved into `_filler/` or `_skipped/` folders — albums stay
-whole. Instead, a **Subsonic filter proxy** sits in front of Navidrome and both
-**deprioritizes and drops** flagged tracks in the song lists it returns. Point
+whole. Instead, a **Navidrome filter proxy** sits in front of Navidrome and
+**deprioritizes and limits** flagged tracks in the song lists it returns. Point
 your Subsonic-compatible client at the proxy instead of Navidrome;
 credentials pass through unchanged.
 
 ```
 client ──▶ filter proxy (:4534) ──▶ Navidrome (:4533)
-                 │  drops (in the queue): filler titles (keyword match)
-                 │        (everywhere):   skip-heavy tracks past the cap
-                 │                        (net-negative: skipped more than
-                 │                         ever played in full)
-                 │  re-sorts: search / random / starred / playlist
-                 │            song lists by weight (plays − 2×skips),
-                 │            so skipped tracks sink and liked tracks rise
+                 │  keyword filter (auto-queues): drop filler titles
+                 │  skip-content limiter (queues): keep at most
+                 │     exclude / third / lessThanHalf / half skip-heavy tracks
+                 │  re-sorts: search / random / starred / playlist song lists
+                 │            by weight (plays − 2×skips), so skipped tracks
+                 │            sink and liked tracks rise
 ```
 
 The more a song is skipped, the less it is assumed to be liked: it sinks in
-priority everywhere, and only a genuinely disliked track (skipped strictly more
-times than it was ever played in full, past your cap) is removed. Albums stay
-whole — `getAlbum` keeps full track order (only net-negative tracks drop out),
-and live/active views (`getNowPlaying`, `getPlayQueue`) are never touched.
+priority everywhere, and the **skip-content limiter** caps how much skip-heavy
+content can populate a queued list (`skipContentMode`: `exclude` removes them,
+`third`/`lessThanHalf`/`half` cap the fraction, `none` keeps everything). Albums
+stay whole — `getAlbum` keeps full track order — and live/active views
+(`getNowPlaying`, `getPlayQueue`) are never touched.
 
-### Filler tracks (opt-in)
+### Keyword filter (opt-in, `keywordFilterEnabled`)
 Edit **Filler keywords** (`fillerKeywords`) in the Navidrome plugin settings.
 The plugin pushes this list to the filter proxy on every stats pass, so the
-proxy **ignores keyword-matched tracks from the queue**: dropped from auto-queue
-lists (random, search, playlists, genres, top/similar) so intros and outros
-never auto-play — but an album's track list stays whole, so you can still play
-them deliberately from their album. Files are never touched. (`FILTER_KEYWORDS`
+proxy **drops keyword-matched tracks from auto-queues** (random, playlists,
+genres, top/similar) so intros and outros never auto-play — but an **explicit
+user search still returns them**, and an album's track list stays whole, so you
+can always play them deliberately. Files are never touched. (`FILTER_KEYWORDS`
 on the proxy container is only a startup fallback.)
 
-### Playback stats + skip flagging (opt-in)
+### Skip-content limiter (`skipContentMode`)
+Every `statsPollMinutes` the plugin publishes each track's **weight** plus the
+**skip-heavy ID set** to the proxy via `POST /filters` (apply mode). A track is
+**skip-heavy** when it's a **net negative** — skipped strictly more times than
+ever played in full (`plays < skips`, full plays forgive skips), 3+ interactions,
+skip fraction at/above `skipHeavyRatio` (default 0.6). The proxy then limits how
+many of these tracks can populate a queued list:
+
+| Mode | Skip-heavy allowed in a queue |
+|---|---|
+| `exclude` | none (removed entirely) |
+| `third` | up to a third of the list |
+| `lessThanHalf` (default) | a bit less than half |
+| `half` | up to half |
+| `none` | everything (weight re-sort only) |
+
+Songs you like but occasionally skip keep `plays ≥ skips`, so they're never
+flagged — they just sink in priority and resurface when you play them again.
+
+### Playback stats (opt-in)
 Enable **Playback stats** (`playbackStatsEnabled`). Every `statsPollMinutes`
 (minutes, default 5) the plugin:
 
@@ -392,10 +810,9 @@ Enable **Playback stats** (`playbackStatsEnabled`). Every `statsPollMinutes`
    one previous skip).
 2. Computes a **weight** = plays − 2×skips and builds/updates the
    **"nd-organizer: Top Picks"** playlist (top `topPicksCount` songs by weight).
-3. If **Exclude skip-heavy tracks** (`skipIgnoreEnabled`) + **filter proxy URL**
-   (`filterUrl`) are set, publishes every track's weight to the proxy via
-   `POST /filters` — it re-sorts returned lists by weight (skipped tracks sink,
-   liked tracks rise).
+3. If a **Navidrome filter proxy URL** (`filterUrl`) is set, publishes every
+   track's weight + the skip-heavy ID set (`skipContentMode`) + the filler
+   keyword list (`keywordFilterEnabled`) to the proxy via `POST /filters`.
 
 ### Smart skip accounting
 
@@ -405,12 +822,12 @@ The skip signal self-corrects so it never permanently labels a song:
   playback after the skip threshold) decrements that track's skip count (never
   below 0). Skip it twice then play it in full — the next poll treats it as
   skipped once, not twice.
-- **Hard removal only for net negatives.** The proxy hard-removes a track from
-  client playback only when it's skipped *strictly more times than it was ever
-  played in full* (`plays < skips`) **and** its skip fraction reaches
-  `skipIgnoreRatio` (default 0.6, 3+ interactions). A song you like that you
-  occasionally skip keeps `plays ≥ skips`, so it's never removed — it just sinks
-  in priority and resurfaces if you play it again.
+- **Skip-heavy only for net negatives.** A track is flagged skip-heavy only when
+  it's skipped *strictly more times than it was ever played in full*
+  (`plays < skips`) **and** its skip fraction reaches `skipHeavyRatio`
+  (default 0.6, 3+ interactions). A song you like that you occasionally skip
+  keeps `plays ≥ skips`, so it's never flagged — it just sinks in priority and
+  resurfaces if you play it again.
 - **Weight = plays − 2×skips** drives the Top Picks playlist ordering and the
   proxy's list re-sorting.
 
@@ -421,44 +838,6 @@ stored in the plugin KVStore.
 > polls. A song started and finished entirely between polls isn't counted as a
 > skip (its play is still counted).
 
-## Config reference
-
-| Key | Default | Meaning |
-|---|---|---|
-| `mode` | `dryRun` | `dryRun` previews; `apply` writes. |
-| Libraries | (permission) | Which libraries to organize = the Navidrome **Library Access** permission. |
-| `runOnStartup` / `scheduleCron` | `false` / `""` | How runs are triggered. |
-| `albumsPerTask` | `5` | Album groups planned per background task (small = lean). |
-| `filesPerScanTask` | `200` | Files scanned (tags read) per task. Lower = lighter/slower. |
-| `runOnlyWhenIdle` | `true` | Defer runs while something is playing. |
-| `folderSchema` | `{albumArtist}/{album} ({year})` | Album folder template. |
-| `fileSchema` | `{track:02} - {title}` | Track file template (ext auto-added). |
-| `soundtrackFolder`/`variousFolder`/`singlesFolder` | `Sound Tracks`/`Various Artist`/`Singles` | Bucket folder names. |
-| `singlesUnderArtist` | `true` | `Artist/Singles/{title}` vs `Various Artist/Singles/...`. |
-| `preserveRecordingType` | `true` | Append `(Live)`/`(Bootleg)` so live tracks stay distinct. |
-| `excludePaths` | `[]` | Paths never to touch (e.g. `inbox`, `Downloads/*`). |
-| `readNfo` / `writeNfo` | `true` / `false` | NFO sidecar read / rewrite. |
-| `backupBeforeWrite` / `backupRetentionDays` | `true` / `30` | Metadata-only pre-write snapshots + retention. |
-| `rollbackRetentionDays` | `30` | How long apply records + file/nfo backups are kept for rollback (`0` = forever); old runs pruned automatically. |
-| `verifyIdentity` / `skipUnverified` | `true` / `true` | Require MBID/ISRC/AcoustID identity before pairing; leave others in place. |
-| `acoustidUrl` / `acoustidApiKey` | — | AcoustID sidecar URL + client key. |
-| `lidarrUrl`/`lidarrApiKey`/`lidarrMode` | — | Lidarr metadata/classification, naming schema, monitored force-search. |
-| `useLidarrNamingSchema` | `false` | Use Lidarr's naming config instead of `folderSchema`/`fileSchema`. |
-| `lidarrForceSearchIncomplete` | `false` | AlbumSearch for incomplete albums whose artist+album are monitored. |
-| Lidarr post-move refresh | — | With `lidarrMode = metadataPlusRescan`, after moving an album the plugin fires Lidarr `RefreshArtist` for that artist (once per artist / 5 min) so Lidarr's DB follows the new paths. |
-| `audiomuseUrl`/`audiomuseToken` | — | AudioMuse-AI acoustic tags + re-sync. |
-| `scanUser` / `triggerScanAfterRun` / `scanAfterAlbum` | — | Navidrome admin user + per-album rescans. |
-| `rollbackRunId` | `""` | Set to a run ID to undo that run. |
-| `fillerKeywords` | `intro,outro,interlude,...,skit,instrumental,interview` | Titles matching one (whole-word) are ignored from the queue by the filter proxy. Files never move. |
-| `playbackStatsEnabled` / `statsPollMinutes` | `false` / `5` | Track plays/skips; update cadence. |
-| `skipThresholdPercent` | `30` | Played less than this % = a skip. |
-| `topPicksCount` | `50` | Size of the `nd-organizer: Top Picks` playlist. |
-| `skipIgnoreEnabled` / `skipIgnoreRatio` | `false` / `0.6` | Publish weights + IDs to the proxy: reorder lists by weight; hard-remove only net-negative tracks (skips > full plays, past ratio, 3+ samples). Full plays forgive skips. |
-| `filterUrl` | `""` | Subsonic filter proxy base URL (e.g. `http://nd-organizer-proxy:4534`); receives `POST /filters`. |
-
-Template placeholders: `{track}` `{disc}` `{title}` `{artist}` `{albumArtist}`
-`{album}` `{year}` `{genre}` `{recording}` `{mbid}`, plus `:NN` zero-padding
-(`{track:02}`). Filenames are sanitized for all OSes.
 
 ## Build
 
