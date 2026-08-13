@@ -1,12 +1,13 @@
 # Build the plugin .ndp and attach it to a GitHub Release.
 #
 # Release model:
-#   - VERSION BUMP (push a vX.Y.Z tag): creates a fresh release for that
-#     version with the .ndp download. Re-pushing the same tag replaces it.
+#   - VERSION BUMP (push a vX.Y.Z tag): creates a release + tag for that
+#     version ONLY, carrying the version-numbered .ndp. It is never touched by
+#     regular commits.
 #       git tag v0.2.0 && git push origin v0.2.0
-#   - REGULAR UPDATES (every push/squash to main): the .ndp is rebuilt and
-#     uploaded to the LATEST release (assets replaced in place via
-#     `gh release upload --clobber`), so the download always matches main.
+#   - EVERY commit (push/squash to main): the .ndp is rebuilt and uploaded to a
+#     separate "latest" release (tag: latest) via `gh release upload --clobber`,
+#     so latest always matches the newest commit.
 #
 # The tag/dispatch path verifies manifest.version == tag/input so every
 # versioned release is honest. Also runnable manually with a version input.
@@ -100,18 +101,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ github.ref_type }}" = "tag" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Version bump: (re)create the release for this version.
+            # Version bump: (re)create the release for THIS version only.
             gh release delete "${{ steps.ver.outputs.tag }}" --yes || true
             gh release create "${{ steps.ver.outputs.tag }}" dist/*.ndp \
               --title "v${{ steps.ver.outputs.version }}" --generate-notes
           else
-            # Regular push/squash to main: update the LATEST release's .ndp
-            # (replace assets in place, keeping the release URL/notes stable).
-            LATEST=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
-            if [ -n "$LATEST" ]; then
-              gh release upload "$LATEST" dist/*.ndp --clobber
+            # Every commit to main -> update the "latest" release (tag: latest).
+            # The version release (vX.Y.Z) is untouched here.
+            if gh release view latest >/dev/null 2>&1; then
+              gh release upload latest dist/*.ndp --clobber
             else
-              gh release create "v${{ steps.ver.outputs.version }}" dist/*.ndp \
-                --title "v${{ steps.ver.outputs.version }}" --generate-notes
+              gh release create latest dist/*.ndp --title "latest" --generate-notes
             fi
           fi
