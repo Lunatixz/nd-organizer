@@ -342,6 +342,7 @@ pub fn plan_step(
     let mut total_moves = 0usize;
     let mut total_dupes = 0usize;
     let mut total_to_move = 0usize;
+    let mut plans: Vec<serde_json::Value> = Vec::new();
 
     for group in groups {
         let mut files: Vec<(String, TrackTags)> = Vec::new();
@@ -390,12 +391,36 @@ pub fn plan_step(
         total_dupes += plan.duplicates.len();
         total_to_move += usize::from(!plan.moves.is_empty());
         report_parts.push(group_report(&plan));
+        plans.push(serde_json::json!({
+            "kind": match plan.bucket {
+                crate::organizer::Bucket::Soundtrack => "soundtrack",
+                crate::organizer::Bucket::Various => "various",
+                crate::organizer::Bucket::Singles => "singles",
+                crate::organizer::Bucket::Normal => "normal",
+            },
+            "target": plan.target_dir,
+            "moves": plan.moves.iter().map(|m| serde_json::json!({"from": m.from, "to": m.to})).collect::<Vec<_>>(),
+            "duplicates": plan.duplicates.len(),
+            "fillers": plan.fillers.len(),
+        }));
 
         if cfg.mode == Mode::Apply && !plan.moves.is_empty() {
             crate::organizer::apply_group_plan(&root, &plan, cfg.prune_empty_dirs)?;
             // Record each move so the run can be rolled back.
             let run_id = crate::wasm::current_run_id(library_id)?;
-            for m in &plan.moves {
+            // Back up the album's current album.nfo (if any) BEFORE we rewrite it,
+            // so rollback can restore the original content.
+            let mut nfo_backup_key: Option<String> = None;
+            let nfo_abs = root.join(&plan.target_dir).join("album.nfo");
+            if let Ok(orig) = std::fs::read(&nfo_abs) {
+                if let Ok(seq) = crate::state::host_state::next_seq(&run_id) {
+                    let key = crate::state::backup_key(&run_id, seq);
+                    if crate::store::kv().set(&key, orig).is_ok() {
+                        nfo_backup_key = Some(key);
+                    }
+                }
+            }
+            for (i, m) in plan.moves.iter().enumerate() {
                 let from_dir = dirname(&m.from).to_string();
                 let to_dir = dirname(&m.to).to_string();
                 let mut rec = crate::state::ApplyRecord {
@@ -410,8 +435,12 @@ pub fn plan_step(
                         to: basename(&m.to).to_string(),
                     }],
                     dir_sidecars: vec![],
-                    nfo_written: None,
-                    nfo_backup: None,
+                    nfo_written: if i == 0 {
+                        Some(format!("{}/album.nfo", plan.target_dir))
+                    } else {
+                        None
+                    },
+                    nfo_backup: if i == 0 { nfo_backup_key.clone() } else { None },
                 };
                 if let Err(e) = crate::state::host_state::record_apply(&mut rec) {
                     crate::wasm::log_warn(&format!("record apply {}: {e}", m.from));
@@ -449,7 +478,7 @@ pub fn plan_step(
         }
     }
 
-    let report_text = if report_parts.is_empty() {
+    let mut report_text = if report_parts.is_empty() {
         format!(
             "No albums in batch {}/{}\n",
             batch_index + 1,
@@ -458,6 +487,11 @@ pub fn plan_step(
     } else {
         report_parts.join("\n")
     };
+    // Always surface the run id so the user knows what to roll back.
+    let run_id = crate::wasm::current_run_id(library_id).unwrap_or_default();
+    report_text.push_str(&format!(
+        "\n[rollback] Run ID: {run_id}\nTo undo everything in this run, set 'rollbackRunId' = {run_id} in the plugin settings, then run a pass.\n"
+    ));
     crate::wasm::save_report(&report_text, cfg.backup_retention_days as i64);
     crate::wasm::log_info(&report_text);
     crate::wasm::post_webhook(cfg, &report_text);
@@ -489,6 +523,7 @@ pub fn plan_step(
         }],
         "totalAlbumsToMove": total_to_move,
         "totalFileMoves": total_moves,
+        "plans": plans,
         "warnings": [],
         "integrations": crate::wasm::integration_health(cfg),
         "tasks": crate::wasm::task_log(),

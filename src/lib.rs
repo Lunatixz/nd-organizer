@@ -275,6 +275,23 @@ pub(crate) mod wasm {
                             0
                         };
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
+                        // Heartbeat: keep the webhook dashboard alive between runs
+                        // (scan/batch status only posts on run events).
+                        let heartbeat = serde_json::json!({
+                            "ts": state::now_ts(),
+                            "mode": mode_label(&cfg),
+                            "inProgress": false,
+                            "phase": "stats",
+                            "plays": plays,
+                            "skips": skips,
+                            "topPicks": picks,
+                            "filtered": filtered,
+                            "warnings": collect_warnings(&cfg),
+                            "integrations": integration_health(&cfg),
+                            "tasks": task_log(),
+                        })
+                        .to_string();
+                        post_webhook(&cfg, &heartbeat);
                         Ok(format!("playback stats: {plays} plays, {skips} skips, {picks} top picks, {filtered} skip-heavy tracks removed by the filter proxy"))
                     }
                     Err(e) => Err(e),
@@ -791,6 +808,11 @@ pub(crate) mod wasm {
             return do_rollback(cfg);
         }
         log_library_inventory();
+        // Prune rollback data older than the retention window (default 30d).
+        let pruned = crate::state::host_state::prune_rollback(cfg.rollback_retention_days as i64);
+        if pruned > 0 {
+            log_info(&format!("pruned {pruned} stale rollback keys (retention {}d)", cfg.rollback_retention_days));
+        }
         let target_libs = target_libraries(cfg);
         if target_libs.is_empty() {
             log_error("nothing to organize: no libraries are accessible");

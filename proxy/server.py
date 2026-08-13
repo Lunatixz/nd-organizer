@@ -280,7 +280,32 @@ def _count_songs(obj):
     return n
 
 
+def start_heartbeat():
+    """Post a liveness heartbeat to the webhook dashboard (WEBHOOK_URL)."""
+    import threading
+
+    url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+    if not url:
+        return
+
+    def _loop():
+        while True:
+            time.sleep(60)
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps({"service": "proxy", "ts": time.time()}).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                urllib.request.urlopen(req, timeout=5).read()
+            except Exception:
+                pass
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 if __name__ == "__main__":
+    start_heartbeat()
     log.info("=" * 60)
     log.info("nd-organizer Subsonic filtering proxy starting")
     log.info("listening on 0.0.0.0:%d", PORT)

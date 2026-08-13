@@ -20,6 +20,7 @@ services:
       - "4534:4534"
     environment:
       - NAVIDROME_URL=http://navidrome:4533
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
       # - FILTER_KEYWORDS=intro,outro,interlude
     networks:
       - stack_network

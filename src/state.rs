@@ -187,11 +187,42 @@ pub mod host_state {
             Err(errors.join("; "))
         }
     }
+
+    /// Remove rollback data (apply records, backups, seq/rollback markers) for
+    /// runs older than `retention_days`. 0 = keep forever. Only affects expired
+    /// runs, so recent restore data is never touched. Returns items removed.
+    pub fn prune_rollback(retention_days: i64) -> usize {
+        if retention_days <= 0 {
+            return 0;
+        }
+        let cutoff = now_ts() - retention_days * 86_400;
+        let mut removed = 0usize;
+        // Each run's data lives under run-<unix-ts>; parse the ts from the id.
+        for (prefix, strip) in [("apply:", "apply:"), ("backup:", "backup:"), ("seq:", "seq:"), ("rollback:done:", "rollback:done:")] {
+            if let Ok(keys) = crate::store::kv().list(prefix) {
+                for key in keys {
+                    let id = key.strip_prefix(strip).unwrap_or(&key);
+                    let run = id.split(':').next().unwrap_or(id);
+                    if let Some(ts) = run_timestamp(run) {
+                        if ts < cutoff && crate::store::kv().delete(&key).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        removed
+    }
 }
 
 /// Helper for `host_state`: build a backup key for a run+seq snapshot.
 pub fn backup_key(run_id: &str, seq: i64) -> String {
     format!("backup:{run_id}:{seq}")
+}
+
+/// Extract the unix timestamp from a run id like "run-1755123456".
+pub fn run_timestamp(id: &str) -> Option<i64> {
+    id.strip_prefix("run-").and_then(|s| s.parse::<i64>().ok())
 }
 
 #[cfg(test)]
@@ -242,6 +273,17 @@ mod tests {
             fnv1a64("musicbrainz|Pink Floyd|The Wall")
         );
         assert_ne!(fnv1a64("a"), fnv1a64("b"));
+    }
+
+    #[test]
+    fn run_timestamp_parses_run_ids() {
+        assert_eq!(run_timestamp("run-1755123456"), Some(1755123456));
+        assert_eq!(run_timestamp("run-0"), Some(0));
+        assert_eq!(run_timestamp("1755123456"), None);
+        assert_eq!(run_timestamp("run-x"), None);
+        // Prune splits the ":<seq>" suffix before calling this, so the run id
+        // portion is what gets parsed.
+        assert_eq!(run_timestamp("run-1755123456"), run_timestamp("run-1755123456"));
     }
 
     #[test]

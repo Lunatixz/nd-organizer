@@ -20,6 +20,8 @@ services:
     restart: unless-stopped
     ports:
       - "8097:8097"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
     volumes:
       # Mirror every library mount from your Navidrome stack, SAME guest path.
       - /path/to/music:/music:ro

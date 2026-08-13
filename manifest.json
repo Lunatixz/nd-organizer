@@ -287,6 +287,13 @@
           "default": 30,
           "description": "Auto-prune old backups, reports and logs older than this. 0 = keep forever."
         },
+        "rollbackRetentionDays": {
+          "type": "integer",
+          "title": "Rollback data retention (days)",
+          "minimum": 0,
+          "default": 30,
+          "description": "How long apply records + file/nfo backups are kept so a run can be rolled back. After this, old runs are pruned to keep the database lean. 0 = keep forever."
+        },
 
         "folderSchema": {
           "type": "string",
@@ -886,7 +893,8 @@
               "type": "HorizontalLayout",
               "elements": [
                 { "type": "Control", "scope": "#/properties/backupBeforeWrite" },
-                { "type": "Control", "scope": "#/properties/backupRetentionDays" }
+                { "type": "Control", "scope": "#/properties/backupRetentionDays" },
+                { "type": "Control", "scope": "#/properties/rollbackRetentionDays" }
               ]
             },
             { "type": "Control", "scope": "#/properties/rollbackRunId" }

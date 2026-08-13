@@ -30,6 +30,8 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8099
 LOGFILE = sys.argv[2] if len(sys.argv) > 2 else "webhook.log"
 
 entries = []  # list of (ts, path, body)
+services = {}  # sidecar name -> last heartbeat unix ts
+last_any_request = time.time()  # webhook's own liveness
 
 
 def load_log():
@@ -134,7 +136,29 @@ def integrations_html():
     else:
         summary = ""
 
+    cards += service_cards()
     return banner + summary + "<div class='integrations'>%s</div>" % cards
+
+
+def service_cards():
+    """Sidecar liveness cards (from heartbeats + the webhook's own last
+    request). Green = seen recently, red = stale/no signal."""
+    now = time.time()
+    services["webhook"] = last_any_request
+    cards = ""
+    for name in sorted(services):
+        age = max(0, int(now - services[name]))
+        if age < 120:
+            cls, label = "ok", "UP"
+        elif age < 600:
+            cls, label = "warn", "WEAK"
+        else:
+            cls, label = "bad", "STALE"
+        cards += ("<div class='ig'><div class='ig-top'><span class='ig-name'>%s</span>"
+                  "<span class='ig-state %s'>%s</span></div>"
+                  "<span class='dim'>last signal %ds ago</span></div>") % (
+            esc(name), cls, label, age)
+    return cards
 
 
 def tasks_html():
@@ -214,6 +238,9 @@ def status_card(body):
     html += scan_line
     if j.get("runId"):
         html += " <span class='tag'>run %s</span>" % esc(j["runId"])
+        html += ("<div class='rollback'>Want to undo this run? Set <b>rollbackRunId</b> = "
+                 "<code>%s</code> in the plugin settings, then run a pass. Files, folders and "
+                 "album.nfo are restored from backup.</div>") % esc(j["runId"])
     if j.get("rollbackOfRun"):
         html += " <span class='tag'>rollback of %s</span>" % esc(j["rollbackOfRun"])
     html += "</div>"
@@ -230,6 +257,33 @@ def status_card(body):
         html += "</table>"
         html += "<div class='totals'>Total to move: <b>%s</b> &middot; file moves: <b>%s</b></div>" % (
             j.get("totalAlbumsToMove", 0), j.get("totalFileMoves", 0))
+        plans = j.get("plans")
+        if isinstance(plans, list) and plans:
+            html += "<div class='plans'><b>Album plans in this batch:</b>"
+            kind_label = {"soundtrack": "Soundtrack", "various": "Various", "singles": "Single/Incomplete", "normal": "Album"}
+            for p in plans:
+                if not isinstance(p, dict):
+                    continue
+                kind = p.get("kind", "normal")
+                html += ("<div class='plan'><span class='plan-k'>%s</span> <span class='plan-t'>/%s</span>"
+                         "<span class='dim'>%d dupes, %d filler</span>") % (
+                    esc(kind_label.get(kind, kind)), esc(p.get("target", "")),
+                    int(p.get("duplicates", 0)), int(p.get("fillers", 0)))
+                moves = p.get("moves")
+                if isinstance(moves, list) and moves:
+                    html += "<div class='moves'>"
+                    for mv in moves:
+                        if isinstance(mv, dict):
+                            html += "<div class='move'><span class='mv-f'>%s</span> &#8594; <span class='mv-t'>%s</span></div>" % (
+                                esc(mv.get("from", "")), esc(mv.get("to", "")))
+                    html += "</div>"
+                html += "</div>"
+            html += "</div>"
+    elif j.get("phase") == "stats":
+        html += ("<div class='note'>Stats heartbeat: <b>%s</b> plays, <b>%s</b> skips, "
+                 "<b>%s</b> top picks, <b>%s</b> flagged to the filter proxy.</div>") % (
+            int(j.get("plays", 0)), int(j.get("skips", 0)),
+            int(j.get("topPicks", 0)), int(j.get("filtered", 0)))
     elif j.get("deferredUntilIdle"):
         html += "<div class='note'>Run was deferred because playback is active. It retries automatically.</div>"
     else:
@@ -275,17 +329,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self._read_body()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Sidecar heartbeat? Body is {"service": "...", "ts": ...} with no "mode".
+        try:
+            j = json.loads(body) if body else {}
+        except Exception:
+            j = {}
+        if isinstance(j, dict) and j.get("service") and "mode" not in j:
+            services[j["service"]] = time.time()
+            log.info("heartbeat from %s", j["service"])
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
         summary = entry_summary(body) or "report/log"
         log.info("received POST %s from %s (%d bytes) - %s", self.path, self.client_address[0], len(body), summary)
         entries.append((ts, self.path, body))
-        with open(LOGFILE, "a", encoding="utf-8") as f:
-            f.write("[%s] POST %s - %s\n" % (ts, self.path, body))
+        # Never crash the request on a log-file problem: create the directory if
+        # needed and fall back to memory-only if it still can't be written.
+        try:
+            logdir = os.path.dirname(LOGFILE)
+            if logdir:
+                os.makedirs(logdir, exist_ok=True)
+            with open(LOGFILE, "a", encoding="utf-8") as f:
+                f.write("[%s] POST %s - %s\n" % (ts, self.path, body))
+        except Exception as e:
+            log.warning("could not write log file %s: %s", LOGFILE, e)
         self.send_response(200)
         self.send_header("Content-Length", "3")
         self.end_headers()
         self.wfile.write(b"ok\n")
 
     def do_GET(self):
+        global last_any_request
+        last_any_request = time.time()
         if self.path.startswith("/health"):
             data = json.dumps({
                 "ok": True, "service": "nd-organizer-webhook", "port": PORT,
@@ -384,6 +461,16 @@ h2 .meta{color:#8b93a5;font-size:12px;font-weight:normal;float:right}
 .tag.run{background:#6b3a00;color:#ffcf8a}.tag.wait{background:#3a2c00;color:#ffd98a}
 .tag.ok{background:#0f3d24;color:#8ff0b5}.tag.bad{background:#7a1b1b;color:#ff8f8f}
 .tag.mode{background:#1d3a5f;color:#9cc8ff}
+.rollback{margin-top:10px;background:#1d2a4a;border:1px solid #3a5a9c;border-radius:8px;padding:8px 12px;color:#aac8ff;font-size:13px}
+.rollback code{background:#0a1220;border:1px solid #2c3e66;border-radius:4px;padding:1px 6px;color:#e6f0ff}
+.plans{margin-top:10px;font-size:13px}
+.plan{background:#161d29;border:1px solid #232a36;border-radius:8px;padding:8px 12px;margin-top:8px}
+.plan-k{display:inline-block;background:#1d3a5f;color:#9cc8ff;border-radius:4px;padding:1px 8px;font-size:11px;font-weight:600;margin-right:8px}
+.plan-t{font-weight:600;color:#e6eaf1;margin-right:10px}
+.moves{margin-top:6px;font-size:12px}
+.move{padding:1px 0;color:#aab6c5}
+.mv-f{color:#ff9b9b}
+.mv-t{color:#8ff0b5}
 .tk{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1c2230;font-size:13px}
 .tk-ts{color:#8b93a5;font-size:12px;width:64px;flex-shrink:0}
 .tk-kind{font-weight:600;color:#e6eaf1;min-width:70px}

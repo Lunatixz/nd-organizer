@@ -22,6 +22,8 @@ services:
     restart: unless-stopped
     ports:
       - "8098:8098"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
     networks:
       - stack_network
 

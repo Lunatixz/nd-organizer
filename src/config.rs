@@ -129,6 +129,10 @@ pub struct Config {
     pub backup_before_write: bool,
     /// Days to keep metadata backups before pruning. 0 = keep forever.
     pub backup_retention_days: i32,
+    /// Days to keep rollback data (apply records + file/nfo backups) before
+    /// pruning. 0 = keep forever. Old runs are removed so the DB doesn't grow
+    /// without bound; recent runs stay restorable.
+    pub rollback_retention_days: i32,
 
     // Identity verification
     pub verify_identity: bool,
@@ -245,6 +249,7 @@ impl Default for Config {
             exclude_paths: Vec::new(),
             backup_before_write: true,
             backup_retention_days: 30,
+            rollback_retention_days: 30,
             verify_identity: true,
             min_confidence: 0.6,
             skip_unverified: true,
@@ -350,6 +355,7 @@ impl Config {
             "excludePaths",
             "backupBeforeWrite",
             "backupRetentionDays",
+            "rollbackRetentionDays",
             "illegalCharReplacement",
             "maxNameLength",
             "pruneEmptyDirs",
@@ -538,6 +544,9 @@ impl Config {
         c.backup_before_write = bool(map, "backupBeforeWrite", c.backup_before_write);
         if let Some(v) = map.get("backupRetentionDays") {
             c.backup_retention_days = v.trim().parse().unwrap_or(c.backup_retention_days);
+        }
+        if let Some(v) = map.get("rollbackRetentionDays") {
+            c.rollback_retention_days = v.trim().parse().unwrap_or(c.rollback_retention_days);
         }
         c.verify_identity = bool(map, "verifyIdentity", c.verify_identity);
         if let Some(v) = map.get("minConfidence") {
@@ -851,6 +860,7 @@ mod tests {
         let d = Config::from_map(&HashMap::new());
         assert_eq!(d.persistence_backend, "host");
         assert_eq!(d.mysql_port, 3306);
+        assert_eq!(d.rollback_retention_days, 30);
     }
 }
 

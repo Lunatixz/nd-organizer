@@ -45,7 +45,9 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   small background batches, and **triggers a Navidrome rescan after every album
   it moves** so no song ever goes offline.
 - **Safety**: dry-run default, full change history with **rollback**
-  (`rollbackRunId`), metadata-only backups, per-run reports + a live status feed.
+  (`rollbackRunId`, auto-pruned after `rollbackRetentionDays`), metadata-only
+  backups, per-run reports + a live status feed with album plans and a rollback
+  callout.
 
 ## How it works (pipeline)
 
@@ -302,10 +304,48 @@ plugin can reach and write to.
 
 Every applied run records its changes under a **run ID**. To undo one:
 
-1. Find the run ID in the report/status (`runId`, or the "Run ID" line).
+1. Find the run ID — it's shown in the report/status (`runId`) and highlighted on
+   the webhook dashboard ("Set `rollbackRunId` = …"), and every report ends with
+   a `[rollback] Run ID:` line.
 2. Set the plugin's **`rollbackRunId`** to that value.
 3. Run a pass — the plugin reverses the moves (restores filenames/folders and
-   any metadata backups), then clears the marker.
+   the original `album.nfo` from backup), then clears the marker.
+
+**What rollback restores:** file renames, folder moves, sidecar moves, and the
+pre-write `album.nfo` content (captured before each rewrite). The full history
+(`apply:` records + `backup:` snapshots) lives in the plugin KVStore.
+
+**Retention:** rollback data is kept for **`rollbackRetentionDays`** (default
+**30**; `0` = keep forever). Every pass prunes records older than that — so the
+database stays lean without ever losing a run you can still roll back.
+`backupRetentionDays` (default 30) similarly prunes reports/backups.
+
+## Webhook dashboard
+
+The `webhook` sidecar renders a self-refreshing dashboard at
+`http://<host>:8099/` with collapsible sections:
+
+- **Integrations** — the plugin's own health checks (AcoustID, Lidarr,
+  AudioMuse-AI, MusicBrainz, Last.fm) with an alert banner when any need
+  attention; the plugin re-checks at most once per 5 min (rate-limited).
+- **Services** — independent liveness of every Docker sidecar (acoustid,
+  proxy, mysql, webhook) via **heartbeats**. Each sidecar POSTs to the webhook
+  every 60s when `WEBHOOK_URL` is set:
+  ```yaml
+  environment:
+    - WEBHOOK_URL=http://nd-organizer-webhook:8099
+  ```
+  Green `UP` < 2 min, amber `WEAK` < 10 min, red `STALE` after that.
+- **Status** — running/scanning/idle, per-library counts, **album plans**
+  (kind badge, target folder, every `old → new` file move, dupes/fillers), and
+  the **rollback callout** with the run ID.
+- **Task queue** — recent task executions (scan chunks, plan batches, favsync,
+  stats) with RUNNING/DONE/FAILED states.
+- **Activity** — raw status/report posts; rows with failing integrations or
+  warnings get an ISSUES/WARNINGS chip.
+
+The plugin also posts a **stats heartbeat** every stats poll (5 min) so the
+dashboard stays fresh between runs.
 
 ## Playback filtering (no file moves)
 
@@ -399,11 +439,13 @@ stored in the plugin KVStore.
 | `excludePaths` | `[]` | Paths never to touch (e.g. `inbox`, `Downloads/*`). |
 | `readNfo` / `writeNfo` | `true` / `false` | NFO sidecar read / rewrite. |
 | `backupBeforeWrite` / `backupRetentionDays` | `true` / `30` | Metadata-only pre-write snapshots + retention. |
+| `rollbackRetentionDays` | `30` | How long apply records + file/nfo backups are kept for rollback (`0` = forever); old runs pruned automatically. |
 | `verifyIdentity` / `skipUnverified` | `true` / `true` | Require MBID/ISRC/AcoustID identity before pairing; leave others in place. |
 | `acoustidUrl` / `acoustidApiKey` | — | AcoustID sidecar URL + client key. |
 | `lidarrUrl`/`lidarrApiKey`/`lidarrMode` | — | Lidarr metadata/classification, naming schema, monitored force-search. |
 | `useLidarrNamingSchema` | `false` | Use Lidarr's naming config instead of `folderSchema`/`fileSchema`. |
 | `lidarrForceSearchIncomplete` | `false` | AlbumSearch for incomplete albums whose artist+album are monitored. |
+| Lidarr post-move refresh | — | With `lidarrMode = metadataPlusRescan`, after moving an album the plugin fires Lidarr `RefreshArtist` for that artist (once per artist / 5 min) so Lidarr's DB follows the new paths. |
 | `audiomuseUrl`/`audiomuseToken` | — | AudioMuse-AI acoustic tags + re-sync. |
 | `scanUser` / `triggerScanAfterRun` / `scanAfterAlbum` | — | Navidrome admin user + per-album rescans. |
 | `rollbackRunId` | `""` | Set to a run ID to undo that run. |
