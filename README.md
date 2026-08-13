@@ -474,4 +474,3 @@ Pushing the tag also re-publishes the sidecar Docker images
 - After renames, Navidrome favorites/playcounts survive only if **Persistent
   IDs** are enabled in Navidrome config.
 
-
