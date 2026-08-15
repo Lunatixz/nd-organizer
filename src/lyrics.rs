@@ -116,5 +116,5 @@ pub fn write_sidecar(path: &Path, lyrics: &Lyrics, format: &str) -> Result<(), S
     if out.exists() {
         return Ok(());
     }
-    crate::tags::atomic_write(&out, content.as_bytes()).map_err(|e| e.to_string())
+crate::tags::atomic_write(&out, content.as_bytes()).map_err(|e| e.to_string())
 }

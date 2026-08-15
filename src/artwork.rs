@@ -115,7 +115,7 @@ pub fn embed(path: &Path, bytes: Vec<u8>, kind: ArtKind) -> Result<(), String> {
         tag.set_picture(0, pic);
     }
     let _ = tagged.insert_tag(tag);
-    crate::tags::save_tagged_atomic(&tagged, path)
+crate::tags::save_tagged_atomic(&tagged, path)
 }
 
 /// Write a cover.jpg sidecar into the album folder (skip if it already exists).
@@ -127,5 +127,5 @@ pub fn write_sidecar(dir: &Path, bytes: Vec<u8>) -> Result<(), String> {
     if let Some(p) = path.parent() {
         let _ = std::fs::create_dir_all(p);
     }
-    crate::tags::atomic_write(&path, &bytes)
+crate::tags::atomic_write(&path, &bytes)
 }

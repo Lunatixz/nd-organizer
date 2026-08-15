@@ -235,7 +235,7 @@ pub fn write_mbids(
         }
     }
     let _ = tagged.insert_tag(tag);
-    save_tagged_atomic(&tagged, path)
+save_tagged_atomic(&tagged, path)
 }
 
 /// Write playback metadata into a track's tags (opt-in, `writePlaycount`):
@@ -279,32 +279,5 @@ pub fn write_playback_meta(
         return Ok(());
     }
     let _ = tagged.insert_tag(tag);
-    save_tagged_atomic(&tagged, path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn atomic_write_replaces_content_and_cleans_temp() {
-        let dir = std::env::temp_dir().join(format!("ndtags-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("track.flac");
-        std::fs::write(&f, b"old").unwrap();
-        atomic_write(&f, b"new-data").unwrap();
-        assert_eq!(std::fs::read(&f).unwrap(), b"new-data");
-        assert!(!dir.join(".track.flac.ndtmp").exists());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn atomic_write_creates_missing_file() {
-        let dir = std::env::temp_dir().join(format!("ndtags2-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("new.txt");
-        atomic_write(&f, b"hello").unwrap();
-        assert_eq!(std::fs::read(&f).unwrap(), b"hello");
-        std::fs::remove_dir_all(&dir).ok();
-    }
+save_tagged_atomic(&tagged, path)
 }

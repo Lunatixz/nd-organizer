@@ -318,5 +318,5 @@ pub fn write_tags(path: &Path, ac: &Acoustic, overwrite: bool) -> Result<(), Str
         return Ok(());
     }
     let _ = tagged.insert_tag(tag);
-    crate::tags::save_tagged_atomic(&tagged, path)
+crate::tags::save_tagged_atomic(&tagged, path)
 }
