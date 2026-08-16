@@ -156,3 +156,128 @@ fn parse_releases(v: &Value, _artist: &str, album: &str) -> Option<MbRelease> {
     all.sort_by(|a, b| b.0.cmp(&a.0));
     all.first().map(|(_, r)| r.clone())
 }
+
+/// One track from a MusicBrainz release tracklist (for auto-tagging).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MbTrack {
+    pub title: String,
+    pub position: Option<u32>,
+    pub number: Option<u32>,
+    pub length: Option<u32>,
+    pub recording_mbid: String,
+    pub artist: String,
+}
+
+/// Fetch a release's full tracklist (`release/{mbid}?inc=recordings+artist-credits`),
+/// cached 7 days. Reuses the same circuit + throttle as `lookup`.
+pub fn release_tracks(mbid: &str, token: &str) -> Option<Vec<MbTrack>> {
+    if mbid.trim().is_empty() {
+        return None;
+    }
+    let cache_key = format!("mb.tracks.{mbid}");
+    if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+        if let Ok(r) = serde_json::from_slice::<Vec<MbTrack>>(&v) {
+            return Some(r);
+        }
+    }
+    if !crate::net::circuit_probe(
+        "musicbrainz",
+        "https://musicbrainz.org/ws/2/",
+        &HashMap::new(),
+        15_000,
+    ) {
+        return None;
+    }
+    if !crate::net::throttle("musicbrainz", if token.trim().is_empty() { 1200 } else { 30 }) {
+        return None;
+    }
+    let url = format!(
+        "https://musicbrainz.org/ws/2/release/{}?inc=recordings+artist-credits&fmt=json",
+        urlenc(mbid)
+    );
+    let mut headers = HashMap::from([(
+        "User-Agent".to_string(),
+        "nd-organizer/0.1 (https://github.com/lunatixz/nd-organizer)".to_string(),
+    )]);
+    if !token.trim().is_empty() {
+        headers.insert("Authorization".to_string(), format!("Bearer {}", token.trim()));
+    }
+    let req = host::http::HTTPRequest {
+        method: "GET".into(),
+        url,
+        headers,
+        no_follow_redirects: false,
+        body: vec![],
+        timeout_ms: 15_000,
+    };
+    let tracks: Option<Vec<MbTrack>> = match host::http::send(req) {
+        Ok(Some(resp)) if resp.status_code == 200 => {
+            crate::net::circuit_clear("musicbrainz");
+            let Ok(v) = serde_json::from_slice::<Value>(&resp.body) else {
+                return None;
+            };
+            let parsed = parse_release_tracks(&v);
+            if !parsed.is_empty() {
+                let _ = crate::store::kv().set_with_ttl(
+                    &cache_key,
+                    serde_json::to_vec(&parsed).unwrap_or_default(),
+                    7 * 24 * 3600,
+                );
+            }
+            Some(parsed)
+        }
+        Ok(Some(_)) | Ok(None) | Err(_) => {
+            crate::net::circuit_mark_failed("musicbrainz");
+            None
+        }
+    };
+    tracks.filter(|t| !t.is_empty())
+}
+
+/// Parse `release/{mbid}` JSON into tracks, flattening media/discs in order and
+/// accumulating a global track position across discs.
+fn parse_release_tracks(v: &Value) -> Vec<MbTrack> {
+    let mut out = Vec::new();
+    let mut pos: u32 = 0;
+    let Some(media) = v.pointer("/media").and_then(|m| m.as_array()) else {
+        return out;
+    };
+    for med in media {
+        if let Some(trks) = med.get("tracks").and_then(|t| t.as_array()) {
+            for trk in trks {
+                pos += 1;
+                let title = trk.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                let number = trk
+                    .get("number")
+                    .and_then(|n| n.as_str())
+                    .and_then(|s| s.parse::<u32>().ok());
+                let length = trk.get("length").and_then(|l| l.as_u64()).map(|x| x as u32);
+                let rec_mbid = trk
+                    .pointer("/recording/id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mut artist = String::new();
+                if let Some(credits) = trk.pointer("/artist-credit").and_then(|c| c.as_array()) {
+                    for c in credits {
+                        if let Some(n) = c.get("name").and_then(|n| n.as_str()) {
+                            artist.push_str(n);
+                        }
+                        if let Some(j) = c.get("joinphrase").and_then(|j| j.as_str()) {
+                            artist.push_str(j);
+                        }
+                    }
+                }
+                out.push(MbTrack {
+                    title,
+                    position: Some(pos),
+                    number,
+                    length,
+                    recording_mbid: rec_mbid,
+                    artist,
+                });
+            }
+        }
+    }
+    out
+}

@@ -815,7 +815,7 @@ pub(crate) mod wasm {
             arr.push(json!({"name":"AudioMuse-AI","state":"notConfigured","detail":"audiomuseUrl not set"}));
         } else {
             let url = crate::audiomuse::resolve_base(cfg);
-            match probe_ok_timeout("audiomuse", &url, &empty, 20_000, 300) {
+            match probe_ok_timeout("audiomuse-v2", &url, &empty, 20_000, 300) {
                 None => arr.push(json!({"name":"AudioMuse-AI","state":"ok","detail":url})),
                 Some(w) => {
                     arr.push(json!({"name":"AudioMuse-AI","state":"unreachable","detail":w}))
@@ -1114,9 +1114,10 @@ pub(crate) mod wasm {
         // A required external metadata provider (MusicBrainz / Lidarr /
         // AcoustID, per this config) being unreachable means we can't build
         // proper identities or album/track metadata. Skip the run and retry
-        // later instead of organizing on degraded data.
-        if let Some(provider) = required_meta_unreachable(cfg) {
-            log_info(&format!(
+        // later instead of organizing on degraded data. Gated by metaGateEnabled.
+        if cfg.meta_gate_enabled {
+            if let Some(provider) = required_meta_unreachable(cfg) {
+                log_info(&format!(
                 "run skipped: {provider} offline - retrying later (no actions without required metadata)"
             ));
             let status = serde_json::json!({
@@ -1140,6 +1141,7 @@ pub(crate) mod wasm {
             );
             let _ = host::scheduler::schedule_one_time(300, "meta-retry", "");
             return Ok(());
+            }
         }
         store::write_status(&status_json(cfg, true, &[], None, None));
         if cfg.favorites_sync_lastfm {

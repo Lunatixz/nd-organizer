@@ -88,8 +88,6 @@ pub enum LidarrMode {
 pub struct Config {
     // General
     pub mode: Mode,
-    /// Primary library (first entry of `libraries`).
-    pub library_id: i32,
     /// All libraries to organize. Empty = organize every library the plugin is
     /// granted access to (the Navidrome "Library Access" permission is the
     /// authority); non-empty = only these IDs (a subset override).
@@ -198,6 +196,27 @@ pub struct Config {
     /// Delete folders that contain no audio files at all (only images/nfo/lyrics
     /// or other misc files remain). Runs after organizing, apply mode only.
     pub cleanup_no_audio_folders: bool,
+    /// Skip a run when a required external metadata source (AcoustID /
+    /// MusicBrainz / Lidarr) is unreachable, retrying later instead of
+    /// organizing on degraded metadata. Off = run best-effort anyway.
+    pub meta_gate_enabled: bool,
+    /// Fall back to parsing the filename ("01 - Artist - Title.flac") when a
+    /// file has no usable embedded tags, so tagless files still get organized.
+    pub parse_filenames: bool,
+    /// Fetch the MusicBrainz release tracklist and fill a track's MISSING tag
+    /// fields (title/artist/track/year/MBIDs) during a run. Apply mode only.
+    pub auto_tag_from_mb: bool,
+    /// Report files across the library that share an audio fingerprint
+    /// (possible duplicates). Report-only - nothing is moved.
+    pub detect_duplicates: bool,
+    /// Write ReplayGain track gain/peak tags (REPLAYGAIN_TRACK_GAIN/PEAK) via
+    /// the acoustid sidecar's ffmpeg loudness analysis. Apply mode only.
+    pub write_replaygain: bool,
+    /// ReplayGain scope: "track" writes only per-track tags; "album" also
+    /// writes album-level tags (mean gain / max peak across the album).
+    pub replay_gain_mode: String,
+    /// ReplayGain reference loudness in LUFS (ReplayGain standard is -18).
+    pub replay_gain_reference: f64,
     pub skip_hidden_files: bool,
     pub preserve_recording_type: bool,
     pub singles_under_artist: bool,
@@ -283,7 +302,6 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             mode: Mode::DryRun,
-            library_id: 1,
             libraries: Vec::new(),
             run_on_startup: false,
             schedule_cron: String::new(),
@@ -335,6 +353,13 @@ impl Default for Config {
             max_name_length: 180,
             prune_empty_dirs: true,
             cleanup_no_audio_folders: false,
+            meta_gate_enabled: true,
+            parse_filenames: true,
+            auto_tag_from_mb: true,
+            detect_duplicates: true,
+            write_replaygain: true,
+            replay_gain_mode: "track".into(),
+            replay_gain_reference: -18.0,
             skip_hidden_files: true,
             preserve_recording_type: true,
             singles_under_artist: true,
@@ -450,6 +475,13 @@ impl Config {
             "maxNameLength",
             "pruneEmptyDirs",
             "cleanupNoAudioFolders",
+            "metaGateEnabled",
+            "parseFilenames",
+            "autoTagFromMB",
+            "detectDuplicates",
+            "writeReplayGain",
+            "replayGainMode",
+            "replayGainReference",
             "skipHiddenFiles",
             "preserveRecordingType",
             "singlesUnderArtist",
@@ -529,7 +561,6 @@ impl Config {
                 c.libraries = parsed;
             }
         }
-        c.library_id = c.libraries.first().copied().unwrap_or(1);
         c.run_on_startup = bool(map, "runOnStartup", c.run_on_startup);
         if let Some(v) = map.get("scheduleCron") {
             c.schedule_cron = v.clone();
@@ -655,6 +686,24 @@ impl Config {
         }
         c.prune_empty_dirs = bool(map, "pruneEmptyDirs", c.prune_empty_dirs);
         c.cleanup_no_audio_folders = bool(map, "cleanupNoAudioFolders", c.cleanup_no_audio_folders);
+        c.meta_gate_enabled = bool(map, "metaGateEnabled", c.meta_gate_enabled);
+        c.parse_filenames = bool(map, "parseFilenames", c.parse_filenames);
+        c.auto_tag_from_mb = bool(map, "autoTagFromMB", c.auto_tag_from_mb);
+        c.detect_duplicates = bool(map, "detectDuplicates", c.detect_duplicates);
+        c.write_replaygain = bool(map, "writeReplayGain", c.write_replaygain);
+        if let Some(v) = map.get("replayGainMode") {
+            let m = v.trim().to_lowercase();
+            if m == "album" || m == "track" {
+                c.replay_gain_mode = m;
+            }
+        }
+        if let Some(v) = map.get("replayGainReference") {
+            if let Ok(r) = v.trim().parse::<f64>() {
+                if (-40.0..=0.0).contains(&r) {
+                    c.replay_gain_reference = r;
+                }
+            }
+        }
         c.skip_hidden_files = bool(map, "skipHiddenFiles", c.skip_hidden_files);
         c.preserve_recording_type = bool(map, "preserveRecordingType", c.preserve_recording_type);
         c.singles_enabled = bool(map, "singlesEnabled", c.singles_enabled);
@@ -905,7 +954,7 @@ mod tests {
             ("skipHeavyRatio", "0.75"),
         ]));
         assert_eq!(c.mode, Mode::Apply);
-        assert_eq!(c.library_id, 2);
+        assert_eq!(c.libraries, vec![2]);
         assert_eq!(c.libraries, vec![2]);
         assert!(c.run_on_startup);
         assert_eq!(c.folder_schema, "{albumArtist}/{album}");
@@ -949,12 +998,10 @@ mod tests {
         // `libraries` wins over `libraryId`.
         let c = Config::from_map(&map(&[("libraries", "[2,5]"), ("libraryId", "9")]));
         assert_eq!(c.libraries, vec![2, 5]);
-        assert_eq!(c.library_id, 2);
 
         // Single `libraryId` fallback.
         let c = Config::from_map(&map(&[("libraryId", "4")]));
         assert_eq!(c.libraries, vec![4]);
-        assert_eq!(c.library_id, 4);
     }
 
     #[test]

@@ -111,9 +111,10 @@ fn headers(cfg: &crate::config::Config) -> HashMap<String, String> {
 /// Resolve the AudioMuse-AI base URL to use. Tries the configured URL first; if
 /// it is unreachable from inside the Navidrome container (its docker network may
 /// not be routable from Navidrome's), falls back to the server's own host address
-/// on the same port - the host-published port always answers. Cached 10 min.
+/// on the same port - the host-published port always answers. Cached 5 min, with
+/// short probe caches so a fix is picked up quickly.
 pub fn resolve_base(cfg: &crate::config::Config) -> String {
-    crate::net::cached("audiomuse.base", 600, || {
+    crate::net::cached("audiomuse.base", 300, || {
         let configured = cfg.audiomuse_url.trim().trim_end_matches('/').to_string();
         if configured.is_empty() {
             return Some(configured);
@@ -146,9 +147,10 @@ pub fn resolve_base(cfg: &crate::config::Config) -> String {
             }
         }
         // Probe candidates with a short timeout (discovery only - a live
-        // AudioMuse answers its root fast). Per-URL results are cached 1h.
+        // AudioMuse answers its root fast). Per-URL results are cached 5 min.
+        // The "-v2" key busts any stale pre-version warn entries on upgrade.
         for c in candidates {
-            if crate::wasm::probe_ok_timeout("audiomuse", &c, &headers(cfg), 10_000, 3600).is_none() {
+            if crate::wasm::probe_ok_timeout("audiomuse-v2", &c, &headers(cfg), 10_000, 300).is_none() {
                 return Some(c);
             }
         }

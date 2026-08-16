@@ -4,7 +4,7 @@
 # Services:
 #   navidrome                  (4533)  the music server (plugins enabled)
 #   octo-fiesta                (4535)  missing-track proxy (multi-provider)
-#   nd-organizer-acoustid (8097)  fingerprint sidecar - powers identity verification
+#   nd-organizer-acoustid (8097)  fingerprint + ReplayGain sidecar (fpcalc + ffmpeg)
 #   nd-organizer-webhook  (8099)  dashboard + log/status receiver
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
 #   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
@@ -179,7 +179,10 @@ services:
       - Subsonic__DownloadMode=${DOWNLOAD_MODE:-Track}
       - Subsonic__AutoUpgradeQuality=${AUTO_UPGRADE_QUALITY:-false}
       - Subsonic__DisableLibraryScan=${DISABLE_LIBRARY_SCAN:-false}
-      - Subsonic__FolderTemplate=${FOLDER_TEMPLATE:-{artist}/{album}/{track} - {title}}
+      # NOTE: the folder template default ({artist}/{album}/{track} - {title})
+      # lives in .env.example - braces inside a ${VAR:-default} break compose's
+      # interpolation, so FOLDER_TEMPLATE must come from the .env file.
+      - Subsonic__FolderTemplate=${FOLDER_TEMPLATE}
       # Admin creds only needed for Permanent-mode library registration.
       - Subsonic__AdminUsername=${SUBSONIC_ADMIN_USERNAME:-}
       - Subsonic__AdminPassword=${SUBSONIC_ADMIN_PASSWORD:-}

@@ -73,15 +73,26 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
    one are fingerprinted via the AcoustID sidecar to obtain an album MBID.
    Files that still can't be identified are left in place (reported).
 3. **Group** — verified files are grouped into albums by album MBID, or by
-   album artist + album + year.
+   album artist + album + year. Files with no usable tags fall back to
+   **filename parsing** (`parseFilenames`), and files sharing an audio
+   fingerprint across the library are reported as **possible duplicates**
+   (`detectDuplicates`).
 4. **Plan** — each album group is planned in batches (`albumsPerTask`): target
-   folder/file names from your schemas, duplicate detection.
+   folder/file names from your schemas, duplicate detection, plus
+   **auto-tagging** missing fields from the MusicBrainz release tracklist
+   (`autoTagFromMB`).
 5. **Apply** (only in `mode: apply`) — moves files + sidecars, handles
    duplicates, records every change for rollback, and triggers a Navidrome
-   rescan per album.
+   rescan per album. Tag/enrichment passes also run here: **ReplayGain** loudness
+   tags via the acoustid sidecar (`writeReplayGain` + `replayGainMode` /
+   `replayGainReference`), artwork, lyrics, acoustic tags, `album.nfo` /
+   `artist.nfo`, and the optional no-audio-folder cleanup
+   (`cleanupNoAudioFolders`).
 
 **Safety model:** `mode: dryRun` is the default — it plans and reports but writes
-nothing. Review the report/status, then switch to `apply`.
+nothing. Review the report/status, then switch to `apply`. If a required
+metadata source (AcoustID / MusicBrainz / Lidarr) is unreachable, the run skips
+and retries later instead of acting on degraded data (`metaGateEnabled`).
 
 ## Star rating & playcount (0–5.0)
 
@@ -125,7 +136,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | Image | Purpose |
 |---|---|
 | `ghcr.io/v1ck3s/octo-fiesta` | Missing-track proxy (third-party, GPL-3.0) — when a requested song isn't in the library, fetches it from the configured provider and streams it. Supports SquidWTF (free, no creds), Deezer, Qobuz, Yandex. |
-| `ghcr.io/lunatixz/nd-organizer/acoustid:latest` | Fingerprints songs (AcoustID) so unverified files can be paired to their album. |
+| `ghcr.io/lunatixz/nd-organizer/acoustid:latest` | Fingerprints songs (AcoustID) so unverified files can be paired to their album, and computes ReplayGain loudness tags (ffmpeg). |
 | `ghcr.io/lunatixz/nd-organizer/webhook:latest` | A web dashboard showing status + reports (auto-refreshing). |
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from **auto-queues** (random/playlist/similar/genre/top/starred, but **not** explicit user searches), removes skip-heavy tracks past the cap everywhere, and re-sorts returned lists by weight, without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
@@ -147,7 +158,7 @@ Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
 # Services:
 #   navidrome                  (4533)  the music server (plugins enabled)
 #   octo-fiesta                (4535)  missing-track proxy (multi-provider)
-#   nd-organizer-acoustid (8097)  fingerprint sidecar - powers identity verification
+#   nd-organizer-acoustid (8097)  fingerprint + ReplayGain sidecar (fpcalc + ffmpeg)
 #   nd-organizer-webhook  (8099)  dashboard + log/status receiver
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
 #   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
@@ -304,96 +315,60 @@ services:
       - "4535:8080"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
-      # Internal listening port (must match the port in "ports" mapping above)
-      - ASPNETCORE_URLS=http://+:${INTERNAL_PORT:-8080}
-      # Download path inside container
+      - ASPNETCORE_URLS=http://+:8080
       - Library__DownloadPath=/app/downloads
-      
-      # ===== SUBSONIC SETTINGS =====
-      # Navidrome/Subsonic server URL
+      # Upstream = our filter proxy (keeps keyword/skip filtering), which
+      # forwards to Navidrome. Point directly at http://navidrome:4533 to skip
+      # the filter layer for this path.
       - Subsonic__Url=http://nd-organizer-proxy:4534
-      # Admin username to perform actions on navidrome server that require admin permissions (optional)
-      - Subsonic__AdminUsername=${SUBSONIC_ADMIN_USERNAME:-}
-      # Admin Password to perform actions on navidrome server that require admin permissions (optional)
-      - Subsonic__AdminPassword=${SUBSONIC_ADMIN_PASSWORD:-}
-      # Music service to use: Deezer, Qobuz, or SquidWTF (default: SquidWTF)
+      # Music service: SquidWTF (no creds) | Deezer | Qobuz | Yandex
       - Subsonic__MusicService=${MUSIC_SERVICE:-SquidWTF}
-      # Storage mode: Permanent (saved to library), Cache (temporary, auto-cleanup)
-      - Subsonic__StorageMode=${STORAGE_MODE:-Permanent}
-      # Cache duration in hours when StorageMode=Cache (default: 1)
+      # Cache = stream missing tracks without writing to the library.
+      # Set to Permanent + mount DOWNLOAD_PATH to save them into the library.
+      - Subsonic__StorageMode=${STORAGE_MODE:-Cache}
       - Subsonic__CacheDurationHours=${CACHE_DURATION_HOURS:-1}
-      # Enable external playlist search and download (default: true)
       - Subsonic__EnableExternalPlaylists=${ENABLE_EXTERNAL_PLAYLISTS:-true}
-      # Directory name for playlist .m3u files (default: playlists)
       - Subsonic__PlaylistsDirectory=${PLAYLISTS_DIRECTORY:-playlists}
-      # Explicit content filter: All, ExplicitOnly, CleanOnly (default: All)
       - Subsonic__ExplicitFilter=${EXPLICIT_FILTER:-All}
-      # Download mode: Track (only requested track), Album (full album when playing a track)
       - Subsonic__DownloadMode=${DOWNLOAD_MODE:-Track}
-      # Auto upgrade quality: re-download tracks when higher quality is available (default: false)
       - Subsonic__AutoUpgradeQuality=${AUTO_UPGRADE_QUALITY:-false}
-      # Disable triggering a library scan after a download completes (default: false)
-      # Useful if your Subsonic server or an external automation already picks up new files
       - Subsonic__DisableLibraryScan=${DISABLE_LIBRARY_SCAN:-false}
-      # Folder template for organizing downloaded files (default: {artist}/{album}/{track} - {title})
-      # Available placeholders: {artist}, {album}, {title}, {track}, {disc}, {year}, {genre}, {quality}
+      # NOTE: the folder template default ({artist}/{album}/{track} - {title})
+      # lives in .env.example - braces inside a ${VAR:-default} break compose's
+      # interpolation, so FOLDER_TEMPLATE must come from the .env file.
       - Subsonic__FolderTemplate=${FOLDER_TEMPLATE}
-      
-      # ===== DEEZER SETTINGS =====
-      # Deezer ARL token (required if using Deezer)
-      - Deezer__Arl=${DEEZER_ARL:-}
-      # Fallback ARL token (optional)
-      - Deezer__ArlFallback=${DEEZER_ARL_FALLBACK:-}
-      # Preferred audio quality: FLAC, MP3_320, MP3_128 (optional, defaults to highest available)
-      - Deezer__Quality=${DEEZER_QUALITY:-}
-      
-      # ===== QOBUZ SETTINGS =====
-      # Qobuz user authentication token (required if using Qobuz)
-      - Qobuz__UserAuthToken=${QOBUZ_USER_AUTH_TOKEN:-}
-      # Qobuz user ID (required if using Qobuz)
-      - Qobuz__UserId=${QOBUZ_USER_ID:-}
-      # Preferred audio quality: FLAC, FLAC_24_HIGH, FLAC_24_LOW, FLAC_16, MP3_320 (optional)
-      - Qobuz__Quality=${QOBUZ_QUALITY:-}
-      
-      # ===== SQUIDWTF SETTINGS =====
-      # Backend source: Qobuz, Tidal, AmazonMusic, or Deemix (default: Qobuz)
+      # Admin creds only needed for Permanent-mode library registration.
+      - Subsonic__AdminUsername=${SUBSONIC_ADMIN_USERNAME:-}
+      - Subsonic__AdminPassword=${SUBSONIC_ADMIN_PASSWORD:-}
+
+      # ===== SQUIDWTF (free, no credentials) =====
+      # Backend: Qobuz | Tidal | AmazonMusic | Deemix
       - SquidWTF__Source=${SQUIDWTF_SOURCE:-Qobuz}
-      # Preferred audio quality (optional)
-      # Qobuz: 27 (FLAC 24-bit/192kHz), 7 (FLAC 24-bit/96kHz), 6 (FLAC 16-bit/44kHz), 5 (MP3 320kbps)
-      # Tidal: HI_RES_LOSSLESS (FLAC 24-bit/192kHz), LOSSLESS (FLAC 16-bit/44kHz), HIGH (AAC 320kbps), LOW (AAC 96kbps)
-      # AmazonMusic: FLAC_24 (24-bit), FLAC_16 (16-bit), AAC (256kbps), OPUS, ATMOS
-      # Deemix: FLAC, MP3_320 / 320, MP3_128 / 128 (the public instance controls the effective stream quality)
-      - SquidWTF__Quality=${SQUIDWTF_QUALITY:-}
-      # Instance timeout in seconds for Tidal backend (default: 5)
-      # Switches to next instance if current one doesn't respond in time
+      # Quality: Qobuz 27/7/6/5, Tidal HI_RES_LOSSLESS/LOSSLESS/HIGH/LOW,
+      #          AmazonMusic FLAC_24/FLAC_16/AAC/OPUS/ATMOS, Deemix FLAC/MP3_320/MP3_128
+      - SquidWTF__Quality=${SQUIDWTF_QUALITY:-6}
       - SquidWTF__InstanceTimeoutSeconds=${SQUIDWTF_INSTANCE_TIMEOUT:-5}
-      # Force a specific Tidal API instance (e.g. a self-hosted hifi-api). When set,
-      # the remote instances.json is NOT fetched — only this URL is used.
-      # For multiple custom instances, use SquidWTF__Instances__0, __1, ... directly
-      # instead of this variable.
+      # Force a specific Tidal API instance (e.g. a self-hosted hifi-api). When
+      # set, the remote instances.json is NOT fetched - only this URL is used.
       - SquidWTF__Instances__0=${SQUIDWTF_INSTANCE:-}
-      # Override URL of the remote instances.json (ignored if SQUIDWTF_INSTANCE is set).
-      # Defaults to https://tidal-uptime.geeked.wtf/ if empty.
+      # Override URL of the remote instances.json (ignored if SQUIDWTF_INSTANCE
+      # is set). Defaults to https://tidal-uptime.geeked.wtf/ if empty.
       - SquidWTF__InstancesUrl=${SQUIDWTF_INSTANCES_URL:-}
 
-      # ===== YANDEX MUSIC SETTINGS =====
-      # OAuth token for API access.
-      # Obtained from browser #access_token fragment after authenticating on 
-      # https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d
+      # ===== DEEZER (requires DEEZER_ARL) =====
+      - Deezer__Arl=${DEEZER_ARL:-}
+      - Deezer__ArlFallback=${DEEZER_ARL_FALLBACK:-}
+      - Deezer__Quality=${DEEZER_QUALITY:-}
+
+      # ===== QOBUZ (requires QOBUZ_USER_AUTH_TOKEN + QOBUZ_USER_ID) =====
+      - Qobuz__UserAuthToken=${QOBUZ_USER_AUTH_TOKEN:-}
+      - Qobuz__UserId=${QOBUZ_USER_ID:-}
+      - Qobuz__Quality=${QOBUZ_QUALITY:-}
+
+      # ===== YANDEX (requires YANDEX_OAUTH_TOKEN) =====
       - Yandex__OAuthToken=${YANDEX_OAUTH_TOKEN:-}
-      # Preferred audio quality (optional)
-      # Default: FLAC (16-bit/44.1kHz)
-      # Available: AAC_64, MP3_192, AAC_192, AAC_256, MP3_320, FLAC
       - Yandex__Quality=${YANDEX_QUALITY:-}
-      # Language for the API responses.
-      # Curated playlists and some album titles will be translated into that language.
-      # Default: ru
-      # Available: en/uz/uk/us/ru/kk/hy
-      - Yandex__Language=${YANDEX_LANGUAGE:-}
-      # Some tracks are included in the API responses but are marked unavailable for listening
-      # This setting allows to show such tracks in search results, playlists and albums
-      # Default: false
-      # Available: true, false
+      - Yandex__Language=${YANDEX_LANGUAGE:-en}
       - Yandex__IncludeUnavailable=${YANDEX_INCLUDE_UNAVAILABLE_TRACKS:-false}
     networks:
       - stack_network
@@ -484,8 +459,10 @@ docker compose up -d                                # deploy everything
 
 To deploy just one service, `docker compose up -d <name>` (the per-service files
 in `acoustid/`, `webhook/`, `proxy/`, `mysql/` still work independently).
-The `.env` file next to this compose supplies the `${VAR}` values
-(provider tokens, storage mode, ...).
+The `.env` file next to this compose supplies the `${VAR}` values — start from
+the bundled **`.env.example`** (`copy .env.example .env`), which documents every
+octo-fiesta option and pre-fills `FOLDER_TEMPLATE` (it must live in `.env`, not
+inline in the compose — braces inside `${VAR:-default}` break interpolation).
 
 ### Shared network
 
@@ -532,7 +509,8 @@ Yandex:
   Songs Navidrome already has pass through transparently; only missing tracks
   are fetched on demand.
 - **Provider** = `MUSIC_SERVICE` (default `SquidWTF` — zero credentials). For
-  Deezer/Qobuz/Yandex, put the tokens in `.env` and set `MUSIC_SERVICE`:
+  Deezer/Qobuz/Yandex, put the tokens in `.env` (copy the bundled
+  `.env.example`) and set `MUSIC_SERVICE`:
   - `DEEZER_ARL` — [getting Deezer credentials](https://github.com/V1ck3s/octo-fiesta/wiki/Getting-Deezer-Credentials-(ARL-Token))
   - `QOBUZ_USER_AUTH_TOKEN` + `QOBUZ_USER_ID` — paid Qobuz account
   - `YANDEX_OAUTH_TOKEN` — [Yandex OAuth](https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d)
@@ -556,10 +534,12 @@ Yandex:
   down — octo-fiesta handles that with instance timeouts, but missing-track
   playback is best-effort.
 
-### Acoustid (identity verification)
+### Acoustid (identity verification + ReplayGain)
 
 Fingerprints audio files so songs without an MBID/ISRC can be accurately paired
-to their album.
+to their album, and computes **ReplayGain** track gain/peak (ffmpeg EBU R128) for
+the `writeReplayGain` tag setting. The image bundles `fpcalc` (chromaprint) and
+`ffmpeg`.
 
 > **Critical rule:** the sidecar's guest paths must **exactly match** the library
 > paths Navidrome reports. The plugin sends `{library.path}/{relative}` (e.g.

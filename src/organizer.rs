@@ -195,6 +195,43 @@ pub fn is_audio(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Best-effort tags derived from a file's filename when embedded tags are
+/// missing/empty. Handles "01 - Artist - Title.flac", "01 - Title.flac",
+/// "Artist - Title.flac" and plain "Title.flac".
+pub fn tags_from_filename(rel: &str) -> crate::tags::TrackTags {
+    use crate::tags::{Recording, TrackTags};
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let stem = name
+        .rsplit_once('.')
+        .map(|(s, _)| s.trim())
+        .unwrap_or_else(|| name.trim())
+        .trim();
+    let parts: Vec<&str> = stem.split(" - ").map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    let num = |s: &str| s.trim_start_matches('0').parse::<u32>().ok();
+    let mut t = TrackTags { recording: Recording::Studio, ..Default::default() };
+    match parts.len() {
+        3 => {
+            t.track = num(parts[0]);
+            t.artist = parts[1].to_string();
+            t.title = parts[2].to_string();
+        }
+        2 => {
+            if parts[0].chars().all(|c| c.is_ascii_digit()) {
+                t.track = num(parts[0]);
+                t.title = parts[1].to_string();
+            } else {
+                t.artist = parts[0].to_string();
+                t.title = parts[1].to_string();
+            }
+        }
+        _ => t.title = stem.to_string(),
+    }
+    if t.title.trim().is_empty() {
+        t.title = stem.to_string();
+    }
+    t
+}
+
 fn is_sidecar(name: &str) -> bool {
     name.rsplit_once('.')
         .map(|(_, ext)| SIDECAR_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
@@ -1553,6 +1590,24 @@ mod tests {
             .exists());
         assert!(root.join("Some Artist/Some Album").exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn filename_tags_parse_common_patterns() {
+        let a = tags_from_filename("01 - Pink Floyd - Breathe.flac");
+        assert_eq!(a.track, Some(1));
+        assert_eq!(a.artist, "Pink Floyd");
+        assert_eq!(a.title, "Breathe");
+        let b = tags_from_filename("03 - Song Title.mp3");
+        assert_eq!(b.track, Some(3));
+        assert_eq!(b.title, "Song Title");
+        assert!(b.artist.is_empty());
+        let c = tags_from_filename("Artist - Track.flac");
+        assert!(c.track.is_none());
+        assert_eq!(c.artist, "Artist");
+        assert_eq!(c.title, "Track");
+        let d = tags_from_filename("JustATitle.ogg");
+        assert_eq!(d.title, "JustATitle");
     }
 
     #[test]

@@ -58,7 +58,7 @@ fn file_mtime(path: &Path) -> i64 {
 }
 
 /// Read + index one file's tags (skips unchanged files via mtime cache).
-fn index_file(library_id: i32, rel: &str, abs: &Path) -> Result<(), String> {
+fn index_file(cfg: &Config, library_id: i32, rel: &str, abs: &Path) -> Result<(), String> {
     let mtime = file_mtime(abs);
     let key = file_key(library_id, rel);
     if let Ok(Some(v)) = crate::store::kv().get(&key) {
@@ -68,7 +68,16 @@ fn index_file(library_id: i32, rel: &str, abs: &Path) -> Result<(), String> {
             }
         }
     }
-    let tags = crate::tags::read_tags(abs);
+    let mut tags = crate::tags::read_tags(abs);
+    // Tagless / empty-tagged files: fall back to parsing the filename so they
+    // still participate in organization (gated by parseFilenames).
+    let usable = tags
+        .as_ref()
+        .map(|t| !t.title.trim().is_empty() || !t.artist.trim().is_empty())
+        .unwrap_or(false);
+    if !usable && cfg.parse_filenames {
+        tags = Some(crate::organizer::tags_from_filename(rel));
+    }
     let entry = match tags {
         Some(t) => json!({ "rel": rel, "tags": t, "mtime": mtime }),
         None => json!({ "rel": rel, "tags": null, "mtime": mtime }),
@@ -132,7 +141,7 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
                     break;
                 }
                 last_rel = rel.clone();
-                index_file(library_id, &rel, &entry.path())?;
+                index_file(cfg, library_id, &rel, &entry.path())?;
                 processed += 1;
                 if processed >= files_per_task {
                     hit_limit = true;
@@ -496,6 +505,12 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         ));
     }
 
+    // Report files across the library that share an audio fingerprint (size +
+    // content sample) - possible duplicates. Report-only, nothing moves.
+    if cfg.detect_duplicates {
+        report_cross_duplicates(cfg, &real_root, &verified);
+    }
+
     let groups = crate::organizer::group_entries(&verified);
     let groups = apply_album_budget(cfg, groups);
     if cfg.star_tally_enabled {
@@ -511,6 +526,60 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         crate::wasm::enqueue_cleanup_task(library_id)?;
     }
     Ok((enqueued, total_files))
+}
+
+/// Report files that share an audio fingerprint across the whole library
+/// (possible duplicates). Only samples files whose SIZE collides, so exact
+/// copies are found without reading every file fully. Report-only.
+fn report_cross_duplicates(
+    cfg: &Config,
+    root: &str,
+    verified: &[(String, crate::tags::TrackTags)],
+) {
+    use std::collections::HashMap;
+    let mut by_size: HashMap<u64, Vec<String>> = HashMap::new();
+    for (rel, _) in verified {
+        if let Ok(md) = std::fs::metadata(std::path::Path::new(root).join(rel)) {
+            by_size.entry(md.len()).or_default().push(rel.clone());
+        }
+    }
+    let mut fp_map: HashMap<u64, Vec<String>> = HashMap::new();
+    for (_, rels) in by_size.iter().filter(|(_, v)| v.len() > 1) {
+        for rel in rels {
+            if let Some(fp) = content_fingerprint(&std::path::Path::new(root).join(rel)) {
+                fp_map.entry(fp).or_default().push(rel.clone());
+            }
+        }
+    }
+    let dupes: Vec<&Vec<String>> = fp_map.values().filter(|v| v.len() > 1).collect();
+    if dupes.is_empty() {
+        return;
+    }
+    let mut summary = String::from("nd-organizer: possible duplicate audio files:\n");
+    for d in dupes {
+        let joined = d.join(" <=> ");
+        crate::wasm::log_warn(&format!("duplicate audio fingerprint: {joined}"));
+        summary.push_str(&format!("  {joined}\n"));
+    }
+    crate::wasm::post_webhook(cfg, &summary);
+}
+
+/// Cheap content fingerprint: file size + first/last 8 KiB (only read for
+/// size-colliding files, so it stays cheap even on large libraries).
+fn content_fingerprint(path: &std::path::Path) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let size = f.metadata().ok()?.len();
+    let mut head = [0u8; 8192];
+    let hlen = f.read(&mut head).ok()?;
+    let mut tail = [0u8; 8192];
+    let tlen = if size > 16384 {
+        f.seek(SeekFrom::End(-8192)).ok()?;
+        f.read(&mut tail).ok()?
+    } else {
+        0
+    };
+    Some(crate::state::fnv1a64(&format!("{size}|{hlen}|{tlen}")))
 }
 
 /// Delete folders under the library root whose entire subtree contains NO audio
@@ -626,8 +695,10 @@ pub fn plan_step(
     let mut report_parts = Vec::new();
     let mut actions: Vec<serde_json::Value> = Vec::new();
     let mut total_moves = 0usize;
-    let mut total_dupes = 0usize;
-    let mut total_to_move = 0usize;
+let mut total_dupes = 0usize;
+let mut total_autotags = 0usize;
+let mut total_replaygains = 0usize;
+let mut total_to_move = 0usize;
     let mut plans: Vec<serde_json::Value> = Vec::new();
 
     for group in groups {
@@ -656,28 +727,31 @@ pub fn plan_step(
         let info = crate::organizer::album_info_from_tags(&files);
         // Optional: MusicBrainz release type drives classification (classifyFromMB
         // + primarySource = musicbrainz). Looked up per album, cached 7 days.
-        let mb_type = if cfg.classify_from_mb
+        // The release (with its MBID) is also reused for auto-tagging below.
+        let mb_release = if cfg.classify_from_mb
             && cfg.primary_source == crate::config::PrimarySource::MusicBrainz
         {
             crate::musicbrainz::lookup(&info.album_artist, &info.album, &cfg.musicbrainz_token)
-                .map(|r| {
-                    if r.primary_type == "Soundtrack" {
-                        "Soundtrack".to_string()
-                    } else if r.secondary_types.iter().any(|t| {
-                        t.eq_ignore_ascii_case("compilation") || t.eq_ignore_ascii_case("live")
-                    }) || r.primary_type == "Compilation"
-                    {
-                        "Compilation".to_string()
-                    } else if r.primary_type == "Single" || r.primary_type == "EP" {
-                        "Single".to_string()
-                    } else {
-                        String::new()
-                    }
-                })
-                .unwrap_or_default()
         } else {
-            String::new()
+            None
         };
+        let mb_type = mb_release
+            .as_ref()
+            .map(|r| {
+                if r.primary_type == "Soundtrack" {
+                    "Soundtrack".to_string()
+                } else if r.secondary_types.iter().any(|t| {
+                    t.eq_ignore_ascii_case("compilation") || t.eq_ignore_ascii_case("live")
+                }) || r.primary_type == "Compilation"
+                {
+                    "Compilation".to_string()
+                } else if r.primary_type == "Single" || r.primary_type == "EP" {
+                    "Single".to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default();
         // Optional: force-search incomplete albums that are monitored in Lidarr.
         if cfg.lidarr_force_search_incomplete && !cfg.lidarr_url.trim().is_empty() {
             if let Some(album_id) = crate::lidarr::host_lidarr::incomplete_monitored(
@@ -701,6 +775,71 @@ pub fn plan_step(
         total_dupes += plan.duplicates.len();
         total_to_move += usize::from(!plan.moves.is_empty());
         report_parts.push(group_report(&plan, cfg.mode != Mode::Apply));
+        // Auto-tag genuinely-missing track fields from the MusicBrainz release
+        // tracklist (title/artist/MBIDs). Apply mode only; dry-run reports.
+        if cfg.auto_tag_from_mb {
+            if let Some(rel) = &mb_release {
+                if let Some(tagged) = autotag_album(cfg, &root, &files, rel, &info) {
+                    total_autotags += tagged;
+                    actions.push(serde_json::json!({
+                        "ts": crate::state::now_ts(),
+                        "text": format!(
+                            "auto-tagged {tagged} track(s) from MusicBrainz ({})",
+                            info.album
+                        ),
+                    }));
+                }
+            }
+        }
+        // ReplayGain loudness tags via the acoustid sidecar (ffmpeg). Apply
+        // mode only, cached per file for 7 days so it runs once per track.
+        // Album mode also writes album-level tags (mean gain / max peak).
+        if cfg.write_replaygain && cfg.mode == Mode::Apply {
+            let mut rg_entries: Vec<(std::path::PathBuf, f64, Option<f64>)> = Vec::new();
+            for (rel, _) in &files {
+                let abs = root.join(rel);
+                if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
+                    if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
+                        .unwrap_or(false)
+                    {
+                        rg_entries.push((abs, gain, peak));
+                    }
+                }
+            }
+            if !rg_entries.is_empty() {
+                total_replaygains += rg_entries.len();
+                if cfg.replay_gain_mode == "album" {
+                    let n = rg_entries.len() as f64;
+                    let album_gain = rg_entries.iter().map(|(_, g, _)| g).sum::<f64>() / n;
+                    let album_peak = rg_entries
+                        .iter()
+                        .filter_map(|(_, _, p)| *p)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    for (abs, _, _) in &rg_entries {
+                        let peak = if album_peak.is_finite() { Some(album_peak) } else { None };
+                        if crate::tags::write_replaygain_album(
+                            abs,
+                            album_gain,
+                            peak,
+                            cfg.overwrite_existing_tags,
+                        )
+                        .is_err()
+                        {
+                            crate::wasm::log_warn(&format!("write album replaygain {}", abs.display()));
+                        }
+                    }
+                }
+                actions.push(serde_json::json!({
+                    "ts": crate::state::now_ts(),
+                    "text": format!(
+                        "wrote ReplayGain tags for {} track(s) ({}){}",
+                        rg_entries.len(),
+                        info.album,
+                        if cfg.replay_gain_mode == "album" { " + album tags" } else { "" }
+                    ),
+                }));
+            }
+        }
         // Dry-run visibility: show the current star rating + playcount that each
         // tracked file in this album would carry (from the plugin tally).
         if cfg.star_tally_enabled {
@@ -892,6 +1031,20 @@ pub fn plan_step(
     } else {
         report_parts.join("\n")
     };
+    if total_autotags > 0 {
+        report_text.push_str(&format!(
+            "\nauto-tag: {} track(s) {} from MusicBrainz\n",
+            total_autotags,
+            if cfg.mode != Mode::Apply {
+                "would be tagged"
+            } else {
+                "tagged"
+            }
+        ));
+    }
+    if total_replaygains > 0 {
+        report_text.push_str(&format!("\nReplayGain: {total_replaygains} track(s) tagged\n"));
+    }
     // Dry run: the report is a full simulation of the work a real run would do,
     // clearly labelled so the user can trust the plan before applying it.
     if cfg.mode != Mode::Apply {
@@ -971,6 +1124,109 @@ pub fn plan_step(
     .to_string();
     crate::wasm::post_webhook(cfg, &status_json);
     Ok(())
+}
+
+/// Auto-tag a group's tracks from the MusicBrainz release tracklist, filling
+/// only genuinely-missing fields (title/artist/recording MBID/release MBID).
+/// Apply mode writes (atomically); dry-run only counts what would change.
+/// Returns Some(count) when any track was/would be tagged.
+fn autotag_album(
+    cfg: &Config,
+    root: &std::path::Path,
+    files: &[(String, crate::tags::TrackTags)],
+    rel: &crate::musicbrainz::MbRelease,
+    info: &crate::organizer::AlbumInfo,
+) -> Option<usize> {
+    let tracks = crate::musicbrainz::release_tracks(&rel.release_mbid, &cfg.musicbrainz_token)?;
+    if tracks.is_empty() {
+        return None;
+    }
+    let dry = cfg.mode != Mode::Apply;
+    let mut tagged = 0usize;
+    for (relpath, ft) in files {
+        // Match the MB track by embedded track number, else global position.
+        let mbt = ft
+            .track
+            .and_then(|n| tracks.iter().find(|t| t.number == Some(n) || t.position == Some(n)))
+            .or_else(|| tracks.first());
+        let Some(mbt) = mbt else { continue };
+        if ft.title.trim().is_empty() || ft.mbid_recording.trim().is_empty() {
+            if dry {
+                tagged += 1;
+            } else {
+                let abs = root.join(relpath);
+                match crate::tags::fill_missing_from_mb(
+                    &abs,
+                    &mbt.title,
+                    &mbt.artist,
+                    &mbt.recording_mbid,
+                    &rel.release_mbid,
+                ) {
+                    Ok(true) => tagged += 1,
+                    Ok(false) => {}
+                    Err(e) => crate::wasm::log_warn(&format!("auto-tag {}: {e}", relpath)),
+                }
+            }
+        }
+    }
+    if tagged > 0 {
+        crate::wasm::log_info(&format!(
+            "auto-tag: {tagged} track(s) {} from MusicBrainz ({})",
+            if dry { "would be tagged" } else { "tagged" },
+            info.album
+        ));
+        Some(tagged)
+    } else {
+        None
+    }
+}
+
+/// Ask the acoustid sidecar's `/replaygain` endpoint for a file's loudness
+/// (ffmpeg EBU R128). Returns (gain dB, peak) where gain is derived from the
+/// configured reference. Cached per path for 7 days.
+fn replaygain_for(cfg: &Config, abs_path: &str) -> Option<(f64, Option<f64>)> {
+    if cfg.acoustid_url.trim().is_empty() {
+        return None;
+    }
+    let cache_key = format!("rg:{:016x}", crate::state::fnv1a64(abs_path));
+    if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+        if let Ok(val) = serde_json::from_slice::<Value>(&v) {
+            if let Some(integrated) = val.get("integrated").and_then(|g| g.as_f64()) {
+                let peak = val.get("peak").and_then(|p| p.as_f64());
+                return Some((cfg.replay_gain_reference - integrated, peak));
+            }
+        }
+    }
+    let base = cfg.acoustid_url.trim_end_matches('/');
+    let body = serde_json::json!({ "path": abs_path }).to_string();
+    let req = host::http::HTTPRequest {
+        method: "POST".into(),
+        url: format!("{base}/replaygain"),
+        headers: std::collections::HashMap::new(),
+        no_follow_redirects: false,
+        body: body.into_bytes(),
+        timeout_ms: 30_000,
+    };
+    match host::http::send(req) {
+        Ok(Some(resp)) if resp.status_code == 200 => {
+            let Ok(v) = serde_json::from_slice::<Value>(&resp.body) else {
+                return None;
+            };
+            if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+                return None;
+            }
+            let rg = v.get("replaygain")?;
+            let integrated = rg.get("integrated").and_then(|g| g.as_f64())?;
+            let peak = rg.get("peak").and_then(|p| p.as_f64());
+            let _ = crate::store::kv().set_with_ttl(
+                &cache_key,
+                serde_json::to_vec(&rg).unwrap_or_default(),
+                7 * 24 * 3600,
+            );
+            Some((cfg.replay_gain_reference - integrated, peak))
+        }
+        Ok(Some(_)) | Ok(None) | Err(_) => None,
+    }
 }
 
 /// A plain-language report block for one album group. In dry-run mode every
@@ -1082,6 +1338,24 @@ fn write_group_nfo(
     }
     if let Err(e) = crate::tags::atomic_write(&path, crate::nfo::serialize_album(&nfo_album).as_bytes()) {
         crate::wasm::log_warn(&format!("write album.nfo: {e}"));
+    }
+    // Also write artist.nfo into the artist folder (parent of the album dir)
+    // with the artist name + genres. Kodi reads it there.
+    if let Some(artist_dir) = Path::new(&plan.target_dir).parent() {
+        if !info.album_artist.trim().is_empty() {
+            let nfo_artist = crate::nfo::NfoArtist {
+                name: info.album_artist.clone(),
+                genres: genre.clone(),
+                ..Default::default()
+            };
+            let a_path = root.join(artist_dir).join("artist.nfo");
+            if let Some(p) = a_path.parent() {
+                let _ = std::fs::create_dir_all(p);
+            }
+            if let Err(e) = crate::tags::atomic_write(&a_path, crate::nfo::serialize_artist(&nfo_artist).as_bytes()) {
+                crate::wasm::log_warn(&format!("write artist.nfo: {e}"));
+            }
+        }
     }
     let _ = cfg;
 }

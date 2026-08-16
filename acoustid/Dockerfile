@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libchromaprint-tools \
+    && apt-get install -y --no-install-recommends libchromaprint-tools ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY server.py /app/server.py
 WORKDIR /app

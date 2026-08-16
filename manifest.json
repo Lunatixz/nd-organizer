@@ -769,6 +769,60 @@
           "title": "Delete folders with no audio files",
           "default": false,
           "description": "After organizing, delete any library folder whose entire contents contain no audio files (only images, nfo, lyrics or other misc files). Handles empty folders AND folders left behind after moves. Apply mode only; dry-run reports what would be deleted. Never touches the library root or excluded paths."
+        },
+        "parseFilenames": {
+          "type": "boolean",
+          "title": "Parse filenames for tagless files",
+          "default": true,
+          "description": "When a file has no usable embedded tags, derive track number / artist / title from its filename (e.g. \"01 - Artist - Title.flac\") so tagless files still get organized."
+        },
+        "autoTagFromMB": {
+          "type": "boolean",
+          "title": "Auto-tag from MusicBrainz",
+          "default": true,
+          "description": "During a run, fetch the album's tracklist from MusicBrainz and fill each track's MISSING tag fields (title, artist, album, year, MusicBrainz recording/album IDs). Never overwrites existing values unless overwriteExistingTags is on. Apply mode only."
+        },
+        "detectDuplicates": {
+          "type": "boolean",
+          "title": "Detect duplicate audio files",
+          "default": true,
+          "description": "Report files across the library that share an audio fingerprint (size + content sample) - possible duplicates. Report-only, nothing is moved."
+        },
+        "writeReplayGain": {
+          "type": "boolean",
+          "title": "Write ReplayGain loudness tags",
+          "default": true,
+          "description": "Compute ReplayGain loudness with the acoustid sidecar's ffmpeg (EBU R128) and write REPLAYGAIN_TRACK_GAIN / REPLAYGAIN_TRACK_PEAK (and album tags in album mode). Requires ffmpeg in the acoustid image. Apply mode only."
+        },
+        "replayGainMode": {
+          "type": "string",
+          "title": "ReplayGain scope",
+          "default": "track",
+          "oneOf": [
+            {
+              "const": "track",
+              "title": "Track only"
+            },
+            {
+              "const": "album",
+              "title": "Track + album (mean gain / max peak)"
+            }
+          ],
+          "description": "'track' writes per-track gain/peak only. 'album' also writes REPLAYGAIN_ALBUM_GAIN (mean of track gains) and REPLAYGAIN_ALBUM_PEAK (loudest track peak) to every track in the album."
+        },
+        "replayGainReference": {
+          "type": "number",
+          "title": "ReplayGain reference (LUFS)",
+          "default": -18,
+          "minimum": -40,
+          "maximum": 0,
+          "description": "Reference loudness in LUFS that a gain of 0 dB corresponds to. The ReplayGain standard is -18; lower values (e.g. -14) target louder playback."
+        },
+        "metaGateEnabled": {
+          "type": "boolean",
+          "title": "Skip runs when a metadata source is offline",
+          "default": true,
+          "description": "When a required external metadata source (AcoustID / MusicBrainz / Lidarr) is unreachable, skip the run and retry later instead of organizing on degraded metadata. Off = run best-effort anyway."
         }
       },
       "required": [
@@ -901,6 +955,10 @@
                 {
                   "type": "Control",
                   "scope": "#/properties/cleanupNoAudioFolders"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/parseFilenames"
                 }
               ]
             },
@@ -915,6 +973,10 @@
             {
               "type": "Control",
               "scope": "#/properties/excludePaths"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/detectDuplicates"
             }
           ]
         },
@@ -950,6 +1012,31 @@
             {
               "type": "Control",
               "scope": "#/properties/writePlaycount"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/autoTagFromMB"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/writeReplayGain"
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/writeReplayGain"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/replayGainMode"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/replayGainReference"
+                }
+              ]
             }
           ]
         },
@@ -1352,6 +1439,10 @@
             {
               "type": "Control",
               "scope": "#/properties/rollbackRunId"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/metaGateEnabled"
             }
           ]
         },

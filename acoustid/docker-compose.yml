@@ -1,7 +1,8 @@
-# AcoustID fingerprint sidecar for nd-organizer.
+# AcoustID fingerprint + ReplayGain sidecar for nd-organizer.
 #
-# The Navidrome plugin cannot decode audio or run chromaprint in its WASM
-# sandbox, so this service fingerprints library files for it.
+# The Navidrome plugin cannot decode audio or run chromaprint/ffmpeg in its WASM
+# sandbox, so this service fingerprints library files (AcoustID) and computes
+# ReplayGain loudness (ffmpeg EBU R128) for the plugin's `writeReplayGain` tags.
 #
 # IMPORTANT: mount EVERY library at the SAME guest paths Navidrome uses (e.g.
 # /music, /unsorted), so the file paths the plugin sends match this container.
@@ -9,7 +10,7 @@
 #
 # Usage:
 #   docker compose -f acoustid/docker-compose.yml up -d
-# (pulls the image from GHCR - no build needed)
+# (pulls the image from GHCR - no build needed; image bundles fpcalc + ffmpeg)
 # Then set the plugin's "acoustidUrl" to http://<your-nas>:8097 and
 # "acoustidApiKey" to your AcoustID client key.
 

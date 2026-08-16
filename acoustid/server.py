@@ -1,20 +1,24 @@
-# AcoustID fingerprint sidecar for nd-organizer.
+# AcoustID fingerprint + ReplayGain sidecar for nd-organizer.
 #
-# The Navidrome plugin cannot decode audio or run chromaprint in its WASM
+# The Navidrome plugin cannot decode audio or run chromaprint/ffmpeg in its WASM
 # sandbox, so this small Docker service does it: it reads the audio file
 # (the library must be mounted at the same path Navidrome sees), fingerprints it
 # with fpcalc, queries the AcoustID API, and returns the matched recordings /
-# release groups (MBIDs) the plugin uses to pair songs to albums.
+# release groups (MBIDs) the plugin uses to pair songs to albums. It also
+# computes ReplayGain track gain/peak (ffmpeg EBU R128) for loudness tags.
 #
 # Endpoints:
 #   GET  /health                     -> {"ok": true, "service": "...", "libraryMounts": [...]}
 #   POST /lookup  {"path": "...", "acoustidApiKey": "..."}
 #       -> {"ok": true, "matches": [ {recordingId, title, artist, score,
-#             releaseGroups:[{id, title, type}]}, ... ]}
+#             releaseGroups:[{id, title, type}]}, ... ], "replaygain": {gain, peak}}
+#   POST /replaygain {"path": "..."}
+#       -> {"ok": true, "replaygain": {"integrated": -18.2, "peak": 0.98}}
 #
 # All activity is logged to stdout (visible via `docker logs`):
 #   - startup: port + which library mounts are visible
 #   - every /lookup: file path, fingerprint duration, AcoustID result count or error
+#   - every /replaygain: file path, loudness analysis duration, gain/peak
 #   - any request from the plugin proves the plugin->sidecar link works
 
 import json
@@ -152,6 +156,46 @@ def top_matches(data):
     return out
 
 
+def replaygain(path):
+    """Compute loudness with ffmpeg's EBU R128: integrated loudness (LUFS) and
+    true peak (linear). The plugin derives ReplayGain gain from its configurable
+    reference (`gain = reference - integrated`). Returns ({"integrated", "peak"}, err).
+    """
+    t0 = time.time()
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-nostats", "-i", path, "-filter:a", "ebur128=peak=true", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except FileNotFoundError:
+        return None, "ffmpeg not found (install ffmpeg)"
+    except Exception as e:
+        return None, str(e)
+    stderr = out.stderr
+    integrated = None
+    peak_db = None
+    for line in stderr.splitlines():
+        if "Integrated loudness:" in line and "LUFS" in line:
+            try:
+                integrated = float(line.split("I:")[1].split("LUFS")[0].strip())
+            except (ValueError, IndexError):
+                pass
+        if "True peak:" in line and "dBFS" in line:
+            try:
+                peak_db = float(line.split("TP:")[1].split("dBFS")[0].strip())
+            except (ValueError, IndexError):
+                pass
+    dt = time.time() - t0
+    if integrated is None:
+        log.warning("replaygain: could not parse loudness for %s (%.1fs): %s", path, dt, stderr.strip()[:200])
+        return None, "could not compute loudness: %s" % stderr.strip()[:200]
+    peak = round(10 ** (peak_db / 20.0), 6) if peak_db is not None else None
+    log.info("replaygain %s (%.1fs): integrated=%s LUFS peak=%s", path, dt, integrated, peak)
+    return {"integrated": round(integrated, 2), "peak": peak}, None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # route the built-in request line through our logger at DEBUG-ish level
@@ -179,6 +223,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "service": SERVICE,
                 "uptime": int(time.time() - STARTED),
                 "stats": STATS,
+                "replaygains": STATS.get("replaygains", 0),
             })
             return
         if self.path.startswith("/health"):
@@ -198,6 +243,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad request: %s" % e})
 
         path = req.get("path", "")
+        # ReplayGain-only request: compute loudness for any file, no AcoustID.
+        if self.path.startswith("/replaygain"):
+            if not path or not os.path.exists(path):
+                STATS["errors"] += 1
+                return self._send(200, {"ok": False, "error": "file not found: %s" % path})
+            rg, err = replaygain(path)
+            if err or rg is None:
+                STATS["errors"] += 1
+                return self._send(200, {"ok": False, "error": err or "could not compute replaygain"})
+            STATS["replaygains"] = STATS.get("replaygains", 0) + 1
+            return self._send(200, {"ok": True, "replaygain": rg})
+
         apikey = req.get("acoustidApiKey", "")
         if not path or not apikey:
             log.warning("missing path or acoustidApiKey from %s", self.client_address[0])
@@ -232,7 +289,13 @@ class Handler(BaseHTTPRequestHandler):
             STATS["lastMatch"] = int(time.time())
         log.info("AcoustID result for %s: %d match(es) (top: %s)", path, len(matches),
                  matches[0]["title"] if matches else "none")
-        return self._send(200, {"ok": True, "matches": matches})
+        rg, rg_err = replaygain(path)
+        resp = {"ok": True, "matches": matches}
+        if rg is not None:
+            resp["replaygain"] = rg
+        elif rg_err:
+            log.warning("replaygain for %s: %s", path, rg_err)
+        return self._send(200, resp)
 
 
 def start_heartbeat():

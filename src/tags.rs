@@ -281,3 +281,98 @@ pub fn write_playback_meta(
     let _ = tagged.insert_tag(tag);
 save_tagged_atomic(&tagged, path)
 }
+
+/// Fill a track's genuinely-MISSING tag fields from a MusicBrainz tracklist
+/// entry (title, artist, recording MBID, release MBID). Never overwrites an
+/// existing value - auto-tagging only fills gaps. Returns true when written.
+pub fn fill_missing_from_mb(
+    path: &Path,
+    title: &str,
+    artist: &str,
+    rec_mbid: &str,
+    release_mbid: &str,
+) -> Result<bool, String> {
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    let mut changed = false;
+    if tag.title().map(|c| c.trim().is_empty()).unwrap_or(true) && !title.is_empty() {
+        tag.set_title(title.to_string());
+        changed = true;
+    }
+    if tag.artist().map(|c| c.trim().is_empty()).unwrap_or(true) && !artist.is_empty() {
+        tag.set_artist(artist.to_string());
+        changed = true;
+    }
+    let rec = tag.get_string(&ItemKey::MusicBrainzRecordingId).unwrap_or("");
+    if rec.is_empty() && !rec_mbid.is_empty() {
+        tag.insert_text(ItemKey::MusicBrainzRecordingId, rec_mbid.to_string());
+        changed = true;
+    }
+    let alb = tag.get_string(&ItemKey::MusicBrainzReleaseId).unwrap_or("");
+    if alb.is_empty() && !release_mbid.is_empty() {
+        tag.insert_text(ItemKey::MusicBrainzReleaseId, release_mbid.to_string());
+        changed = true;
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let _ = tagged.insert_tag(tag);
+    save_tagged_atomic(&tagged, path)?;
+    Ok(true)
+}
+
+/// Write ReplayGain track gain/peak tags (REPLAYGAIN_TRACK_GAIN / _PEAK).
+/// Fills missing values; existing values are kept unless `overwrite`.
+pub fn write_replaygain(path: &Path, gain: f64, peak: Option<f64>, overwrite: bool) -> Result<bool, String> {
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    let mut changed = false;
+    let gain_str = format!("{gain:+.2} dB");
+    let existing = tag.get_string(&ItemKey::Unknown("REPLAYGAIN_TRACK_GAIN".into())).unwrap_or("");
+    if should_write(existing, &gain_str, overwrite) {
+        tag.insert_text(ItemKey::Unknown("REPLAYGAIN_TRACK_GAIN".into()), gain_str);
+        changed = true;
+    }
+    if let Some(peak) = peak {
+        let peak_str = format!("{peak:.6}");
+        let existing = tag.get_string(&ItemKey::Unknown("REPLAYGAIN_TRACK_PEAK".into())).unwrap_or("");
+        if should_write(existing, &peak_str, overwrite) {
+            tag.insert_text(ItemKey::Unknown("REPLAYGAIN_TRACK_PEAK".into()), peak_str);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let _ = tagged.insert_tag(tag);
+    save_tagged_atomic(&tagged, path)?;
+    Ok(true)
+}
+
+/// Write ReplayGain album gain/peak tags (REPLAYGAIN_ALBUM_GAIN / _PEAK) to a
+/// track, used in album mode. Fills missing; keeps existing unless `overwrite`.
+pub fn write_replaygain_album(path: &Path, gain: f64, peak: Option<f64>, overwrite: bool) -> Result<bool, String> {
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    let mut changed = false;
+    let gain_str = format!("{gain:+.2} dB");
+    let existing = tag.get_string(&ItemKey::Unknown("REPLAYGAIN_ALBUM_GAIN".into())).unwrap_or("");
+    if should_write(existing, &gain_str, overwrite) {
+        tag.insert_text(ItemKey::Unknown("REPLAYGAIN_ALBUM_GAIN".into()), gain_str);
+        changed = true;
+    }
+    if let Some(peak) = peak {
+        let peak_str = format!("{peak:.6}");
+        let existing = tag.get_string(&ItemKey::Unknown("REPLAYGAIN_ALBUM_PEAK".into())).unwrap_or("");
+        if should_write(existing, &peak_str, overwrite) {
+            tag.insert_text(ItemKey::Unknown("REPLAYGAIN_ALBUM_PEAK".into()), peak_str);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let _ = tagged.insert_tag(tag);
+    save_tagged_atomic(&tagged, path)?;
+    Ok(true)
+}
