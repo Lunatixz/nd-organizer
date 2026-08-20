@@ -140,6 +140,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/webhook:latest` | A web dashboard showing status + reports (auto-refreshing). |
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from **auto-queues** (random/playlist/similar/genre/top/starred, but **not** explicit user searches), removes skip-heavy tracks past the cap everywhere, and re-sorts returned lists by weight, without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
+| `ghcr.io/lunatixz/nd-organizer/radio:latest` | Internet radio sidecar (based on WB2024/Add-Navidrome-Radios) — search the Radio-Browser community DB and add stations straight into Navidrome's `radio` table (no restart). The webhook dashboard has a Radio panel. |
 | `ghcr.io/neptunehub/audiomuse-ai-musicserver:latest` | Optional Subsonic music server (third-party, AGPL-3.0) — an open-source alternative to Navidrome showcasing AudioMuse-AI's sonic analysis. Web UI `:3000`, Open Subsonic API `:8080`. **Commented out** in the compose. |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
@@ -147,12 +148,12 @@ The compose files reference the published GHCR images — `docker compose up`
 pulls them (no local build, no build context needed). Tags: `:latest`, `:main`,
 and `vX.Y.Z` semver tags per release.
 
-Here is the **complete `docker-compose.yml`** — Navidrome plus all five sidecars
-(octo-fiesta, acoustid, webhook, filter proxy, mysql) on one shared network.
+Here is the **complete `docker-compose.yml`** — Navidrome plus all six sidecars
+(octo-fiesta, acoustid, webhook, filter proxy, mysql, radio) on one shared network.
 Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
 
 ```yaml
-# nd-organizer full stack - Navidrome plus all five sidecars, one command:
+# nd-organizer full stack - Navidrome plus all six sidecars, one command:
 #   docker compose up -d
 #
 # Services:
@@ -162,6 +163,7 @@ Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
 #   nd-organizer-webhook  (8099)  dashboard + log/status receiver
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
 #   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
+#   nd-organizer-radio    (8100)  internet radio sidecar (Radio-Browser -> Navidrome)
 #
 # Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
 # normal Navidrome user/password - credentials pass through unchanged):
@@ -439,6 +441,23 @@ services:
     networks:
       - stack_network
 
+  # Internet radio sidecar (from WB2024/Add-Navidrome-Radios): search/add radio
+  # stations via Radio-Browser, written straight into Navidrome's `radio` table.
+  # Mount Navidrome's DATA dir (with navidrome.db) read-write at /data.
+  nd-organizer-radio:
+    image: ghcr.io/lunatixz/nd-organizer/radio:latest
+    container_name: nd-organizer-radio
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    environment:
+      - NAVIDROME_DB=/data/navidrome.db
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+    volumes:
+      - /path/to/navidrome/data:/data:rw    # MUST contain navidrome.db
+    networks:
+      - stack_network
+
 networks:
   stack_network:
     external: true
@@ -458,7 +477,7 @@ docker compose up -d                                # deploy everything
 ```
 
 To deploy just one service, `docker compose up -d <name>` (the per-service files
-in `acoustid/`, `webhook/`, `proxy/`, `mysql/` still work independently).
+in `acoustid/`, `webhook/`, `proxy/`, `mysql/`, `radio/` still work independently).
 The `.env` file next to this compose supplies the `${VAR}` values — start from
 the bundled **`.env.example`** (`copy .env.example .env`), which documents every
 octo-fiesta option and pre-fills `FOLDER_TEMPLATE` (it must live in `.env`, not
@@ -613,7 +632,29 @@ docker build -t nd-organizer-acoustid acoustid/
 docker build -t nd-organizer-webhook webhook/
 docker build -t nd-organizer-proxy proxy/
 docker build -t nd-organizer-mysql mysql/
+docker build -t nd-organizer-radio radio/
 ```
+
+### Internet radio (optional)
+
+Based on [WB2024/Add-Navidrome-Radios](https://github.com/WB2024/Add-Navidrome-Radios)
+(CLI) as an always-on sidecar: search the **Radio-Browser** community database
+and add stations directly into Navidrome's `radio` table — the same way the web
+UI does — so they appear without a restart.
+
+```bash
+cd radio && docker compose up -d
+```
+
+- **It needs Navidrome's data dir** (the one with `navidrome.db`) mounted
+  read-write at `/data`. Point `NAVIDROME_DB` at the `.db` inside it (default
+  `/data/navidrome.db`).
+- **Endpoints**: `GET /search?q=...&type=byname|bytag|bycountry`, `GET /top`,
+  `GET /list`, `POST /add {"stations":[{name,url,homepage}]}` (dedups by
+  name/url). Health at `GET /health`.
+- **Dashboard**: the webhook shows a **Radio panel** (existing stations) and a
+  `nd-organizer-radio` sidecar card once the sidecar is running.
+- The sidecar is registered in `SIDECAR_LOG_PORTS` (port `8100`).
 
 ### Persistence: external MySQL / MariaDB
 

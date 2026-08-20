@@ -26,6 +26,8 @@ mod report;
 #[cfg(target_arch = "wasm32")]
 mod scan;
 mod state;
+#[cfg(target_arch = "wasm32")]
+mod trim;
 mod stats;
 #[cfg(target_arch = "wasm32")]
 mod store;
@@ -212,6 +214,15 @@ pub(crate) mod wasm {
                     log_warn(&format!("schedule stats: {e}"));
                 }
             }
+            // Self-trim Navidrome's missing-files list on a schedule.
+            if cfg.trim_missing_days > 0 {
+                let cron = format!("0 4 */{} * *", cfg.trim_missing_days.min(30));
+                if let Err(e) =
+                    host::scheduler::schedule_recurring(&cron, "trim", "nd-organizer-trim")
+                {
+                    log_warn(&format!("schedule trim-missing: {e}"));
+                }
+            }
             Ok(())
         }
     }
@@ -226,6 +237,10 @@ pub(crate) mod wasm {
                 if let Err(e) = enqueue("stats", 0, "", "") {
                     log_warn(&format!("enqueue stats: {e}"));
                 }
+                return Ok(());
+            }
+            if req.payload == "trim" && cfg.trim_missing_days > 0 {
+                do_trim_missing(&cfg);
                 return Ok(());
             }
             if req.payload == "rescan" {
@@ -1047,6 +1062,36 @@ pub(crate) mod wasm {
                 Ok(())
             }
             Err(e) => Err(format!("startScan failed: {e}")),
+        }
+    }
+
+    /// Purge Navidrome's missing-files list via its native API. Best-effort:
+    /// logs the outcome and never fails the callback. Needs an admin account.
+    fn do_trim_missing(cfg: &Config) {
+        if cfg.trim_missing_days <= 0 {
+            return;
+        }
+        let base = server_host()
+            .map(|h| format!("http://{h}"))
+            .unwrap_or_else(|| "http://navidrome:4533".to_string());
+        let user = if cfg.navidrome_admin_user.trim().is_empty() {
+            scan_user(cfg)
+        } else {
+            cfg.navidrome_admin_user.trim().to_string()
+        };
+        let pass = cfg.navidrome_admin_password.trim().to_string();
+        if user.is_empty() || pass.is_empty() {
+            log_warn(
+                "trim-missing: need navidromeAdminUser/Password (admin) to purge missing files",
+            );
+            return;
+        }
+        match crate::trim::purge_missing(&base, &user, &pass) {
+            Ok(n) => log_info(&format!(
+                "trim-missing: purged missing-files list ({} entries reported removed)",
+                n
+            )),
+            Err(e) => log_warn(&format!("trim-missing: {e}")),
         }
     }
 

@@ -197,6 +197,14 @@ def replaygain(path):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _wfile_write(self, data):
+        """Write a response body, swallowing broken-pipe/reset errors - a client
+        that disconnects mid-response is normal and shouldn't dump a traceback."""
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def log_message(self, fmt, *args):
         # route the built-in request line through our logger at DEBUG-ish level
         log.info("http %s", fmt % args)
@@ -207,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._wfile_write(body)
 
     def do_GET(self):
         if self.path.startswith("/logs"):
@@ -216,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._wfile_write(body)
             return
         if self.path.startswith("/status"):
             self._send(200, {

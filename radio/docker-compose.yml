@@ -1,0 +1,27 @@
+# Internet radio sidecar for nd-organizer.
+#
+# Manages Navidrome's internet radio stations via the Radio-Browser database
+# (from WB2024/Add-Navidrome-Radios), writing stations directly into
+# Navidrome's SQLite `radio` table - same as the web UI - so they appear without
+# a restart.
+#
+# IMPORTANT: mount Navidrome's DATA directory (the one containing navidrome.db)
+# read-write at /data, so this service can insert into the `radio` table.
+#
+# Usage:
+#   docker compose -f radio/docker-compose.yml up -d
+services:
+  nd-organizer-radio:
+    image: ghcr.io/lunatixz/nd-organizer/radio:latest
+    container_name: nd-organizer-radio
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    environment:
+      # Navidrome's data dir, mounted below, with navidrome.db inside.
+      - NAVIDROME_DB=/data/navidrome.db
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+      # Optional: override the Radio-Browser API mirror (default EU).
+      # - RADIO_BROWSER_API=https://de1.api.radio-browser.info/json
+    volumes:
+      - /path/to/navidrome/data:/data:rw    # MUST contain navidrome.db

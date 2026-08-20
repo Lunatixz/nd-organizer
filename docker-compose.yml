@@ -1,4 +1,4 @@
-# nd-organizer full stack - Navidrome plus all five sidecars, one command:
+# nd-organizer full stack - Navidrome plus all six sidecars, one command:
 #   docker compose up -d
 #
 # Services:
@@ -8,6 +8,7 @@
 #   nd-organizer-webhook  (8099)  dashboard + log/status receiver
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
 #   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
+#   nd-organizer-radio    (8100)  internet radio sidecar (Radio-Browser -> Navidrome)
 #
 # Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
 # normal Navidrome user/password - credentials pass through unchanged):
@@ -282,6 +283,23 @@ services:
       - "8098:8098"
     environment:
       - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+    networks:
+      - stack_network
+
+  # Internet radio sidecar (from WB2024/Add-Navidrome-Radios): search/add radio
+  # stations via Radio-Browser, written straight into Navidrome's `radio` table.
+  # Mount Navidrome's DATA dir (with navidrome.db) read-write at /data.
+  nd-organizer-radio:
+    image: ghcr.io/lunatixz/nd-organizer/radio:latest
+    container_name: nd-organizer-radio
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    environment:
+      - NAVIDROME_DB=/data/navidrome.db
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+    volumes:
+      - /path/to/navidrome/data:/data:rw    # MUST contain navidrome.db
     networks:
       - stack_network
 

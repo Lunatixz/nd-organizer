@@ -89,12 +89,11 @@ REORDER_CONTAINERS = {
     "similarSongs", "similarSongs2", "songsByGenre", "topSongs",
 }
 
-# Filler-keyword tracks are dropped from AUTO-QUEUE sources so intros/outros
-# never get queued for playback - but an EXPLICIT user search still returns
-# them (the user asked for those tracks). Search containers are re-sorted by
-# weight but keep their keyword tracks; hard-excluded tracks are removed
-# everywhere regardless (see should_drop).
-KEYWORD_DROP_CONTAINERS = REORDER_CONTAINERS - {"searchResult", "searchResult2", "searchResult3"}
+# Filler-keyword tracks are dropped from EVERY media response the proxy returns
+# (albums, playlists, queues, genre/similar/top, starred, ...) - see filter_json.
+# Only explicit user searches (searchResult*) keep their keyword tracks because
+# the user asked for those. Reordering by weight is limited to REORDER_CONTAINERS
+# (auto-queue sources) so album track order is preserved.
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -163,14 +162,15 @@ def _limit_skip_heavy(lst):
 
 
 def filter_json(obj, own_key=None):
-    """Drop filtered song entries and reorder song lists inside auto-queue containers.
+    """Drop filler-keyword + skip-heavy song entries from ANY media response and
+    reorder song lists inside auto-queue containers.
 
-    `own_key` is the dict key under which the current object sits. Containers in
-    REORDER_CONTAINERS (queue + search sources) are weight re-sorted; containers
-    in KEYWORD_DROP_CONTAINERS (auto-queues only) additionally drop filler-keyword
-    tracks, so an explicit user search still returns them. Skip-heavy content is
-    limited per SKIP_MODE (exclude / third / lessThanHalf / half) in queue
-    containers only - albums stay whole and never drop skip-heavy tracks.
+    Keyword filtering now applies to every `song`/`entry` list the proxy returns
+    (albums, playlists, random, searches, genre, similar, starred, ...) - not just
+    auto-queues - so filler tracks are removed everywhere a client pulls media.
+    Only explicit user searches keep their keyword tracks (the user asked for
+    them). Reordering by weight stays limited to auto-queue containers so album
+    track order is preserved.
     """
     if isinstance(obj, dict):
         new = {k: filter_json(v, k) for k, v in obj.items()}
@@ -178,8 +178,11 @@ def filter_json(obj, own_key=None):
             lst = new.get(ck)
             if not isinstance(lst, list):
                 continue
-            drop_keyword = own_key in KEYWORD_DROP_CONTAINERS and KEYWORD_FILTER_ENABLED
             reorder = own_key in REORDER_CONTAINERS
+            # Explicit user searches (searchResult*) keep keyword tracks; every
+            # other media response drops them.
+            is_search = own_key in ("searchResult", "searchResult2", "searchResult3")
+            drop_keyword = not is_search and KEYWORD_FILTER_ENABLED
             kept = []
             for it in lst:
                 if not is_song(it):
@@ -226,6 +229,14 @@ def _safe_headers(h):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _wfile_write(self, data):
+        """Write a response body, swallowing broken-pipe/reset errors - a client
+        that disconnects mid-response is normal and shouldn't dump a traceback."""
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def log_message(self, fmt, *args):
         log.info("http %s", fmt % args)
 
@@ -241,7 +252,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._wfile_write(body)
             return
         # Rich status for the webhook dashboard (never forwarded).
         if method == "GET" and path.rstrip("/").endswith("/status"):
@@ -265,7 +276,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._wfile_write(body)
             return
         REQUESTS += 1
         LAST_REQUEST_TS = time.time()
@@ -297,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._wfile_write(body)
             return
 
         if "json" in ctype:
@@ -314,21 +325,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                self._wfile_write(body)
             except Exception as e:
                 log.warning("filter failed for %s: %s (passing through)", path, e)
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
-                self.wfile.write(raw)
+                self._wfile_write(raw)
         else:
             # Binary (stream / cover art / ...) - pass through untouched.
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
-            self.wfile.write(raw)
+            self._wfile_write(raw)
 
     def do_GET(self):
         self._handle("GET")
@@ -389,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
-            self.wfile.write(out)
+            self._wfile_write(out)
         except Exception as e:
             log.warning("publish_filters failed: %s", e)
             self.send_response(400)
@@ -443,7 +454,7 @@ if __name__ == "__main__":
     log.info("filter keywords: %s", KEYWORDS or "(none)")
     log.info("POST /filters {'excluded':[ids], 'weights':[[id,w,plays,skips],...], 'skipMode':..., 'keywordFilter':...} to flag/reorder")
     log.info("queue containers (weight re-sort): %s", ", ".join(sorted(REORDER_CONTAINERS)))
-    log.info("keyword tracks dropped from auto-queues (not from explicit search): %s", ", ".join(sorted(KEYWORD_DROP_CONTAINERS)))
+    log.info("filler-keyword tracks dropped from all media responses except explicit user search")
     log.info("skip-heavy limit mode: %s (exclude/third/lessThanHalf/half/none)", SKIP_MODE)
     log.info("keywords ignored from the queue; albums stay whole")
     log.info("point a Subsonic-compatible client at http://<host>:%d/rest/ using Navidrome credentials", PORT)

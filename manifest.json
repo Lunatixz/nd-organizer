@@ -823,6 +823,45 @@
           "title": "Skip runs when a metadata source is offline",
           "default": true,
           "description": "When a required external metadata source (AcoustID / MusicBrainz / Lidarr) is unreachable, skip the run and retry later instead of organizing on degraded metadata. Off = run best-effort anyway."
+        },
+        "trimMissingDays": {
+          "type": "integer",
+          "title": "Trim missing files (days)",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 30,
+          "description": "Every this many days, purge Navidrome's missing-files list (entries whose audio file is gone) via its native DELETE /missing API. 0 = disabled. Requires an admin account (navidromeAdminUser/Password below)."
+        },
+        "navidromeAdminUser": {
+          "type": "string",
+          "title": "Navidrome admin user",
+          "default": "",
+          "description": "Admin username used to call Navidrome's native API (purging missing files is admin-only). Leave empty to fall back to scanUser."
+        },
+        "navidromeAdminPassword": {
+          "type": "string",
+          "title": "Navidrome admin password",
+          "default": "",
+          "options": {
+            "format": "password"
+          },
+          "description": "Password for the admin user above, sent as HTTP Basic auth to Navidrome's native API. Stored in Navidrome's config store."
+        },
+        "starIgnorePercent": {
+          "type": "integer",
+          "title": "Ignore listens under this %",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "A listen that ends before this % of the track is ignored entirely - no skip penalty, no credit. A momentary tap that never really played shouldn't drag a rating down."
+        },
+        "lovedThresholdStars": {
+          "type": "number",
+          "title": "Loved = at least this many stars",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Tracks rated at or above this star value are marked as loved/favorite (Navidrome star + LOVED tag)."
         }
       },
       "required": [
@@ -977,6 +1016,23 @@
             {
               "type": "Control",
               "scope": "#/properties/detectDuplicates"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/trimMissingDays"
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/navidromeAdminUser"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/navidromeAdminPassword"
+                }
+              ]
             }
           ]
         },
@@ -1283,10 +1339,6 @@
           "label": "Filter proxy (playback sidecar)",
           "elements": [
             {
-              "type": "Control",
-              "scope": "#/properties/skipThresholdPercent"
-            },
-            {
               "type": "Label",
               "text": "Playback filtering without touching files. The KEYWORD filter drops filler-keyword tracks from auto-queues (explicit searches still return them). The SKIP-CONTENT limiter controls how many skip-heavy (low-star) tracks may appear in queued lists: exclude entirely, a third, less than half, or half - or leave them alone (none). Deploy proxy/docker-compose.yml and set its URL below; settings are pushed to the proxy on every stats pass."
             },
@@ -1381,6 +1433,10 @@
             {
               "type": "Control",
               "scope": "#/properties/starMinSamples"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/skipThresholdPercent"
             }
           ]
         },

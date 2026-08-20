@@ -139,8 +139,13 @@ pub struct Config {
     pub star_half_play_percent: i32,
     /// Listen ended at/above this % counts as a full star (1.0) AND +1 playcount.
     pub star_full_play_percent: i32,
+    /// Listen ended below this % is ignored entirely (no skip penalty) - a
+    /// momentary tap that never really played shouldn't drag a rating down.
+    pub star_ignore_percent: i32,
     /// Minimum total listens before a rating is published to Navidrome.
     pub star_min_samples: i32,
+    /// Tracks rated at or above this star value are marked loved/favorite.
+    pub loved_threshold_stars: f64,
     /// Scrobble full listens (>= starFullPlayPercent) to Last.fm so its
     /// playcount grows too. Keep OFF if Navidrome already scrobbles to
     /// Last.fm (double counting). Needs Last.fm auth (session key).
@@ -217,6 +222,14 @@ pub struct Config {
     pub replay_gain_mode: String,
     /// ReplayGain reference loudness in LUFS (ReplayGain standard is -18).
     pub replay_gain_reference: f64,
+    /// Periodically purge Navidrome's "missing files" list (entries whose audio
+    /// file is gone) via the native `DELETE /missing` API. 0 = disabled.
+    pub trim_missing_days: i64,
+    /// Admin username for the native Navidrome API (needed to delete missing
+    /// files, which is admin-only). Falls back to scanUser.
+    pub navidrome_admin_user: String,
+    /// Admin password for the native Navidrome API (basic auth).
+    pub navidrome_admin_password: String,
     pub skip_hidden_files: bool,
     pub preserve_recording_type: bool,
     pub singles_under_artist: bool,
@@ -323,7 +336,9 @@ impl Default for Config {
             star_tally_enabled: true,
             star_half_play_percent: 55,
             star_full_play_percent: 85,
+            star_ignore_percent: 5,
             star_min_samples: 3,
+            loved_threshold_stars: 3.0,
             lastfm_scrobble: false,
             lastfm_import_playcount: false,
     rollback_run_id: String::new(),
@@ -360,6 +375,9 @@ impl Default for Config {
             write_replaygain: true,
             replay_gain_mode: "track".into(),
             replay_gain_reference: -18.0,
+            trim_missing_days: 0, // 0 = disabled (opt-in)
+            navidrome_admin_user: String::new(),
+            navidrome_admin_password: String::new(),
             skip_hidden_files: true,
             preserve_recording_type: true,
             singles_under_artist: true,
@@ -445,7 +463,9 @@ impl Config {
             "starTallyEnabled",
             "starHalfPlayPercent",
             "starFullPlayPercent",
+            "starIgnorePercent",
             "starMinSamples",
+            "lovedThresholdStars",
             "lastfmScrobble",
             "lastfmImportPlaycount",
             "rollbackRunId",
@@ -482,6 +502,9 @@ impl Config {
             "writeReplayGain",
             "replayGainMode",
             "replayGainReference",
+            "trimMissingDays",
+            "navidromeAdminUser",
+            "navidromeAdminPassword",
             "skipHiddenFiles",
             "preserveRecordingType",
             "singlesUnderArtist",
@@ -648,8 +671,18 @@ impl Config {
         if let Some(v) = map.get("starFullPlayPercent") {
             c.star_full_play_percent = v.trim().parse().unwrap_or(c.star_full_play_percent);
         }
+        if let Some(v) = map.get("starIgnorePercent") {
+            c.star_ignore_percent = v.trim().parse().unwrap_or(c.star_ignore_percent);
+        }
         if let Some(v) = map.get("starMinSamples") {
             c.star_min_samples = v.trim().parse().unwrap_or(c.star_min_samples);
+        }
+        if let Some(v) = map.get("lovedThresholdStars") {
+            if let Ok(x) = v.trim().parse::<f64>() {
+                if (1.0..=5.0).contains(&x) {
+                    c.loved_threshold_stars = x;
+                }
+            }
         }
         c.lastfm_scrobble = bool(map, "lastfmScrobble", c.lastfm_scrobble);
         c.lastfm_import_playcount = bool(map, "lastfmImportPlaycount", c.lastfm_import_playcount);
@@ -703,6 +736,17 @@ impl Config {
                     c.replay_gain_reference = r;
                 }
             }
+        }
+        if let Some(v) = map.get("trimMissingDays") {
+            if let Ok(d) = v.trim().parse::<i64>() {
+                c.trim_missing_days = d.max(0);
+            }
+        }
+        if let Some(v) = map.get("navidromeAdminUser") {
+            c.navidrome_admin_user = v.trim().to_string();
+        }
+        if let Some(v) = map.get("navidromeAdminPassword") {
+            c.navidrome_admin_password = v.to_string();
         }
         c.skip_hidden_files = bool(map, "skipHiddenFiles", c.skip_hidden_files);
         c.preserve_recording_type = bool(map, "preserveRecordingType", c.preserve_recording_type);

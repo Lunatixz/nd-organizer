@@ -210,6 +210,59 @@ pub mod host_lidarr {
         found
     }
 
+    /// Look up a Lidarr album's user rating (0.0-5.0) for the track's parent
+    /// album. Returns None when Lidarr isn't configured, the album isn't found,
+    /// or it has no rating. Used to seed initial star ratings.
+    pub fn album_rating(cfg: &Config, album: &str, artist: &str) -> Option<f64> {
+        let album = find_album(cfg, album, artist)?;
+        if album.id <= 0 {
+            return None;
+        }
+        let base = base_url(cfg);
+        let url = format!("{base}/api/v1/album/{}", album.id);
+        match lidarr_send(cfg, "GET", url, vec![]) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                let Ok(v) = serde_json::from_slice::<Value>(&resp.body) else {
+                    return None;
+                };
+                v.pointer("/ratings/value")
+                    .and_then(|r| r.as_f64())
+                    .filter(|r| *r > 0.0)
+            }
+            _ => None,
+        }
+    }
+
+    /// Look up a Lidarr track's user rating (0.0-5.0). Returns None when Lidarr
+    /// isn't configured or the track/rating isn't found.
+    pub fn track_rating(cfg: &Config, album: &str, artist: &str, title: &str) -> Option<f64> {
+        let album = find_album(cfg, album, artist)?;
+        if album.id <= 0 {
+            return None;
+        }
+        let base = base_url(cfg);
+        let url = format!("{base}/api/v1/track?albumId={}", album.id);
+        match lidarr_send(cfg, "GET", url, vec![]) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                let Ok(v) = serde_json::from_slice::<Value>(&resp.body) else {
+                    return None;
+                };
+                v.as_array()
+                    .and_then(|arr| {
+                        arr.iter().find(|t| {
+                            t.get("title")
+                                .and_then(|t| t.as_str())
+                                .map(|t| t.eq_ignore_ascii_case(title))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .and_then(|t| t.pointer("/ratings/value").and_then(|r| r.as_f64()))
+                    .filter(|r| *r > 0.0)
+            }
+            _ => None,
+        }
+    }
+
     /// True when the album is incomplete AND both the artist and album are
     /// monitored in Lidarr. Returns the Lidarr album id when a search should run.
     pub fn incomplete_monitored(

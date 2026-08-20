@@ -444,6 +444,24 @@ pub mod host_favorites {
         .unwrap_or(0)
     }
 
+    /// Whether the user has "loved" this track on Last.fm (from track.getInfo's
+    /// `userloved` flag). Used to seed the initial star rating (>= 3).
+    pub(crate) fn is_loved(cfg: &Config, artist: &str, title: &str) -> bool {
+        let res = lastfm_get(
+            cfg,
+            "track.getInfo",
+            &[
+                ("artist", artist),
+                ("track", title),
+                ("username", &cfg.lastfm_user),
+                ("autocorrect", "0"),
+            ],
+        );
+        res.map(|v| v.pointer("/track/userloved").and_then(|p| p.as_str()).map(|s| s == "1"))
+            .unwrap_or(Some(false))
+            .unwrap_or(false)
+    }
+
     fn lastfm_loved(cfg: &Config) -> Vec<LovedTrack> {
         let mut loved = Vec::new();
         let mut page = 1;

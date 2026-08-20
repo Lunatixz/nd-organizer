@@ -119,21 +119,29 @@ pub struct StarTally {
     pub half: i64,
     /// Skips (< half%): -0.5 star penalty, no playcount.
     pub skips: i64,
+    /// Loved/favorite flag (rating >= 3). Seeded from Last.fm on first sight.
+    #[serde(default)]
+    pub loved: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StarBand {
+    Ignore,
     Skip,
     Half,
     Full,
 }
 
-/// Classify a listen that ended at `played_pct` of its duration.
-pub fn star_band(played_pct: f64, half_pct: i32, full_pct: i32) -> StarBand {
+/// Classify a listen that ended at `played_pct` of its duration. Listens below
+/// `ignore_pct` are Ignore (a momentary tap that never really played) - they
+/// carry NO penalty and no credit, so they can't drag a rating down.
+pub fn star_band(played_pct: f64, half_pct: i32, full_pct: i32, ignore_pct: i32) -> StarBand {
     if played_pct >= full_pct.max(half_pct) as f64 {
         StarBand::Full
     } else if played_pct >= half_pct as f64 {
         StarBand::Half
+    } else if played_pct < ignore_pct as f64 {
+        StarBand::Ignore
     } else {
         StarBand::Skip
     }
@@ -142,6 +150,7 @@ pub fn star_band(played_pct: f64, half_pct: i32, full_pct: i32) -> StarBand {
 /// Apply one observed listen to a tally. A full listen also forgives one prior
 /// skip (removes a pending -0.5 penalty), so sustained listening can recover a
 /// rating. `full` is the playcount and is only ever incremented by Full.
+/// `Ignore` returns the tally unchanged.
 pub fn apply_band(mut t: StarTally, band: StarBand) -> StarTally {
     match band {
         StarBand::Full => {
@@ -152,13 +161,47 @@ pub fn apply_band(mut t: StarTally, band: StarBand) -> StarTally {
         }
         StarBand::Half => t.half += 1,
         StarBand::Skip => t.skips += 1,
+        StarBand::Ignore => {}
     }
     t
 }
 
-/// Star credit in 0.5 steps: full +1.0, half +0.5, skip -0.5.
+/// Star credit in 0.5 steps: full +1.0, half +0.5, skip -0.5. Always clamped
+/// to 0.0..5.0 so a rating can never go negative or exceed 5.
 pub fn star_credit(t: &StarTally) -> f64 {
-    t.full as f64 + t.half as f64 * 0.5 - t.skips as f64 * 0.5
+    (t.full as f64 + t.half as f64 * 0.5 - t.skips as f64 * 0.5).clamp(0.0, 5.0)
+}
+
+/// Seed a first-seen tally's initial rating from listening history:
+/// a Last.fm "loved" track starts at a floor of 3.0 stars; a higher playcount
+/// earns more starting stars (diminishing), capped. `full` already holds the
+/// playcount baseline. This maps history to a fair starting point before the
+/// user's own listening re-rates it.
+pub fn seed_initial_rating(mut t: StarTally, playcount: i64, loved: bool) -> StarTally {
+    // Loved floor: at least 3 stars.
+    let mut credit: f64 = if loved { 3.0 } else { 0.0 };
+    t.loved = loved;
+    // Playcount rewards: every 5 plays adds a star step up to a 4.5 ceiling,
+    // so a heavily-played but unloved track can still start high.
+    let play_credit: f64 = (playcount as f64 / 5.0).min(4.5);
+    credit = credit.max(play_credit);
+    // Convert initial credit into half/full counts. full carries +1 each (and
+    // is the playcount), so fold the whole-star part into `full` would inflate
+    // playcount - instead express credit via `half` (0.5 each) only, leaving
+    // `full` as the true playcount. We set half = round(credit / 0.5).
+    t.half = (credit / 0.5).round() as i64;
+    t.skips = 0;
+    t
+}
+
+/// Seed a first-seen tally directly from an explicit external rating (e.g. a
+/// Lidarr track/album rating, 0-5). Loved = rating >= 3.
+pub fn seed_from_rating(mut t: StarTally, rating: f64) -> StarTally {
+    let r = rating.clamp(0.0, 5.0);
+    t.half = (r / 0.5).round() as i64;
+    t.skips = 0;
+    t.loved = r >= 3.0;
+    t
 }
 
 /// 0-5.0 rating, half-star granularity, capped at 5.0.
@@ -333,6 +376,44 @@ pub mod host_stats {
         rows
     }
 
+    /// Compute an album's rating. Sources, in priority order:
+    ///   1. an external source passed in (Last.fm/MusicBrainz/Navidrome), or
+    ///   2. the average of the album's track star ratings (from the tally),
+    ///      keyed by the album directory (parent of each track's path).
+    /// Returns None when no tracks in the album are rated and no external rating.
+    pub fn album_rating_for(album_dir: &str, external: Option<f64>) -> Option<f64> {
+        if let Some(r) = external {
+            if r > 0.0 {
+                return Some(r.clamp(0.0, 5.0));
+            }
+        }
+        // Average the tracked tracks whose path sits under this album dir.
+        let mut sum = 0.0f64;
+        let mut n = 0usize;
+        if let Ok(keys) = crate::store::kv().list("star.tally.") {
+            for k in keys {
+                let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
+                let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                if t.full + t.half + t.skips <= 0 {
+                    continue;
+                }
+                let dir = std::path::Path::new(&t.path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if dir.eq_ignore_ascii_case(album_dir) {
+                    sum += star_rating(&t);
+                    n += 1;
+                }
+            }
+        }
+        if n == 0 {
+            None
+        } else {
+            Some((sum / n as f64).clamp(0.0, 5.0))
+        }
+    }
+
     fn star_tally_key(path: &str) -> String {
         format!("star.tally.{:016x}", crate::state::fnv1a64(path))
     }
@@ -370,22 +451,65 @@ pub mod host_stats {
             t.artist = prev.artist.clone();
         }
         t.id = if t.id.is_empty() { prev.id.clone() } else { t.id.clone() };
-        // First sight of this file: seed the playcount baseline.
+        // First sight of this file: seed the playcount baseline and an initial
+        // rating that rewards history (higher playcounts -> higher starting
+        // stars; a Last.fm "loved" track starts at 3; a Lidarr track/album
+        // rating carries over directly).
         if t.full + t.half + t.skips == 0 {
             t.id = if t.id.is_empty() { prev.id.clone() } else { t.id.clone() };
             let mut baseline = prev.play_count.max(0);
-            if cfg.lastfm_import_playcount && !prev.artist.is_empty() && !prev.title.is_empty() {
-                baseline = baseline.max(crate::favorites::host_favorites::playcount(
-                    cfg,
-                    &prev.artist,
-                    &prev.title,
-                ));
+            let mut loved = false;
+            // External rating sources: Last.fm (playcount + loved), Lidarr
+            // (track/album rating). The highest concrete rating wins the seed.
+            let mut ext_rating: Option<f64> = None;
+            if !prev.artist.is_empty() && !prev.title.is_empty() {
+                if cfg.lastfm_import_playcount {
+                    baseline = baseline.max(crate::favorites::host_favorites::playcount(
+                        cfg,
+                        &prev.artist,
+                        &prev.title,
+                    ));
+                }
+                if cfg.lastfm_import_playcount || cfg.favorites_sync_lastfm {
+                    loved = crate::favorites::host_favorites::is_loved(
+                        cfg,
+                        &prev.artist,
+                        &prev.title,
+                    );
+                }
+                if !cfg.lidarr_url.trim().is_empty() {
+                    // Prefer the track rating, fall back to the album rating.
+                    ext_rating = crate::lidarr::host_lidarr::track_rating(
+                        cfg,
+                        &prev.album,
+                        &prev.artist,
+                        &prev.title,
+                    )
+                    .or_else(|| {
+                        crate::lidarr::host_lidarr::album_rating(
+                            cfg,
+                            &prev.album,
+                            &prev.artist,
+                        )
+                    });
+                }
             }
             if baseline > t.full {
                 t.full = baseline;
             }
+            // Seed from the strongest signal: an explicit Lidarr rating wins;
+            // otherwise use the playcount/loved mapping.
+            t = match ext_rating {
+                Some(r) => seed_from_rating(t, r),
+                None => seed_initial_rating(t, baseline, loved),
+            };
         }
-        let band = star_band(played_pct, cfg.star_half_play_percent, cfg.star_full_play_percent);
+        let band = star_band(
+            played_pct,
+            cfg.star_half_play_percent,
+            cfg.star_full_play_percent,
+            cfg.star_ignore_percent,
+        );
         if band == StarBand::Full && cfg.lastfm_scrobble {
             crate::favorites::host_favorites::scrobble(
                 cfg,
@@ -464,13 +588,14 @@ pub mod host_stats {
             return Ok(0);
         }
         let mut published = 0usize;
+        let mut loved_ops = 0usize;
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
                 if published >= 250 {
                     break; // cap per pass; the rest publish on later passes
                 }
                 let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
-                let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                let Ok(mut t) = serde_json::from_slice::<StarTally>(&v) else { continue };
                 if t.id.is_empty() || t.path.is_empty() {
                     continue;
                 }
@@ -496,10 +621,30 @@ pub mod host_stats {
                         t.path, t.id
                     )),
                 }
+                // Loved = rating >= threshold (default 3): star (favorite) tracks
+                // at/above it, unstar those below, so Navidrome's heart matches.
+                let should_love = stars >= cfg.loved_threshold_stars;
+                if t.loved != should_love {
+                    let op = if should_love { "star" } else { "unstar" };
+                    let love_uri = format!("{op}?id={}&u={user}", t.id);
+                    match host::subsonicapi::call(&love_uri) {
+                        Ok(_) => {
+                            t.loved = should_love;
+                            let _ = save_star(&t);
+                            loved_ops += 1;
+                        }
+                        Err(e) => crate::wasm::log_warn(&format!(
+                            "{op} {} ({}): {e}",
+                            t.path, t.id
+                        )),
+                    }
+                }
             }
         }
-        if published > 0 {
-            crate::wasm::log_info(&format!("star: published {published} rating(s) to Navidrome"));
+        if published > 0 || loved_ops > 0 {
+            crate::wasm::log_info(&format!(
+                "star: published {published} rating(s), {loved_ops} loved-status change(s) to Navidrome"
+            ));
         }
         Ok(published)
     }
@@ -547,18 +692,13 @@ pub mod host_stats {
     }
 
     /// Write playback metadata (playcount, star rating, loved status) into each
-    /// tracked file's tags. Opt-in via `writePlaycount`, apply mode only. The
-    /// loved set comes from Navidrome's starred songs (fetched once per pass).
+    /// tracked file's tags. Opt-in via `writePlaycount`, apply mode only. Loved
+    /// is derived from the rating (>= 3 stars), per the "loved = 3+ stars" rule.
     pub fn write_playback_meta_tags(cfg: &Config) -> Result<usize, String> {
         use crate::config::Mode;
         if !cfg.write_playcount || cfg.mode != Mode::Apply {
             return Ok(0);
         }
-        let loved_ids: std::collections::HashSet<String> =
-            match host::subsonicapi::call("getStarred2?") {
-                Ok(json) => parse_starred_ids(&json),
-                Err(_) => std::collections::HashSet::new(),
-            };
         let mut written = 0usize;
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
@@ -573,11 +713,8 @@ pub mod host_stats {
                 } else {
                     None
                 };
-                let loved = if t.id.is_empty() {
-                    None
-                } else {
-                    Some(loved_ids.contains(&t.id))
-                };
+                // Loved = rating >= threshold (default 3).
+                let loved = stars.map(|s| s >= cfg.loved_threshold_stars);
                 let abs = t.path.clone();
                 let artist = t.artist.clone();
                 if !crate::wasm::should_write_tags(cfg, &artist) {
@@ -605,19 +742,6 @@ pub mod host_stats {
             }
         }
         Ok(written)
-    }
-
-    fn parse_starred_ids(json: &str) -> std::collections::HashSet<String> {
-        let Ok(v) = serde_json::from_str::<Value>(json) else {
-            return std::collections::HashSet::new();
-        };
-        v.pointer("/subsonic-response/starred2/song")
-            .and_then(|e| e.as_array())
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|s| s.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()))
-            .collect()
     }
 
     /// Rebuild the "nd-organizer: Top Picks" Navidrome playlist from the weights.
@@ -864,13 +988,26 @@ mod tests {
 
     #[test]
     fn star_band_boundaries() {
-        // 55 half / 85 full.
-        assert_eq!(star_band(50.0, 55, 85), StarBand::Skip);
-        assert_eq!(star_band(54.9, 55, 85), StarBand::Skip);
-        assert_eq!(star_band(55.0, 55, 85), StarBand::Half);
-        assert_eq!(star_band(84.0, 55, 85), StarBand::Half);
-        assert_eq!(star_band(85.0, 55, 85), StarBand::Full);
-        assert_eq!(star_band(100.0, 55, 85), StarBand::Full);
+        // 55 half / 85 full / 5 ignore.
+        assert_eq!(star_band(50.0, 55, 85, 5), StarBand::Skip);
+        assert_eq!(star_band(54.9, 55, 85, 5), StarBand::Skip);
+        assert_eq!(star_band(55.0, 55, 85, 5), StarBand::Half);
+        assert_eq!(star_band(84.0, 55, 85, 5), StarBand::Half);
+        assert_eq!(star_band(85.0, 55, 85, 5), StarBand::Full);
+        assert_eq!(star_band(100.0, 55, 85, 5), StarBand::Full);
+        // Below the ignore threshold: ignored, no penalty.
+        assert_eq!(star_band(0.0, 55, 85, 5), StarBand::Ignore);
+        assert_eq!(star_band(4.9, 55, 85, 5), StarBand::Ignore);
+        assert_eq!(star_band(5.0, 55, 85, 5), StarBand::Skip);
+    }
+
+    #[test]
+    fn star_ignored_listens_do_not_penalize() {
+        let t = StarTally { skips: 0, ..Default::default() };
+        let after = apply_band(t, StarBand::Ignore);
+        assert_eq!(after.skips, 0);
+        assert_eq!(after.full, 0);
+        assert_eq!(after.half, 0);
     }
 
     #[test]
@@ -878,10 +1015,13 @@ mod tests {
         // 3 full listens -> 3.0 stars (a single play can't max the rating).
         let t = apply_band(StarTally { full: 2, ..Default::default() }, StarBand::Full);
         assert_eq!(star_rating(&t), 3.0);
-        // 5 full listens -> capped at 5.0.
+        // 5 full listens -> capped at 5.0 (credit never exceeds 5).
         let t = StarTally { full: 5, half: 2, skips: 1, ..Default::default() };
-        assert_eq!(star_credit(&t), 5.0 + 1.0 - 0.5);
+        assert_eq!(star_credit(&t), 5.0);
         assert_eq!(star_rating(&t), 5.0);
+        // Below cap the credit is full + half*0.5 - skips*0.5.
+        let t = StarTally { full: 3, half: 1, skips: 1, ..Default::default() };
+        assert_eq!(star_credit(&t), 3.0);
         // 2 full + 2 half -> 3.0; skips penalize.
         let t = apply_band(apply_band(StarTally { full: 2, ..Default::default() }, StarBand::Half), StarBand::Half);
         assert_eq!(star_rating(&t), 3.0);

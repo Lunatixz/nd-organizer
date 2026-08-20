@@ -41,22 +41,36 @@ SIDECAR_LOG_PORTS = {
     "nd-organizer-acoustid": 8097,
     "nd-organizer-proxy": 4534,
     "nd-organizer-mysql": 8098,
+    "nd-organizer-radio": 8100,
 }
 _sidecar_logs = {}  # name -> (fetched_ts, text|None); refreshed every 30s
 _sidecar_status = {}  # name -> (fetched_ts, dict|None)
 
 
-def _fetch_json(name, port, path, cache, ttl=30):
+# Per-render budget: the dashboard does synchronous sidecar probes, so we cap
+# how long a single page render waits on them. Once the deadline passes, fetch
+# helpers return cached/None so the page renders fast even with unreachable
+# sidecars (they show as unavailable; the 5s auto-refresh catches them later).
+_render_deadline = 0.0
+
+
+def _within_budget():
+    return _render_deadline == 0.0 or time.time() < _render_deadline
+
+
+def _fetch_json(name, port, path, cache, ttl=30, timeout=1.5):
     now = time.time()
     c = cache.get(name)
     if c and now - c[0] < ttl:
         return c[1]
+    if not _within_budget():
+        return c[1] if c else None
     try:
         req = urllib.request.Request(
             "http://%s:%d%s" % (name, port, path),
             headers={"Accept": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             val = json.loads(resp.read().decode("utf-8", "replace"))
         cache[name] = (time.time(), val)
         return val
@@ -65,17 +79,19 @@ def _fetch_json(name, port, path, cache, ttl=30):
         return None
 
 
-def _fetch_logs(name, port):
+def _fetch_logs(name, port, timeout=1.5):
     now = time.time()
     c = _sidecar_logs.get(name)
     if c and now - c[0] < 30:
         return c[1]
+    if not _within_budget():
+        return c[1] if c else None
     try:
         req = urllib.request.Request(
             "http://%s:%d/logs" % (name, port),
             headers={"Accept": "text/plain"},
         )
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", "replace").rstrip("\n")
         _sidecar_logs[name] = (time.time(), text)
         return text
@@ -126,7 +142,12 @@ def _sidecar_card(name, status, logs):
     stats = ""
     if status:
         s = status.get("stats") or {}
-        if "stats" in status:  # acoustid
+        if name == "nd-organizer-radio":  # radio
+            stats = ("<div class='sc-stats'><span>stations <b>%s</b></span>"
+                     "<span>db <b>%s</b></span><span>uptime <b>%s</b></span></div>") % (
+                s.get("stations", "?"), esc(status.get("stats", {}).get("db", "")),
+                _uptime(status.get("uptime")))
+        elif "stats" in status:  # acoustid
             stats = ("<div class='sc-stats'><span>lookups <b>%s</b></span>"
                      "<span>matches <b>%s</b></span><span>errors <b>%s</b></span>"
                      "<span>last match <b>%s</b></span><span>uptime <b>%s</b></span></div>") % (
@@ -207,6 +228,41 @@ def sidecar_logs_html():
     return "".join(out)
 
 
+# ---------------------------------------------------------------- internet radio
+#
+# Radio panel driven by the nd-organizer-radio sidecar (WB2024/Add-Navidrome-
+# Radios): search/add internet radio stations straight into Navidrome's `radio`
+# table. Hidden when the sidecar is unreachable.
+
+def radio_html():
+    """Internet radio panel: existing stations + a search/add box backed by the
+    radio sidecar. Shown only when the sidecar answers."""
+    health = _fetch_json("nd-organizer-radio", 8100, "/health", _sidecar_status, timeout=1.5)
+    if health is None:
+        return ""
+    out = "<div class='card now'><h2>Internet radio <span class='tag mode'>radio sidecar</span></h2>"
+    if not health.get("ok"):
+        out += "<div class='note'>Radio sidecar error.</div></div>"
+        return out
+    st = _fetch_json("nd-organizer-radio", 8100, "/list", _sidecar_status, timeout=1.5) or {}
+    stations = st.get("stations") or []
+    rows = "".join(
+        "<div class='fh'><b>%s</b> <span class='dim'>%s</span></div>" % (esc(s.get("name", "?")), esc(s.get("url", "")))
+        for s in stations[:20]
+    )
+    out += ("<div class='sc-stats'><span>stations <b>%d</b></span>"
+            "<span>db <b>%s</b></span></div>") % (
+        len(stations), esc(health.get("db", "")))
+    if rows:
+        out += "<div class='np-head'>Configured stations</div>" + rows
+    else:
+        out += "<div class='np-head'>Configured stations</div><div class='note'>None yet - use the radio sidecar to add stations.</div>"
+    out += ("<div class='radio-actions'><span class='dim'>Search/add via the "
+            "nd-organizer-radio sidecar (Radio-Browser).</span></div>")
+    out += "</div>"
+    return out
+
+
 # ---------------------------------------------------------------- octo-fiesta
 #
 # Octo-Fiesta is a third-party Subsonic proxy - it exposes only the Subsonic
@@ -248,10 +304,12 @@ def _octo_fiesta_health():
     if not url:
         _octo_health["v"] = (time.time(), False, "not configured")
         return False, "not configured"
+    if not _within_budget():
+        return c[1], c[2]
     try:
         req = urllib.request.Request(
             url + "/rest/ping", headers={"Accept": "text/xml"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
             body = resp.read().decode("utf-8", "replace")
             ok = resp.status == 200 and 'status="ok"' in body
             _octo_health["v"] = (time.time(), ok, "HTTP %d" % resp.status)
@@ -263,17 +321,20 @@ def _octo_fiesta_health():
 
 def _docker_logs(container, tail=300):
     """Read a container's recent stdout/stderr via the Docker Engine API over
-    the unix socket. Returns None when the socket isn't mounted/usable."""
+    the unix socket. Returns None when the socket isn't mounted/usable. Capped
+    at ~2 MiB so a chatty container can't stall the dashboard render."""
     if not os.path.exists(DOCKER_SOCK):
+        return None
+    if not _within_budget():
         return None
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(6)
+        sock.settimeout(4)
         sock.connect(DOCKER_SOCK)
         path = "/containers/%s/logs?stdout=1&stderr=1&tail=%d&timestamps=0" % (container, tail)
         sock.sendall(("GET %s HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n" % path).encode())
         data = b""
-        while True:
+        while len(data) < 2 * 1024 * 1024:
             chunk = sock.recv(65536)
             if not chunk:
                 break
@@ -620,7 +681,10 @@ def actions_html(limit=200):
     so a dry run shows exactly what an apply run would do to the collection."""
     seen = set()
     items = []
-    for _, _, body in reversed(entries):
+    # Bound the scan to the most recent entries; the plugin appends oldest ->
+    # newest and we want newest plans first, so scanning the newest slice is
+    # both correct and fast no matter how many events have accumulated.
+    for _, _, body in reversed(entries[-5000:]):
         try:
             j = json.loads(body)
             if not isinstance(j, dict) or not j.get("plans"):
@@ -984,7 +1048,7 @@ def recent_actions_html(limit=25):
     """Compact feed of the most recent discrete actions across all runs,
     newest first (memory + webhook.log only - no extra persistence)."""
     items = []
-    for _, _, body in reversed(entries):
+    for _, _, body in reversed(entries[-5000:]):
         try:
             j = json.loads(body)
         except Exception:
@@ -1104,7 +1168,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Length", "2")
             self.end_headers()
-            self.wfile.write(b"ok")
+            self._wfile_write(b"ok")
             return
         summary = entry_summary(body) or "report/log"
         log.info("received POST %s from %s (%d bytes) - %s", self.path, self.client_address[0], len(body), summary)
@@ -1122,11 +1186,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Length", "3")
         self.end_headers()
-        self.wfile.write(b"ok\n")
+        self._wfile_write(b"ok\n")
 
     def do_GET(self):
-        global last_any_request
+        global last_any_request, _render_deadline
         last_any_request = time.time()
+        # Bound the whole render (~3.5s): sidecar probes that run past this are
+        # skipped (cached/None) so the page never blocks on unreachable services.
+        _render_deadline = time.time() + 3.5
+        try:
+            self._render()
+        finally:
+            _render_deadline = 0.0
+
+    def _render(self):
         if self.path.startswith("/health"):
             data = json.dumps({
                 "ok": True, "service": "nd-organizer-webhook", "port": PORT,
@@ -1136,7 +1209,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            self._wfile_write(data)
             return
 
         status_j = latest_status()
@@ -1153,7 +1226,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                       "move files. Rollback data is kept for every run.</div>")
         albums_html = actions_html()
         rows = ""
-        for ts, path, body in reversed(entries):
+        # Render only the most recent entries - iterating all 100k+ events on
+        # every refresh is what was stalling the dashboard. 500 is plenty for
+        # the activity feed; older events stay in the log file.
+        for ts, path, body in reversed(entries[:500]):
             rows += activity_entry(ts, path, body, mode)
         if not rows:
             rows = "<div class='note'>Waiting for the plugin to POST its status/reports &hellip;</div>"
@@ -1171,6 +1247,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 .replace("__INTEGRATIONS__", integrations_html())
                 .replace("__NOW__", now_html)
                 .replace("__PLAYBACK__", playback_html(status_j))
+                .replace("__RADIO__", radio_html())
                 .replace("__ALBUMS__", albums_html)
                 .replace("__TASKS__", tasks_html())
                 .replace("__SIDECARS__", sidecar_logs_html())
@@ -1181,7 +1258,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._wfile_write(data)
+
+    def _wfile_write(self, data):
+        """Write a response body, swallowing broken-pipe/reset errors - a client
+        (browser tab, heartbeat sender) that disconnects mid-response is normal
+        and shouldn't dump a traceback into the logs."""
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def log_message(self, *a):
         pass
@@ -1328,6 +1414,7 @@ __BANNER__
 <details class="collapse" open><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
 <details class="collapse" open><summary>Current activity</summary><div class="collapse-body">__NOW__</div></details>
 <details class="collapse" open><summary>Playback</summary><div class="collapse-body">__PLAYBACK__</div></details>
+<details class="collapse" open><summary>Internet radio</summary><div class="collapse-body">__RADIO__</div></details>
 <details class="collapse" open><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
 <details class="collapse"><summary>Task queue</summary><div class="collapse-body">__TASKS__</div></details>
 <details class="collapse"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>

@@ -183,6 +183,14 @@ def handle(db, op, body):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _wfile_write(self, data):
+        """Write a response body, swallowing broken-pipe/reset errors - a client
+        that disconnects mid-response is normal and shouldn't dump a traceback."""
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def log_message(self, fmt, *args):
         log.info("http %s", fmt % args)
 
@@ -193,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._wfile_write(body)
             return
         if self.path.startswith("/status"):
             info = {
@@ -231,7 +239,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._wfile_write(body)
             return
         self.send_response(404)
         self.end_headers()
@@ -253,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
-            self.wfile.write(out)
+            self._wfile_write(out)
         except Exception as e:
             log.warning("op %s failed: %s", op, e)
             out = json.dumps({"result": {"error": "mysql: %s" % e}}).encode()
@@ -261,7 +269,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
-            self.wfile.write(out)
+            self._wfile_write(out)
 
 
 def start_heartbeat():
