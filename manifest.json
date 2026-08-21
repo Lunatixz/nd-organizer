@@ -1365,25 +1365,15 @@
             },
             {
               "type": "Control",
+              "scope": "#/properties/skipThresholdPercent"
+            },
+            {
+              "type": "Control",
               "scope": "#/properties/skipContentMode"
             },
             {
               "type": "Control",
-              "scope": "#/properties/skipHeavyRatio",
-              "rule": {
-                "effect": "SHOW",
-                "condition": {
-                  "scope": "#/properties/skipContentMode",
-                  "schema": {
-                    "enum": [
-                      "exclude",
-                      "third",
-                      "lessThanHalf",
-                      "half"
-                    ]
-                  }
-                }
-              }
+              "scope": "#/properties/skipHeavyRatio"
             }
           ]
         },
@@ -1437,6 +1427,26 @@
             {
               "type": "Control",
               "scope": "#/properties/skipThresholdPercent"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/skipContentMode"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/skipHeavyRatio"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/starIgnorePercent"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lovedThresholdStars"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/writePlaycount"
             }
           ]
         },

@@ -31,6 +31,10 @@ log = logging.getLogger("webhook")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8099
 LOGFILE = sys.argv[2] if len(sys.argv) > 2 else "webhook.log"
 
+# Cap how many status events we keep in memory (oldest dropped). Older events
+# stay in webhook.log; the dashboard shows the most recent MAX_ENTRIES.
+MAX_ENTRIES = 2000
+
 entries = []  # list of (ts, path, body)
 services = {}  # sidecar name -> last heartbeat unix ts
 last_any_request = time.time()  # webhook's own liveness
@@ -403,6 +407,9 @@ def _octo_fiesta_card():
 
 def load_log():
     try:
+        # Cap the in-memory event list so an enormous backlog can't bloat memory
+        # or slow every render. Older events stay in the log file; the dashboard
+        # shows the most recent MAX_ENTRIES.
         with open(LOGFILE, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.rstrip("\n")
@@ -410,6 +417,8 @@ def load_log():
                     ts, rest = line[1:].split("] ", 1)
                     path, body = rest.split(" - ", 1)
                     entries.append((ts, path, body))
+        if len(entries) > MAX_ENTRIES:
+            del entries[: len(entries) - MAX_ENTRIES]
     except FileNotFoundError:
         pass
 
@@ -1173,6 +1182,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         summary = entry_summary(body) or "report/log"
         log.info("received POST %s from %s (%d bytes) - %s", self.path, self.client_address[0], len(body), summary)
         entries.append((ts, self.path, body))
+        if len(entries) > MAX_ENTRIES:
+            del entries[: len(entries) - MAX_ENTRIES]
         # Never crash the request on a log-file problem: create the directory if
         # needed and fall back to memory-only if it still can't be written.
         try:
