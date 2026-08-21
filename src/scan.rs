@@ -367,9 +367,86 @@ pub fn identify_file(cfg: &Config, abs_path: &str) -> Option<(String, Option<Str
 /// tags, and enqueue plan tasks for each group (batched). When identity
 /// verification is on, files without any MBID/ISRC are fingerprinted via the
 /// AcoustID sidecar; files that still can't be identified are left in place.
+/// Detect whether Navidrome's underlying database changed under us (a fresh
+/// install, a restored/blank DB, or a different data folder). When it has, the
+/// plugin's cached scan index, star tallies and play/skip stats are keyed to
+/// the OLD database's media file IDs and are now meaningless - so we clear
+/// them and rebuild fresh.
+///
+/// Fingerprint = sorted library mount points + the Navidrome media-file count
+/// (via getScanStatus). A fresh DB typically has a count near 0 and/or a
+/// different mount set, so it won't match the stored fingerprint.
+pub fn detect_db_change(cfg: &Config) {
+    let Some(fp) = db_fingerprint(cfg) else { return };
+    let key = "db.fingerprint";
+    let prev = crate::store::kv()
+        .get(key)
+        .ok()
+        .flatten()
+        .map(|v| String::from_utf8_lossy(&v).into_owned());
+    let _ = crate::store::kv().set(key, fp.as_bytes().to_vec());
+    // No stored fingerprint yet = first run on this DB; nothing to clear.
+    let Some(prev) = prev else { return };
+    if prev == fp {
+        return;
+    }
+    crate::wasm::log_info(&format!(
+        "DB fingerprint changed (was '{prev}', now '{fp}') - clearing stale scan index, star tallies and play/skip stats"
+    ));
+    clear_stale_state();
+}
+
+/// Build a fingerprint of the current Navidrome library state.
+fn db_fingerprint(cfg: &Config) -> Option<String> {
+    let mut mounts: Vec<String> = Vec::new();
+    for &lib_id in &crate::wasm::target_libraries() {
+        if let Ok(root) = library_real_path(lib_id) {
+            mounts.push(root);
+        }
+    }
+    mounts.sort();
+    // Media-file count from getScanStatus (0 on a fresh DB).
+    let count = get_media_count(cfg);
+    Some(format!("{}|{}", mounts.join(","), count))
+}
+
+/// Query Navidrome's getScanStatus for the media file count.
+fn get_media_count(cfg: &Config) -> i64 {
+    let user = crate::wasm::scan_user(cfg);
+    if user.is_empty() {
+        return 0;
+    }
+    match host::subsonicapi::call(&format!("getScanStatus?u={user}")) {
+        Ok(json) => serde_json::from_str::<Value>(&json)
+            .ok()
+            .and_then(|v| v.pointer("/subsonic-response/scanStatus/count").and_then(|c| c.as_i64()))
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// Clear keys that are bound to Navidrome media file IDs from the old DB.
+fn clear_stale_state() {
+    let mut cleared = 0usize;
+    for prefix in ["scan.filev2.", "scan.stackv2.", "star.tally.", "star.pub.", "stat.play.", "stat.skip."] {
+        if let Ok(keys) = crate::store::kv().list(prefix) {
+            for k in keys {
+                if crate::store::kv().delete(&k).is_ok() {
+                    cleared += 1;
+                }
+            }
+        }
+    }
+    // Reset the per-run album budget so a fresh DB isn't throttled by leftover
+    // maxAlbumsPerRun state.
+    let _ = crate::store::kv().delete("run.albums.remaining");
+    crate::wasm::log_info(&format!(
+        "DB change: cleared {cleared} stale key(s) (scan index, stars, stats)"
+    ));
+}
+
 /// Returns `(plan_tasks_enqueued, files_grouped)`.
-pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), String> {
-    let real_root = library_real_path(library_id)?;
+pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), String> {    let real_root = library_real_path(library_id)?;
 
     // AcoustID circuit breaker: pause the batch while the sidecar is down, wait
     // for it to come back, and only degrade (run without fingerprinting) after

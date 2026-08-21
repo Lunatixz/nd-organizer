@@ -460,20 +460,80 @@ def _octo_fiesta_card():
 
 
 def load_log():
+    """Load only the most recent events from the log file, then self-clean it.
+
+    Reading the whole file (500k+ lines) every startup is what stalled the
+    dashboard. We read only the TAIL (newest MAX_ENTRIES lines) so startup is
+    instant no matter how large the log has grown, then truncate the file so it
+    never balloons out of control again.
+    """
     try:
-        # Cap the in-memory event list so an enormous backlog can't bloat memory
-        # or slow every render. Older events stay in the log file; the dashboard
-        # shows the most recent MAX_ENTRIES.
-        with open(LOGFILE, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.rstrip("\n")
-                if line.startswith("[") and "] " in line:
-                    ts, rest = line[1:].split("] ", 1)
-                    path, body = rest.split(" - ", 1)
-                    entries.append((ts, path, body))
+        tail = read_tail(LOGFILE, MAX_ENTRIES)
+        for line in tail:
+            line = line.rstrip("\n")
+            if line.startswith("[") and "] " in line:
+                ts, rest = line[1:].split("] ", 1)
+                path, body = rest.split(" - ", 1)
+                entries.append((ts, path, body))
         if len(entries) > MAX_ENTRIES:
             del entries[: len(entries) - MAX_ENTRIES]
+        _self_clean_log(LOGFILE)
     except FileNotFoundError:
+        pass
+
+
+def read_tail(path, n):
+    """Return the last `n` non-empty lines of a file without loading it all.
+    Reads backwards in chunks so a huge file is O(file tail), not O(whole file)."""
+    lines = []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            block = 8192
+            buf = b""
+            pos = size
+            while pos > 0 and len(lines) < n:
+                read_len = min(block, pos)
+                pos -= read_len
+                f.seek(pos)
+                chunk = f.read(read_len)
+                buf = chunk + buf
+                # Split on newlines; keep the newest complete lines.
+                parts = buf.split(b"\n")
+                buf = parts[0]  # partial line at the front (older)
+                for p in reversed(parts[1:]):
+                    if p.strip():
+                        lines.append(p.decode("utf-8", "replace"))
+                        if len(lines) >= n:
+                            break
+                if len(lines) >= n:
+                    break
+            # If we consumed the whole file and buf still has a partial line.
+            if buf.strip() and len(lines) < n:
+                lines.append(buf.decode("utf-8", "replace"))
+        lines.reverse()
+        return lines
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return []
+
+
+def _self_clean_log(path):
+    """Keep the log file bounded: if it's grown large, rewrite it to only the
+    newest MAX_ENTRIES lines so a stale backlog never returns. Best-effort."""
+    try:
+        size = os.path.getsize(path)
+        # Small files are left alone; only trim once the file is well over the
+        # in-memory cap (rough heuristic, avoids rewriting constantly).
+        if size < MAX_ENTRIES * 256:
+            return
+        keep = read_tail(path, MAX_ENTRIES)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(keep) + ("\n" if keep else ""))
+        log.info("self-clean: trimmed webhook.log to %d lines", len(keep))
+    except Exception:
         pass
 
 

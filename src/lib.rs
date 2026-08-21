@@ -400,7 +400,7 @@ pub(crate) mod wasm {
     /// library, but `get_library(id)` enforces the permission, so we filter to
     /// the genuinely accessible set. Legacy `libraries`/`libraryId` config values
     /// are ignored.
-    fn target_libraries() -> Vec<i32> {
+    pub(crate) fn target_libraries() -> Vec<i32> {
         let libs = match host::library::get_all_libraries() {
             Ok(libs) if !libs.is_empty() => libs,
             Ok(_) => {
@@ -1107,6 +1107,10 @@ pub(crate) mod wasm {
             return do_rollback(cfg);
         }
         log_library_inventory();
+        // If Navidrome's DB changed under us (fresh install / restored DB), the
+        // cached scan index + star tallies + play/skip stats are stale - clear
+        // them so we rebuild from the new library.
+        super::scan::detect_db_change(cfg);
         // If the user switched persistenceBackend to mysql, copy the existing
         // local data over (chunked task; re-enqueues itself until done).
         if crate::store::mysql_migration_needed(cfg) {
