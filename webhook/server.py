@@ -260,10 +260,64 @@ def radio_html():
     if rows:
         out += "<div class='np-head'>Configured stations</div>" + rows
     else:
-        out += "<div class='np-head'>Configured stations</div><div class='note'>None yet - use the radio sidecar to add stations.</div>"
+        out += ("<div class='np-head'>Configured stations</div>"
+                "<div class='note'>None yet - search below and add stations, or "
+                "use the <a href='http://192.168.0.21:8100/list' target='_blank' "
+                "rel='noopener'>radio sidecar directly</a>.</div>")
+    # Search box (submits to the webhook's /radio-search, which proxies to the sidecar).
+    out += ("<form class='radio-search' method='get' action='/radio-search'>"
+            "<input type='text' name='q' placeholder='Search Radio-Browser (name)' "
+            "value='%s' autocomplete='off'>"
+            "<select name='type'><option value='byname'>Name</option>"
+            "<option value='bytag'>Genre</option>"
+            "<option value='bycountry'>Country</option></select>"
+            "<button type='submit'>Search</button></form>") % esc(_radio_search_query())
     out += ("<div class='radio-actions'><span class='dim'>Search/add via the "
-            "nd-organizer-radio sidecar (Radio-Browser).</span></div>")
+            "nd-organizer-radio sidecar (<a href='http://192.168.0.21:8100/list' "
+            "target='_blank' rel='noopener'>open</a>).</span></div>")
+    # If a search is active, render results inline with Add buttons.
+    if _radio_search_query():
+        out += _radio_results_html()
     out += "</div>"
+    return out
+
+
+_radio_last_search = ""
+_radio_last_type = "byname"
+
+
+def _radio_search_query():
+    return _radio_last_search
+
+
+def _radio_results_html():
+    """Render radio search results from the sidecar with per-station Add buttons."""
+    q = _radio_last_search
+    if not q:
+        return ""
+    stype = _radio_last_type
+    try:
+        res = _fetch_json("nd-organizer-radio", 8100,
+                          "/search?q=%s&type=%s&limit=20" % (urllib.parse.quote(q), urllib.parse.quote(stype or "byname")),
+                          _sidecar_status, timeout=5)
+    except Exception:
+        res = None
+    results = (res or {}).get("results") or []
+    if not results:
+        return "<div class='note'>No stations found for '%s'.</div>" % esc(q)
+    out = "<div class='np-head'>Results for '%s'</div>" % esc(q)
+    for r in results[:20]:
+        name = r.get("name", "?")
+        url = r.get("url", "")
+        tags = (r.get("tags") or "")[:40]
+        out += ("<div class='fh'><b>%s</b> <span class='dim'>%s</span>"
+                "<form class='radio-add' method='post' action='/radio-add' "
+                "style='display:inline;margin-left:8px'>"
+                "<input type='hidden' name='name' value='%s'>"
+                "<input type='hidden' name='url' value='%s'>"
+                "<input type='hidden' name='homepage' value='%s'>"
+                "<button type='submit'>Add</button></form></div>") % (
+            esc(name), esc(tags), esc(name), esc(url), esc(r.get("homepage", "")))
     return out
 
 
@@ -1166,6 +1220,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self._read_body()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Internet radio: add a station via the radio sidecar (form-encoded).
+        if self.path.rstrip("/").endswith("/radio-add"):
+            try:
+                qs = urllib.parse.parse_qs(body)
+                name = (qs.get("name") or [""])[0]
+                url = (qs.get("url") or [""])[0]
+                homepage = (qs.get("homepage") or [""])[0]
+                if not name or not url:
+                    self.send_response(400); self.send_header("Content-Length", "0"); self.end_headers()
+                    return
+                import urllib.request as _ur
+                payload = json.dumps({"stations": [{"name": name, "url": url, "homepage": homepage}]}).encode()
+                req = _ur.Request("http://nd-organizer-radio:8100/add", data=payload,
+                                  headers={"Content-Type": "application/json"})
+                _ur.urlopen(req, timeout=10).read()
+            except Exception as e:
+                log.warning("radio-add failed: %s", e)
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
         # Sidecar heartbeat? Body is {"service": "...", "ts": ...} with no "mode".
         try:
             j = json.loads(body) if body else {}
@@ -1221,6 +1296,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self._wfile_write(data)
+            return
+        if self.path.startswith("/radio-search"):
+            # Proxy a radio search to the sidecar; remember the query so the
+            # dashboard renders results inline on the next full page load.
+            global _radio_last_search, _radio_last_type
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            _radio_last_search = (qs.get("q") or [""])[0]
+            _radio_last_type = (qs.get("type") or ["byname"])[0]
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
             return
 
         status_j = latest_status()
@@ -1388,6 +1474,12 @@ td{padding:4px 8px;border-bottom:1px solid #1c2230}
 .step.done:not(:last-child)::after{background:#2ea043}
 .np-head{font-size:13px;font-weight:700;color:#9cc8ff;text-transform:uppercase;letter-spacing:.4px;margin:14px 0 6px;padding-top:10px;border-top:1px solid #1c2230}
 .np-head:first-child{border-top:0;padding-top:0;margin-top:0}
+.radio-search{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}
+.radio-search input[type=text]{flex:1;min-width:160px;background:#161b24;border:1px solid #232a36;border-radius:8px;padding:7px 10px;color:#e6eaf1;font-size:13px}
+.radio-search select,.radio-search button{background:#161b24;border:1px solid #232a36;border-radius:8px;padding:7px 10px;color:#c8d0db;font-size:13px;cursor:pointer}
+.radio-search button:hover,.radio-add button:hover{background:#232a36}
+.radio-add button{background:#0f3d24;border:1px solid #1a5c36;border-radius:6px;padding:3px 10px;color:#8ff0b5;font-size:12px;cursor:pointer}
+.radio-actions{margin-top:10px;font-size:12px;color:#8a94a3}
 .np{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13px;color:#c8d0db}
 .np-dot{width:8px;height:8px;border-radius:50%;background:#3fb950;animation:pulse 1.2s infinite;flex-shrink:0}
 .np-a{color:#9cc8ff;font-weight:600}
