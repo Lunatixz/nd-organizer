@@ -11,14 +11,16 @@
 # /data, and the webhook dashboard calls its HTTP API to search/add radio.
 #
 # Endpoints:
-#   GET  /health            -> {"ok": true, "db": "...", "exists": bool}
-#   GET  /logs              -> recent log lines (for the webhook dashboard)
+#   GET  /health            -> {"ok": true, "db": "...", "radioTable": bool, "uptime": int}
+#   GET  /status            -> {"ok": true, "service": "...", "uptime": int, "stats": {...}}
+#   GET  /list              -> {"ok": true, "stations": [{name, url}, ...]}
 #   GET  /search?q=<name>&type=byname|bytag|bycountry&limit=N
 #       -> {"ok": true, "results": [{name, url, homepage, country, tags, bitrate, votes, codec}]}
 #   GET  /top?limit=N       -> top-voted stations
-#   GET  /list              -> existing stations in Navidrome
-#   POST /add   {"stations": [{name, url, homepage}]}   (dedups by name/url)
-#       -> {"ok": true, "added": N, "skipped": N}
+#   GET  /logs              -> recent log lines (ring buffer, 500 lines max)
+#   POST /add    {"stations": [{name, url, homepage}]}  -> {"ok": true, "added": N, "skipped": N}
+#   POST /remove {"name": "...", "url": "..."}           -> {"ok": true, "deleted": N}
+#   POST /rename {"old_name": "...", "new_name": "..."}  -> {"ok": true, "updated": N}
 #
 # All activity is logged to stdout (visible via `docker logs`) and to a ring
 # buffer served at /logs.
@@ -229,26 +231,78 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if not parsed.path.rstrip("/").endswith("/add"):
-            self._send(404, {"error": "not found"})
+        path = parsed.path.rstrip("/")
+        body = self._read_body()
+        if path.endswith("/add"):
+            try:
+                req = json.loads(body or "{}")
+                stations = req.get("stations") or []
+            except Exception as e:
+                self._send(400, {"ok": False, "error": "bad request: %s" % e})
+                return
+            if not os.path.exists(DB_PATH):
+                self._send(200, {"ok": False, "error": "database not found"})
+                return
+            if not radio_table_exists():
+                self._send(200, {"ok": False, "error": "radio table not found"})
+                return
+            added, skipped, errors = add_stations(stations)
+            log.info("add: %d added, %d skipped (%d stations)", added, skipped, len(stations))
+            self._send(200, {"ok": True, "added": added, "skipped": skipped, "errors": errors})
             return
-        try:
-            n = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(n) if n > 0 else b"{}"
-            req = json.loads(raw or b"{}")
-            stations = req.get("stations") or []
-        except Exception as e:
-            self._send(400, {"error": "bad request: %s" % e})
+        if path.endswith("/remove"):
+            try:
+                req = json.loads(body or "{}")
+                name = req.get("name", "")
+                url = req.get("url", "")
+            except Exception as e:
+                self._send(400, {"ok": False, "error": "bad request: %s" % e})
+                return
+            if not name and not url:
+                self._send(400, {"ok": False, "error": "name or url required"})
+                return
+            try:
+                conn = db_connect()
+                cur = conn.cursor()
+                cur.execute("DELETE FROM radio WHERE name = ? OR stream_url = ?", (name, url))
+                deleted = cur.rowcount
+                conn.commit()
+                conn.close()
+                log.info("remove: deleted %d station(s) name='%s'", deleted, name)
+                self._send(200, {"ok": True, "deleted": deleted})
+            except Exception as e:
+                self._send(200, {"ok": False, "error": str(e)})
             return
-        if not os.path.exists(DB_PATH):
-            self._send(200, {"ok": False, "error": "database not found: %s" % DB_PATH})
+        if path.endswith("/rename"):
+            try:
+                req = json.loads(body or "{}")
+                old_name = req.get("old_name", "")
+                new_name = req.get("new_name", "")
+                url = req.get("url", "")
+            except Exception as e:
+                self._send(400, {"ok": False, "error": "bad request: %s" % e})
+                return
+            if not old_name or not new_name:
+                self._send(400, {"ok": False, "error": "old_name and new_name required"})
+                return
+            try:
+                conn = db_connect()
+                cur = conn.cursor()
+                if url:
+                    cur.execute("UPDATE radio SET name = ?, updated_at = ? WHERE name = ? OR stream_url = ?",
+                                (new_name, get_timestamp(), old_name, url))
+                else:
+                    cur.execute("UPDATE radio SET name = ?, updated_at = ? WHERE name = ?",
+                                (new_name, get_timestamp(), old_name))
+                updated = cur.rowcount
+                conn.commit()
+                conn.close()
+                log.info("rename: %d station(s) '%s' -> '%s'", updated, old_name, new_name)
+                self._send(200, {"ok": True, "updated": updated})
+            except Exception as e:
+                self._send(200, {"ok": False, "error": str(e)})
             return
-        if not radio_table_exists():
-            self._send(200, {"ok": False, "error": "radio table not found - is Navidrome initialized?"})
-            return
-        added, skipped, errors = add_stations(stations)
-        log.info("add: %d added, %d skipped (%d stations)", added, skipped, len(stations))
-        self._send(200, {"ok": True, "added": added, "skipped": skipped, "errors": errors})
+        self._send(404, {"error": "not found"})
 
 
 def start_heartbeat():

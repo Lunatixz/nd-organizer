@@ -18,6 +18,7 @@ import os
 import socket
 import sys
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -34,6 +35,7 @@ LOGFILE = sys.argv[2] if len(sys.argv) > 2 else "webhook.log"
 # Cap how many status events we keep in memory (oldest dropped). Older events
 # stay in webhook.log; the dashboard shows the most recent MAX_ENTRIES.
 MAX_ENTRIES = 2000
+PLAYLIST_DIR = os.environ.get("PLAYLIST_DIR", "/data/playlists")
 
 entries = []  # list of (ts, path, body)
 services = {}  # sidecar name -> last heartbeat unix ts
@@ -239,85 +241,260 @@ def sidecar_logs_html():
 # table. Hidden when the sidecar is unreachable.
 
 def radio_html():
-    """Internet radio panel: existing stations + a search/add box backed by the
-    radio sidecar. Shown only when the sidecar answers."""
+    """Internet radio panel: existing stations + AJAX search/add/remove/rename.
+    All operations use fetch() so the page never reloads."""
     health = _fetch_json("nd-organizer-radio", 8100, "/health", _sidecar_status, timeout=1.5)
     if health is None:
         return ""
     out = "<div class='card now'><h2>Internet radio <span class='tag mode'>radio sidecar</span></h2>"
     if not health.get("ok"):
-        out += "<div class='note'>Radio sidecar error.</div></div>"
-        return out
-    st = _fetch_json("nd-organizer-radio", 8100, "/list", _sidecar_status, timeout=1.5) or {}
-    stations = st.get("stations") or []
-    rows = "".join(
-        "<div class='fh'><b>%s</b> <span class='dim'>%s</span></div>" % (esc(s.get("name", "?")), esc(s.get("url", "")))
-        for s in stations[:20]
-    )
-    out += ("<div class='sc-stats'><span>stations <b>%d</b></span>"
-            "<span>db <b>%s</b></span></div>") % (
-        len(stations), esc(health.get("db", "")))
-    if rows:
-        out += "<div class='np-head'>Configured stations</div>" + rows
-    else:
-        out += ("<div class='np-head'>Configured stations</div>"
-                "<div class='note'>None yet - search below and add stations, or "
-                "use the <a href='http://192.168.0.21:8100/list' target='_blank' "
-                "rel='noopener'>radio sidecar directly</a>.</div>")
-    # Search box (submits to the webhook's /radio-search, which proxies to the sidecar).
-    out += ("<form class='radio-search' method='get' action='/radio-search'>"
-            "<input type='text' name='q' placeholder='Search Radio-Browser (name)' "
-            "value='%s' autocomplete='off'>"
-            "<select name='type'><option value='byname'>Name</option>"
-            "<option value='bytag'>Genre</option>"
-            "<option value='bycountry'>Country</option></select>"
-            "<button type='submit'>Search</button></form>") % esc(_radio_search_query())
-    out += ("<div class='radio-actions'><span class='dim'>Search/add via the "
-            "nd-organizer-radio sidecar (<a href='http://192.168.0.21:8100/list' "
-            "target='_blank' rel='noopener'>open</a>).</span></div>")
-    # If a search is active, render results inline with Add buttons.
-    if _radio_search_query():
-        out += _radio_results_html()
-    out += "</div>"
+        out += "<div class='note'>Radio sidecar not reachable.</div></div>"
     return out
 
 
-_radio_last_search = ""
-_radio_last_type = "byname"
+# ---------------------------------------------------------------- smart playlists
+#
+# Build and manage Navidrome .nsp smart playlists directly from the dashboard.
+# No third-party tools required — the JSON rule format is generated server-side
+# and saved to the configured playlist directory.
+
+SMART_PRESETS = [
+    {"name": "Recently Played", "comment": "Tracks played in the last 30 days",
+     "all": [{"inTheLast": {"lastplayed": 30}}], "sort": "-lastplayed"},
+    {"name": "Most Played", "comment": "Top 100 most-played tracks",
+     "all": [{"gt": {"playcount": 10}}], "sort": "-playcount", "limit": 100},
+    {"name": "Loved Tracks", "comment": "All favourited tracks",
+     "all": [{"is": {"loved": True}}], "sort": "-dateadded"},
+    {"name": "Top Rated", "comment": "Tracks rated 4+ stars",
+     "all": [{"gt": {"rating": 4}}], "sort": "-rating"},
+    {"name": "Never Played", "comment": "Tracks you haven't heard yet",
+     "all": [{"or": [{"is": {"playcount": 0}}, {"is": {"lastplayed": 0}}]}], "sort": "random"},
+    {"name": "Recently Added", "comment": "Newest additions to your library",
+     "all": [{"inTheLast": {"dateadded": 30}}], "sort": "-dateadded"},
+    {"name": "FLAC Only", "comment": "Lossless files only",
+     "all": [{"is": {"filetype": "flac"}}], "sort": "random"},
+    {"name": "High Energy", "comment": "BPM above 140",
+     "all": [{"gt": {"bpm": 140}}], "sort": "-bpm"},
+    {"name": "Chill", "comment": "BPM under 100",
+     "all": [{"lt": {"bpm": 100}}], "sort": "bpm", "limit": 50},
+    {"name": "Favourite Albums", "comment": "Loved tracks from albums with 3+ loved tracks",
+     "all": [{"is": {"loved": True}}, {"gt": {"rating": 3}}], "sort": "-rating"},
+    {"name": "Short and Sweet", "comment": "Tracks under 3 minutes",
+     "all": [{"lt": {"duration": 180}}], "sort": "random"},
+    {"name": "Epic Tracks", "comment": "Tracks over 6 minutes",
+     "all": [{"gt": {"duration": 360}}], "sort": "-duration"},
+    {"name": "Classics", "comment": "Released before 1990, still loved",
+     "all": [{"lt": {"year": 1990}}, {"is": {"loved": True}}], "sort": "-year"},
+    {"name": "Recent Favourites", "comment": "Loved tracks added in the last 90 days",
+     "all": [{"is": {"loved": True}}, {"inTheLast": {"dateadded": 90}}], "sort": "-dateadded"},
+    {"name": "Deep Cuts", "comment": "Unplayed album tracks (track 5+)",
+     "all": [{"gt": {"track": 4}}, {"is": {"playcount": 0}}], "sort": "+year,-track"},
+]
 
 
-def _radio_search_query():
-    return _radio_last_search
+def playlist_dir():
+    """Ensure the playlist directory exists and return it."""
+    d = PLAYLIST_DIR
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
-def _radio_results_html():
-    """Render radio search results from the sidecar with per-station Add buttons."""
-    q = _radio_last_search
-    if not q:
-        return ""
-    stype = _radio_last_type
+def list_playlists():
+    """List all .nsp files in the playlist directory."""
+    d = playlist_dir()
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for f in sorted(os.listdir(d)):
+        if f.endswith(".nsp"):
+            try:
+                with open(os.path.join(d, f), "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                out.append({"file": f, "name": data.get("name", f), "comment": data.get("comment", "")})
+            except Exception:
+                out.append({"file": f, "name": f, "comment": "(invalid)"})
+    return out
+
+
+def save_playlist(name, comment, nsp_body):
+    """Save a smart playlist as a .nsp JSON file. Returns (ok, filename, error)."""
+    d = playlist_dir()
+    safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name).strip()[:60]
+    if not safe_name:
+        return False, "", "invalid playlist name"
+    filename = f"{safe_name}.nsp"
+    path = os.path.join(d, filename)
+    body = {"name": name, "comment": comment}
+    body.update(nsp_body)
     try:
-        res = _fetch_json("nd-organizer-radio", 8100,
-                          "/search?q=%s&type=%s&limit=20" % (urllib.parse.quote(q), urllib.parse.quote(stype or "byname")),
-                          _sidecar_status, timeout=5)
-    except Exception:
-        res = None
-    results = (res or {}).get("results") or []
-    if not results:
-        return "<div class='note'>No stations found for '%s'.</div>" % esc(q)
-    out = "<div class='np-head'>Results for '%s'</div>" % esc(q)
-    for r in results[:20]:
-        name = r.get("name", "?")
-        url = r.get("url", "")
-        tags = (r.get("tags") or "")[:40]
-        out += ("<div class='fh'><b>%s</b> <span class='dim'>%s</span>"
-                "<form class='radio-add' method='post' action='/radio-add' "
-                "style='display:inline;margin-left:8px'>"
-                "<input type='hidden' name='name' value='%s'>"
-                "<input type='hidden' name='url' value='%s'>"
-                "<input type='hidden' name='homepage' value='%s'>"
-                "<button type='submit'>Add</button></form></div>") % (
-            esc(name), esc(tags), esc(name), esc(url), esc(r.get("homepage", "")))
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(body, fh, indent=2, ensure_ascii=False)
+        log.info("playlist saved: %s (%d rules)", filename, len(nsp_body.get("all", nsp_body.get("any", []))))
+        return True, filename, ""
+    except Exception as e:
+        return False, "", str(e)
+
+
+def delete_playlist(filename):
+    """Delete a .nsp file. Returns (ok, error)."""
+    if not filename.endswith(".nsp"):
+        return False, "must be a .nsp file"
+    path = os.path.join(playlist_dir(), filename)
+    try:
+        os.remove(path)
+        log.info("playlist deleted: %s", filename)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def playlist_html():
+    """Smart Playlist panel: list existing + create new / deploy presets."""
+    out = "<div class='card now'><h2>Smart Playlists <span class='tag mode'>nsp</span></h2>"
+    pl = list_playlists()
+    rows = ""
+    for p in pl[:30]:
+        nm = esc(p.get("name", "?"))
+        cm = esc(p.get("comment", "")[:40])
+        fn = esc(p.get("file", ""))
+        rows += ("<div class='fh'><b>%s</b> <span class='dim'>%s</span>"
+                 "<button class='radio-rm' onclick=\"playlistDelete('%s')\">Remove</button></div>") % (nm, cm, fn)
+    out += "<div class='sc-stats'><span>playlists <b>%d</b></span></div>" % len(pl)
+    if rows:
+        out += "<div class='np-head'>Saved Playlists</div>" + rows
+    else:
+        out += "<div class='np-head'>Saved Playlists</div><div class='note'>None yet — create one or deploy a preset.</div>"
+    # Preset deploy
+    out += ("<div class='np-head'>Presets</div>"
+            "<select id='presetSelect' class='radio-search'>"
+            "<option value=''>Choose a preset...</option>")
+    for p in SMART_PRESETS:
+        out += "<option value='%s'>%s — %s</option>" % (esc(p['name']), esc(p['name']), esc(p['comment']))
+    out += "</select><button class='radio-rm' onclick='deployPreset()'>Deploy</button>"
+    # Create new (simple rule builder)
+    out += ("<div class='np-head'>Create New</div>"
+            "<form class='radio-search' onsubmit='return createPlaylist(event)'>"
+            "<input id='plName' placeholder='Playlist name' style='width:180px'>"
+            "<input id='plComment' placeholder='Description (optional)' style='width:180px'>"
+            "<select id='plField'><option value='loved'>Loved</option>"
+            "<option value='rating'>Rating</option><option value='playcount'>Play Count</option>"
+            "<option value='year'>Year</option><option value='genre'>Genre</option>"
+            "<option value='bpm'>BPM</option><option value='duration'>Duration (s)</option>"
+            "<option value='albumartist'>Artist</option><option value='album'>Album</option>"
+            "<option value='filetype'>File Type</option></select>"
+            "<select id='plOp'><option value='gt'>>=</option>"
+            "<option value='lt'>&lt;=</option><option value='is'>equals</option>"
+            "<option value='contains'>contains</option></select>"
+            "<input id='plVal' placeholder='value' style='width:120px'>"
+            "<button type='submit'>Save</button></form>")
+    out += ("<script>"
+            "function playlistSave(name,comment,body){"
+            "  fetch('/playlist-save',{method:'POST',headers:{'Content-Type':'application/json'},"
+            "    body:JSON.stringify({name:name,comment:comment,nsp:body})"
+            "  }).then(function(){location.reload()});"
+            "}"
+            "function playlistDelete(file){"
+            "  if(!confirm('Delete '+file+'?'))return;"
+            "  fetch('/playlist-delete',{method:'POST',headers:{'Content-Type':'application/json'},"
+            "    body:JSON.stringify({file:file})"
+            "  }).then(function(){location.reload()});"
+            "}"
+            "function deployPreset(){"
+            "  var s=document.getElementById('presetSelect').value;"
+            "  if(!s)return;"
+            "  fetch('/playlist-presets?action=deploy&name='+encodeURIComponent(s))"
+            "    .then(function(r){return r.json()})"
+            "    .then(function(d){alert(d.ok?'Deployed: '+d.filename:d.error);location.reload()})"
+            "    .catch(function(){alert('Deploy failed')});"
+            "}"
+            "function createPlaylist(e){"
+            "  e.preventDefault();"
+            "  var n=document.getElementById('plName').value.trim();"
+            "  var c=document.getElementById('plComment').value.trim();"
+            "  var field=document.getElementById('plField').value;"
+            "  var op=document.getElementById('plOp').value;"
+            "  var val=document.getElementById('plVal').value.trim();"
+            "  if(!n||!field||!op||!val){alert('Fill all fields');return}"
+            "  var rule={}; rule[field]={}; rule[field][op]=val;"
+            "  var nsp={name:n,comment:c,all:[rule]};"
+            "  playlistSave(n,c,nsp);"
+            "}"
+            "</script>")
+    out += "</div>"
+    return out
+    st = _fetch_json("nd-organizer-radio", 8100, "/list", _sidecar_status, timeout=5) or {}
+    stations = st.get("stations") or []
+    # --- Station list with Remove + Rename buttons ---
+    rows = ""
+    for s in stations[:50]:
+        n = esc(s.get("name", "?"))
+        u = esc(s.get("url", ""))
+        hn = esc(s.get("name", "")).replace("&", "&amp;").replace("'", "\\'")
+        hu = esc(s.get("url", "")).replace("&", "&amp;").replace("'", "\\'")
+        rows += ("<div class='fh'>"
+                 "<b>%s</b> <span class='dim'>%s</span>"
+                 " <button class='radio-rm' onclick='radioRemove(\"%s\",\"%s\")'>Remove</button>"
+                 " <button class='radio-rn' onclick='radioRename(\"%s\",\"%s\")'>Rename</button>"
+                 "</div>") % (n, u, hn, hu, hn, hu)
+    out += "<div class='sc-stats'><span>stations <b>%d</b></span></div>" % len(stations)
+    if rows:
+        out += "<div class='np-head'>Stations</div>" + rows
+    else:
+        out += ("<div class='np-head'>Stations</div>"
+                "<div class='note'>None yet — search below.</div>")
+    # --- Search form (JavaScript AJAX, no page reload) ---
+    out += ("<form class='radio-search' onsubmit='return radioSearch(event)'>"
+            "<input type='text' id='radioQ' placeholder='Search name / genre / country' autocomplete='off'>"
+            "<select id='radioType'><option value='byname'>Name</option>"
+            "<option value='bytag'>Genre</option>"
+            "<option value='bycountry'>Country</option></select>"
+            "<button type='submit'>Search</button>"
+            "</form>"
+            "<div id='radioResults'></div>")
+    # --- Inline JavaScript ---
+    out += ("<script>"
+            "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;')}"
+            "function radioSearch(e){"
+            "  e.preventDefault();"
+            "  var q=document.getElementById('radioQ').value.trim();"
+            "  var t=document.getElementById('radioType').value;"
+            "  if(!q)return false;"
+            "  var el=document.getElementById('radioResults');"
+            "  el.innerHTML='<div class=\"note\">Searching...</div>';"
+            "  fetch('/radio-lookup?q='+encodeURIComponent(q)+'&type='+encodeURIComponent(t))"
+            "    .then(function(r){return r.json()})"
+            "    .then(function(d){"
+            "      var results=d.results||[];"
+            "      if(!results.length){el.innerHTML='<div class=\"note\">No results for \"'+esc(q)+'\".</div>';return}"
+            "      var h='<div class=\"np-head\">Results</div>';"
+            "      results.slice(0,20).forEach(function(s){"
+            "        h+='<div class=\"fh\"><b>'+esc(s.name||'')+'</b> <span class=\"dim\">'+esc((s.tags||'').substring(0,35))+'</span>'"
+            "          +'<button class=\"radio-rm\" onclick=\"radioAdd(\\''+esc(s.name).replace(/'/g,\"\\\\'\")+'\\',\\''+esc(s.url).replace(/'/g,\"\\\\'\")+'\\',\\''+esc(s.homepage||'').replace(/'/g,\"\\\\'\")+'\\')\">Add</button></div>';"
+            "      });"
+            "      el.innerHTML=h;"
+            "    }).catch(function(){el.innerHTML='<div class=\"note\">Search failed.</div>'});"
+            "  return false;"
+            "}"
+            "function radioAdd(name,url,hp){"
+            "  fetch('/radio-add',{method:'POST',headers:{'Content-Type':'application/json'},"
+            "    body:JSON.stringify({stations:[{name:name,url:url,homepage:hp||''}]})"
+            "  }).then(function(){location.reload()});"
+            "}"
+            "function radioRemove(name,url){"
+            "  if(!confirm('Remove '+name+'?'))return;"
+            "  fetch('/radio-remove',{method:'POST',headers:{'Content-Type':'application/json'},"
+            "    body:JSON.stringify({name:name,url:url})"
+            "  }).then(function(){location.reload()});"
+            "}"
+            "function radioRename(oldName){"
+            "  var nn=prompt('Rename station:',oldName);"
+            "  if(!nn||nn===oldName)return;"
+            "  fetch('/radio-rename',{method:'POST',headers:{'Content-Type':'application/json'},"
+            "    body:JSON.stringify({old_name:oldName,new_name:nn})"
+            "  }).then(function(){location.reload()});"
+            "}"
+            "</script>")
+    out += "</div>"
     return out
 
 
@@ -1296,10 +1473,82 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   headers={"Content-Type": "application/json"})
                 _ur.urlopen(req, timeout=10).read()
             except Exception as e:
-                log.warning("radio-add failed: %s", e)
+                log.info("radio-add failed: %s", e)
             self.send_response(302)
             self.send_header("Location", "/")
             self.end_headers()
+            return
+        if self.path.rstrip("/").endswith("/radio-remove"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(n) if n > 0 else b"{}"
+                req = json.loads(raw or "{}")
+                name = req.get("name", "")
+                url = req.get("url", "")
+                import urllib.request as _ur
+                payload = json.dumps({"name": name, "url": url}).encode()
+                _ur.urlopen(_ur.Request("http://nd-organizer-radio:8100/remove",
+                                        data=payload,
+                                        headers={"Content-Type": "application/json"}),
+                            timeout=10).read()
+            except Exception as e:
+                log.warning("radio-remove failed: %s", e)
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+        if self.path.rstrip("/").endswith("/radio-rename"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(n) if n > 0 else b"{}"
+                req = json.loads(raw or "{}")
+                import urllib.request as _ur
+                payload = json.dumps(req).encode()
+                _ur.urlopen(_ur.Request("http://nd-organizer-radio:8100/rename",
+                                        data=payload,
+                                        headers={"Content-Type": "application/json"}),
+                            timeout=10).read()
+            except Exception as e:
+                log.warning("radio-rename failed: %s", e)
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+        # Playlist: save / delete / list / deploy preset
+        if self.path.rstrip("/").endswith("/playlist-save"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(n) if n > 0 else b"{}"
+                req = json.loads(raw or "{}")
+                ok, filename, err = save_playlist(
+                    req.get("name", ""),
+                    req.get("comment", ""),
+                    req.get("nsp", {}))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                body = json.dumps({"ok": ok, "filename": filename, "error": err}).encode()
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self._wfile_write(body)
+            except Exception as e:
+                log.warning("playlist-save failed: %s", e)
+                self._send(500, {"error": str(e)})
+            return
+        if self.path.rstrip("/").endswith("/playlist-delete"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(n) if n > 0 else b"{}"
+                req = json.loads(raw or "{}")
+                ok, err = delete_playlist(req.get("file", ""))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                body = json.dumps({"ok": ok, "error": err}).encode()
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self._wfile_write(body)
+            except Exception as e:
+                log.warning("playlist-delete failed: %s", e)
+                self._send(500, {"error": str(e)})
             return
         # Sidecar heartbeat? Body is {"service": "...", "ts": ...} with no "mode".
         try:
@@ -1357,16 +1606,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self._wfile_write(data)
             return
-        if self.path.startswith("/radio-search"):
-            # Proxy a radio search to the sidecar; remember the query so the
-            # dashboard renders results inline on the next full page load.
-            global _radio_last_search, _radio_last_type
+        if self.path.startswith("/radio-lookup"):
+            # AJAX: proxy a radio search to the sidecar and return JSON directly.
+            # No redirect — the JavaScript in the panel renders the results inline.
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            _radio_last_search = (qs.get("q") or [""])[0]
-            _radio_last_type = (qs.get("type") or ["byname"])[0]
-            self.send_response(302)
-            self.send_header("Location", "/")
-            self.end_headers()
+            q = (qs.get("q") or [""])[0]
+            stype = (qs.get("type") or ["byname"])[0]
+            limit = (qs.get("limit") or ["20"])[0]
+            try:
+                payload = urllib.parse.urlencode({"q": q, "type": stype, "limit": limit})
+                req = urllib.request.Request(
+                    "http://nd-organizer-radio:8100/search?%s" % payload,
+                    headers={"Accept": "application/json"},
+                )
+                data = urllib.request.urlopen(req, timeout=10).read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self._wfile_write(data)
+            except Exception as e:
+                err = json.dumps({"ok": False, "error": str(e)}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self._wfile_write(err)
+            return
+        # Playlist: list all .nsp files (AJAX).
+        if self.path.startswith("/playlist-list"):
+            try:
+                pl = list_playlists()
+                data = json.dumps({"ok": True, "playlists": pl}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self._wfile_write(data)
+            except Exception as e:
+                self._send(500, {"error": str(e)})
+            return
+        # Playlist: deploy a preset (AJAX).
+        if self.path.startswith("/playlist-presets"):
+            try:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                action = (qs.get("action") or [""])[0]
+                name = (qs.get("name") or [""])[0]
+                if action == "deploy" and name:
+                    preset = next((p for p in SMART_PRESETS if p["name"] == name), None)
+                    if preset:
+                        ok, filename, err = save_playlist(preset["name"], preset.get("comment", ""), preset)
+                        data = json.dumps({"ok": ok, "filename": filename, "error": err}).encode()
+                    else:
+                        data = json.dumps({"ok": False, "error": "preset not found"}).encode()
+                else:
+                    data = json.dumps({"ok": True, "presets": [{"name": p["name"], "comment": p["comment"]} for p in SMART_PRESETS]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self._wfile_write(data)
+            except Exception as e:
+                self._send(500, {"error": str(e)})
             return
 
         status_j = latest_status()
@@ -1405,6 +1706,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 .replace("__NOW__", now_html)
                 .replace("__PLAYBACK__", playback_html(status_j))
                 .replace("__RADIO__", radio_html())
+                .replace("__PLAYLISTS__", playlist_html())
                 .replace("__ALBUMS__", albums_html)
                 .replace("__TASKS__", tasks_html())
                 .replace("__SIDECARS__", sidecar_logs_html())
@@ -1578,6 +1880,7 @@ __BANNER__
 <details class="collapse" open><summary>Current activity</summary><div class="collapse-body">__NOW__</div></details>
 <details class="collapse" open><summary>Playback</summary><div class="collapse-body">__PLAYBACK__</div></details>
 <details class="collapse" open><summary>Internet radio</summary><div class="collapse-body">__RADIO__</div></details>
+<details class="collapse" open><summary>Smart playlists</summary><div class="collapse-body">__PLAYLISTS__</div></details>
 <details class="collapse" open><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
 <details class="collapse"><summary>Task queue</summary><div class="collapse-body">__TASKS__</div></details>
 <details class="collapse"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
