@@ -7,10 +7,11 @@ Guide for AI coding agents working in this repo. Read this first.
 A **Navidrome plugin** (Rust → WASM, packaged as a `.ndp`) that organizes a music
 library: scans files, verifies identities (MusicBrainz/ISRC/AcoustID), groups
 into albums, plans+applies folder/file renames and tag writes (with rollback),
-and tracks playback stats + 0–5 star ratings. It ships with **sidecar Docker
-services** (Python) for capabilities the WASM sandbox can't do: audio
-fingerprinting + ReplayGain (acoustid), a web dashboard (webhook), a Subsonic
-filter proxy, MySQL KV persistence, internet radio, and a missing-track proxy.
+and tracks playback stats + 0–5 star ratings with loved-status and album ratings.
+It ships with **sidecar Docker services** (Python) for capabilities the WASM
+sandbox can't do: audio fingerprinting + ReplayGain (acoustid), a web dashboard
+(webhook), a Subsonic filter proxy, MySQL KV persistence, internet radio, and a
+missing-track proxy.
 
 ## Architecture at a glance
 
@@ -21,15 +22,15 @@ nd-organizer.ndp  (Rust -> wasm32-wasip1, packaged manifest.json + plugin.wasm)
     config.rs      Config struct (parsed from Navidrome's flat key->string map)
     scan.rs        scan -> verify (AcoustID) -> group -> plan -> apply + cleanup
     organizer.rs   grouping/duplicate detection/nfo apply (pure, host-tested)
-    tags.rs        lofty tag read/write (atomic temp+rename), MBID/playback meta
-    stats.rs       playback stats, star tallies (0-5), Top Picks, filters publish
-    favorites.rs   Last.fm loved/playcount/scrobble sync
+    tags.rs        lofty tag read/write (atomic temp+rename), MBID/playback/replaygain
+    stats.rs       playback stats, star tallies (0-5), loved status, album ratings, Top Picks, filters publish
+    favorites.rs   Last.fm loved/playcount/scrobble + ListenBrainz scrobble, two-way sync
     lidarr.rs      Lidarr API: album lookup, ratings, incomplete search, rescan
     musicbrainz.rs MusicBrainz release lookup + release tracklist (auto-tag)
     artwork.rs     Cover Art Archive fetch/embed/cover.jpg
     lyrics.rs      LRCLIB lyrics
-    audiomuse.rs   AudioMuse-AI acoustic tags (BPM/key/mood), URL resolve
-    net.rs         generic circuit breaker + throttled cached HTTP
+    audiomuse.rs   AudioMuse-AI acoustic tags (BPM/key/mood), URL resolve (host fallback)
+    net.rs         generic circuit breaker + throttled cached HTTP + circuit_check
     nfo.rs         Kodi-style album/artist NFO read/write
     template.rs    {placeholder:format} path templates
     state.rs       KV keys, backups, fnv1a64 hash, rollback
@@ -40,8 +41,8 @@ nd-organizer.ndp  (Rust -> wasm32-wasip1, packaged manifest.json + plugin.wasm)
 
 sidecars/  (Python, each its own dir + Dockerfile + docker-compose.yml)
   acoustid/   fpcalc (chromaprint) + ffmpeg ReplayGain; POST /lookup, /replaygain
-  webhook/    dashboard; POST /status receiver; /logs, /radio-search, /radio-add
-  proxy/      Subsonic filter proxy (keyword/skip-content), /filters, /status
+  webhook/    dashboard + sidecar logs + octo-fiesta radio panel; /radio-search, /radio-add
+  proxy/      Subsonic filter (keyword/skip-content), /filters, /status
   mysql/      KVStore -> MySQL bridge (executes kv ops)
   radio/      internet radio (Radio-Browser -> Navidrome `radio` table)
 ```
@@ -97,10 +98,10 @@ pwsh ./scripts/build.ps1 -Install
   uiSchema groups semantic (a setting in the groups it relates to). Validate
   after edits: `node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8'))"`.
 - **Circuit breaker** (`src/net.rs`): external HTTP providers (musicbrainz,
-  lidarr, lastfm, lrclib, coverartarchive, audiomuse, acoustid) are protected by
-  a generic circuit (retry 5m → cooldown 30m → degraded). **Trip ONLY on
-  transport failure / no response / 5xx. 404 / 4xx / no-data must NOT trip** —
-  those mean the service is up but had nothing for us.
+  lidarr, lastfm, listenbrainz, lrclib, coverartarchive, audiomuse, acoustid) are
+  protected by a generic circuit (retry 5m → cooldown 30m → degraded). **Trip
+  ONLY on transport failure / no response / 5xx. 404 / 4xx / no-data must NOT
+  trip** — those mean the service is up but had nothing for us.
 - **Tag writes are atomic** (`tags::atomic_write` / `save_tagged_atomic`):
   temp file + fsync + rename. Never write in place.
 - **Star rating (0–5.0, half steps)**: full listen (≥ `starFullPlayPercent`)
@@ -108,11 +109,18 @@ pwsh ./scripts/build.ps1 -Install
   = +0.5; below `starIgnorePercent` = ignored (no penalty); else skip = −0.5.
   Capped 0–5. Loved = rating ≥ `lovedThresholdStars`. Initial rating seeds from
   Navidrome playCount + Last.fm playcount/loved + Lidarr track/album rating.
+  Album ratings average track stars. Loved status published to Navidrome
+  (star/unstar) and file tags.
+- **Scrobble**: fires to **both** Last.fm (`track.scrobble`) and ListenBrainz
+  (`submit-listens`) on full plays, gated by `lastfmScrobble` and
+  `listenbrainzScrobble` respectively. Never scrobbles silently — both flags
+  default off to avoid double-counting.
 - **The webhook must never iterate all accumulated events**: `entries` is
-  capped at `MAX_ENTRIES` (2000), `load_log` reads only the tail, render loops
-  are bounded (`reversed(entries[:N])` / `entries[-5000:]`), and sidecar fetches
-  respect a per-render deadline (`_render_deadline`). A 500k-line backlog must
-  still render in seconds — do not reintroduce unbounded full-list scans.
+  capped at `MAX_ENTRIES` (2000), `load_log` reads only the tail and self-cleans,
+  render loops are bounded (`reversed(entries[:N])` / `entries[-5000:]`), and
+  sidecar fetches respect a per-render deadline (`_render_deadline`). A 500k-line
+  backlog must still render in seconds — do not reintroduce unbounded full-list
+  scans.
 - **Python sidecars**: `webhook/`, `proxy/`, `mysql/`, `acoustid/`, `radio/`
   each have `server.py` + `Dockerfile` + `docker-compose.yml`. They must be
   Python 3.12-compatible (the base image), and response writes swallow
@@ -131,7 +139,9 @@ pwsh ./scripts/build.ps1 -Install
   recreate) — a stale image is the usual cause of "the dashboard is old."
 - Sidecars reach each other by container name on `stack_network` (external
   docker network that also includes Navidrome). Static container IPs break on
-  recreate — prefer container names.
+  recreate — prefer container names. AudioMuse-AI containers use the upstream
+  names (`audiomuse-ai-flask-app`, `audiomuse-ai-worker-instance`) not
+  `nd-organizer-*`.
 - Commit + push to `main` triggers docker.yml (re)builds. Keep the working tree
   clean and the committed state shippable.
 

@@ -862,6 +862,18 @@
           "minimum": 1,
           "maximum": 5,
           "description": "Tracks rated at or above this star value are marked as loved/favorite (Navidrome star + LOVED tag)."
+        },
+        "listenbrainzScrobble": {
+          "type": "boolean",
+          "title": "Scrobble to ListenBrainz",
+          "default": false,
+          "description": "Scrobble full listens (>= starFullPlayPercent) to ListenBrainz (MusicBrainz ecosystem). Keep OFF if Navidrome already scrobbles via ListenBrainz. Needs listenbrainzToken."
+        },
+        "listenbrainzToken": {
+          "type": "string",
+          "title": "ListenBrainz write token",
+          "default": "",
+          "description": "ListenBrainz API write token for scrobbling. Get from https://listenbrainz.org/settings."
         }
       },
       "required": [
@@ -1243,6 +1255,17 @@
             {
               "type": "Control",
               "scope": "#/properties/lastfmScrobble"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/listenbrainzScrobble"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/listenbrainzToken",
+              "options": {
+                "format": "password"
+              }
             },
             {
               "type": "Control",

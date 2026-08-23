@@ -401,6 +401,61 @@ pub mod host_favorites {
         .map(|_| ())
     }
 
+    /// Scrobble a full listen to ListenBrainz (MusicBrainz ecosystem).
+    /// POSTs to https://api.listenbrainz.org/1/submit-listens with a JSON
+    /// body containing the track metadata and listen timestamp. Best-effort.
+    pub(crate) fn listenbrainz_scrobble(
+        cfg: &Config,
+        artist: &str,
+        title: &str,
+        album: &str,
+        ts: i64,
+    ) {
+        let token = cfg.listenbrainz_token.trim();
+        if token.is_empty() {
+            return;
+        }
+        let body = serde_json::json!({
+            "listen_type": "single",
+            "payload": [{
+                "listened_at": ts,
+                "track_metadata": {
+                    "artist_name": artist,
+                    "track_name": title,
+                    "release_name": album,
+                }
+            }]
+        });
+        let req = host::http::HTTPRequest {
+            method: "POST".into(),
+            url: "https://api.listenbrainz.org/1/submit-listens".to_string(),
+            headers: HashMap::from([
+                ("Authorization".to_string(), format!("Token {token}")),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ]),
+            no_follow_redirects: false,
+            body: body.to_string().into_bytes(),
+            timeout_ms: 15_000,
+        };
+        if !crate::net::circuit_probe(
+            "listenbrainz",
+            "https://api.listenbrainz.org",
+            &HashMap::new(),
+            10_000,
+        ) {
+            crate::wasm::log_warn("ListenBrainz offline (circuit open)");
+            return;
+        }
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                crate::wasm::log_info("ListenBrainz scrobble OK");
+            }
+            Ok(Some(resp)) => crate::wasm::log_warn(&format!(
+                "ListenBrainz scrobble HTTP {}", resp.status_code
+            )),
+            _ => crate::wasm::log_warn("ListenBrainz scrobble failed (no response)"),
+        }
+    }
     /// Scrobble a full listen to Last.fm so its playcount grows too. Best-effort
     /// (fails silently on auth/config problems - session() logs the issue).
     /// Callers should only invoke this when the user opted into lastfmScrobble,

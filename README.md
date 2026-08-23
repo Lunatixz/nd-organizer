@@ -24,7 +24,7 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   `Singles` folder (filename disambiguated, e.g. `Title (from Album).flac`, so it
   never overwrites existing singles).
 - **Filler tracks**: intro/outro/interlude tracks (keyword-configurable) are
-  detected and dropped from **auto-queues** by the **Navidrome filter proxy**
+  filtered out of **every media response** by the **Navidrome filter proxy** (except explicit user searches)
   (an explicit search still returns them). **Albums stay whole and files are
   never moved.**
 - **Skip-content limiter**: skip-heavy (low-star) tracks never dominate your
@@ -48,9 +48,10 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   is stored in the plugin's own storage (durable via `persistenceBackend = mysql`)
   and **published to Navidrome's native rating** (`setRating`) once a track has
   ≥ `starMinSamples` listens — the 0.5 precision lives in the plugin DB. Full
-  plays can optionally be **scrobbled to Last.fm** (`lastfmScrobble`) and the
-  baseline can be **imported from Last.fm** (`lastfmImportPlaycount`).
-  **No audio-file tags are written.**
+   plays can optionally be **scrobbled to Last.fm** (`lastfmScrobble`) and/or
+   **ListenBrainz** (`listenbrainzScrobble`); the baseline can be
+   **imported from Last.fm** (`lastfmImportPlaycount`).
+   **No audio-file tags are written.**
 - **Refreshes metadata + artwork** from MusicBrainz, Cover Art Archive, iTunes
   and Last.fm; reads/writes Kodi-style `album.nfo`/`artist.nfo` sidecars.
 - **Integrates with Lidarr** (metadata/classification source, optional Lidarr
@@ -103,26 +104,33 @@ granularity:
 |---|---|---|
 | ≥ `starFullPlayPercent` (85%) | **+1** | **+1.0 ★** |
 | `starHalfPlayPercent`–`starFullPlayPercent` (55–84%) | — | **+0.5 ★** |
-| < `starHalfPlayPercent` (55%) | — | **−0.5 ★** (penalty) |
+| `starIgnorePercent`–`starHalfPlayPercent` (5–54%) | — | **−0.5 ★** (penalty) |
+| < `starIgnorePercent` (5%) | — | **Ignored** (no penalty) |
 
 - **Playcount is full listens only.** A skip never increments it, so it acts as a
   pure penalty against the rating.
 - **A full listen forgives one prior skip** — sustain full listening and a
   rating recovers.
-- Rating is capped at **5.0** and rounded to the nearest **0.5**.
+- Rating is **capped at 0–5.0** and rounded to the nearest **0.5**.
+- **Loved** = rating ≥ `lovedThresholdStars` (default 3). Loved tracks are
+  starred in Navidrome and tagged with `LOVED` status; beloved tracks ≥ 3 stars
+  start at that baseline when first observed.
+- **Album ratings** average the album's track star ratings. External ratings
+  (NFO / MusicBrainz / Lidarr) take priority over the calculated average.
+- **Initial rating** seeds from the strongest signal: Lidarr track/album rating
+  (directly used), or Last.fm playcount (higher playcount → more stars, up to
+  4.5 ceiling) + Last.fm loved (floors at 3 stars).
+- **Published to Navidrome** (`setRating` + `star`/`unstar`) once a track has ≥
+  `starMinSamples` observed listens. Star/unstar mirrors the loved threshold.
 - Stored in the plugin's KVStore, keyed by **file path + filename** — so it
   survives restarts, and if you enable `persistenceBackend = mysql` it lives in
   your own durable database.
-- **Published to Navidrome** (`setRating`) once a track has ≥ `starMinSamples`
-  observed listens (prevents a single play from stamping a rating). Navidrome's
-  rating is whole-star; the half-star precision is kept in the plugin DB and
-  shown in the webhook dashboard / dry-run preview.
 - **Follows file renames**: when the organizer moves a file the tally is migrated
   to the new path, and orphaned tallies are pruned automatically.
-- **Last.fm (optional)**: `lastfmScrobble` scrobbles full listens so Last.fm's
-  playcount grows too (keep off if Navidrome already scrobbles — it would
-  double-count); `lastfmImportPlaycount` seeds each track's baseline from
-  Last.fm. Last.fm has no rating API, so only playcount is synced.
+- **Scrobble** (both opt-in): `lastfmScrobble` scrobbles full listens to
+  **Last.fm** (`track.scrobble`); `listenbrainzScrobble` scrobbles to
+  **ListenBrainz** (`submit-listens`). Keep each OFF if Navidrome's own
+  scrobbler already covers that service (double-counts otherwise).
 - **Never writes to the audio file** — the rating/playcount live in the plugin
   DB and Navidrome only.
 - The **dry-run report** previews each tracked file's current stars + playcount,
@@ -138,7 +146,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/v1ck3s/octo-fiesta` | Missing-track proxy (third-party, GPL-3.0) — when a requested song isn't in the library, fetches it from the configured provider and streams it. Supports SquidWTF (free, no creds), Deezer, Qobuz, Yandex. |
 | `ghcr.io/lunatixz/nd-organizer/acoustid:latest` | Fingerprints songs (AcoustID) so unverified files can be paired to their album, and computes ReplayGain loudness tags (ffmpeg). |
 | `ghcr.io/lunatixz/nd-organizer/webhook:latest` | A web dashboard showing status + reports (auto-refreshing). |
-| `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from **auto-queues** (random/playlist/similar/genre/top/starred, but **not** explicit user searches), removes skip-heavy tracks past the cap everywhere, and re-sorts returned lists by weight, without touching files. |
+| `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
 | `ghcr.io/lunatixz/nd-organizer/radio:latest` | Internet radio sidecar (based on WB2024/Add-Navidrome-Radios) — search the Radio-Browser community DB and add stations straight into Navidrome's `radio` table (no restart). The webhook dashboard has a Radio panel. |
 | `ghcr.io/neptunehub/audiomuse-ai-musicserver:latest` | Optional Subsonic music server (third-party, AGPL-3.0) — an open-source alternative to Navidrome showcasing AudioMuse-AI's sonic analysis. Web UI `:3000`, Open Subsonic API `:8080`. **Commented out** in the compose. |
@@ -577,7 +585,7 @@ A tiny web UI showing the plugin's status + reports (auto-refreshing). Open
 
 ### Navidrome filter proxy
 
-Drops filler-keyword tracks from auto-queues and limits skip-heavy content in
+Drops filler-keyword tracks from every media response and limits skip-heavy content in
 queued lists (exclude/third/lessThanHalf/half), re-sorts song lists by weight —
 all **without touching files**. Point your Subsonic-compatible client at
 `http://<your-nas>:4534/rest/` (or let octo-fiesta sit in front of it).
@@ -777,7 +785,9 @@ credentials pass through unchanged.
 
 ```
 client ──▶ filter proxy (:4534) ──▶ Navidrome (:4533)
-                 │  keyword filter (auto-queues): drop filler titles
+                 │  keyword filter: drop filler titles from every media
+                 │      response (album playlists, random, genre, starred,
+                 │      similar, etc.) — explicit user searches keep them.
                  │  skip-content limiter (queues): keep at most
                  │     exclude / third / lessThanHalf / half skip-heavy tracks
                  │  re-sorts: search / random / starred / playlist song lists
@@ -795,10 +805,10 @@ stay whole — `getAlbum` keeps full track order — and live/active views
 ### Keyword filter (opt-in, `keywordFilterEnabled`)
 Edit **Filler keywords** (`fillerKeywords`) in the Navidrome plugin settings.
 The plugin pushes this list to the filter proxy on every stats pass, so the
-proxy **drops keyword-matched tracks from auto-queues** (random, playlists,
-genres, top/similar) so intros and outros never auto-play — but an **explicit
-user search still returns them**, and an album's track list stays whole, so you
-can always play them deliberately. Files are never touched. (`FILTER_KEYWORDS`
+proxy **drops keyword-matched tracks from every media response** (album track
+lists, playlists, random, genre, starred, similar, top) — so intros and outros
+never appear in any view. **Explicit user searches** (`searchResult*`) still
+return keyword tracks. Files are never touched. (`FILTER_KEYWORDS`
 on the proxy container is only a startup fallback.)
 
 ### Skip-content limiter (`skipContentMode`)
