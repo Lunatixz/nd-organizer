@@ -315,7 +315,7 @@
           "type": "boolean",
           "title": "Scrobble full plays to Last.fm",
           "default": false,
-          "description": "Important: only enable this if no other scrobbler is running (e.g. Navidrome's built-in Last.fm scrobbling or a music player scrobbler). If one is already active, every full listen gets reported twice and your Last.fm playcounts inflate. RECOMMENDED instead: run the multi-scrobbler project (github.com/foxxmd/multi-scrobbler) - it deduplicates and fans out scrobbles to Last.fm + ListenBrainz + others, so you keep Navidrome's own scrobbling and skip this setting. When you do enable it: every full listen (>= starFullPlayPercent) is scrobbled to Last.fm so its playcount grows along with ours."
+          "description": "Scrobble full listens (>= starFullPlayPercent) to Last.fm so its playcount grows. DUPLICATE WARNING: if Navidrome's own Last.fm scrobbler or a player scrobbler is also running, plays will be double-counted. Disable Navidrome's built-in Last.fm scrobbler before enabling this. RECOMMENDATION: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage across both platforms. For deduplication across multiple sources, use the multi-scrobbler project (github.com/foxxmd/multi-scrobbler) instead."
         },
         "lastfmImportPlaycount": {
           "type": "boolean",
@@ -883,7 +883,7 @@
           "type": "boolean",
           "title": "Scrobble to ListenBrainz",
           "default": false,
-          "description": "Scrobble full listens (>= starFullPlayPercent) to ListenBrainz (MusicBrainz ecosystem). Keep OFF if Navidrome already scrobbles via ListenBrainz. Needs listenbrainzToken."
+          "description": "Scrobble full listens (>= starFullPlayPercent) to ListenBrainz and push track/album/artist ratings. DUPLICATE WARNING: if Navidrome's own ListenBrainz scrobbler is also running, plays will be double-counted. Disable it before enabling this. RECOMMENDATION: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage across both platforms. Uses the same token as musicbrainzToken (MusicBrainz ecosystem, same account). For deduplication across multiple sources, use multi-scrobbler (github.com/foxxmd/multi-scrobbler) instead."
         },
         "essentiaUrl": {
           "type": "string",
@@ -1244,7 +1244,7 @@
           "elements": [
             {
               "type": "Label",
-              "text": "Genres, playcounts, star-rating scrobbles and favorites sync - all from your Last.fm account."
+              "text": "Genres, playcounts, star-rating scrobbles and favorites sync - all from your Last.fm account. TIP: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage. If you use Navidrome's built-in scrobbler, disable it here to avoid double-counting. For dedup across multiple sources, use multi-scrobbler (github.com/foxxmd/multi-scrobbler)."
             },
             {
               "type": "Control",
