@@ -187,12 +187,12 @@ The compose files reference the published GHCR images — `docker compose up`
 pulls them (no local build, no build context needed). Tags: `:latest`, `:main`,
 and `vX.Y.Z` semver tags per release.
 
-Here is the **complete `docker-compose.yml`** — Navidrome plus all six sidecars
-(octo-fiesta, acoustid, webhook, filter proxy, mysql, radio) on one shared network.
+Here is the **complete `docker-compose.yml`** — Navidrome plus all seven sidecars
+(octo-fiesta, acoustid, webhook, filter proxy, mysql, radio, essentia) on one shared network.
 Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
 
 ```yaml
-# nd-organizer full stack - Navidrome plus all six sidecars, one command:
+# nd-organizer full stack - Navidrome plus all seven sidecars, one command:
 #   docker compose up -d
 #
 # Services:
@@ -203,6 +203,7 @@ Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
 #   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
 #   nd-organizer-radio    (8100)  internet radio sidecar (Radio-Browser -> Navidrome)
+#   nd-organizer-essentia (8101)  genre/mood ML analysis (Essentia + Discogs-400)
 #
 # Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
 # normal Navidrome user/password - credentials pass through unchanged):
@@ -472,6 +473,23 @@ services:
       - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
     volumes:
       - /path/to/navidrome/data:/data:rw    # MUST contain navidrome.db
+    networks:
+      - stack_network
+
+  # ===== Essentia (genre/mood ML analysis, AudioMuse fallback) =====
+  # When AudioMuse-AI is down, the plugin falls back to this service for
+  # genre/mood analysis using Essentia ML models (Discogs-400 + MTG-Jamendo).
+  # Requires ~100MB disk for models + 2-4GB RAM during analysis.
+  nd-organizer-essentia:
+    image: ghcr.io/lunatixz/nd-organizer/essentia:latest
+    container_name: nd-organizer-essentia
+    restart: unless-stopped
+    ports:
+      - "8101:8101"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099
+    volumes:
+      - /path/to/music:/music:ro
     networks:
       - stack_network
 

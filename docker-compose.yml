@@ -1,4 +1,4 @@
-# nd-organizer full stack - Navidrome plus all six sidecars, one command:
+# nd-organizer full stack - Navidrome plus all seven sidecars, one command:
 #   docker compose up -d
 #
 # Services:
@@ -9,6 +9,7 @@
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
 #   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
 #   nd-organizer-radio    (8100)  internet radio sidecar (Radio-Browser -> Navidrome)
+#   nd-organizer-essentia (8101)  genre/mood ML analysis (Essentia + Discogs-400)
 #
 # Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
 # normal Navidrome user/password - credentials pass through unchanged):
