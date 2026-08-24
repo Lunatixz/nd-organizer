@@ -652,7 +652,8 @@
         "lidarrUrl": {
           "type": "string",
           "title": "Lidarr URL",
-          "description": "e.g. http://lidarr:8686. Empty disables Lidarr integration."
+          "default": "http://lidarr:8686",
+          "description": "Lidarr API URL. Default is http://lidarr:8686 (Docker container name). Empty disables Lidarr integration."
         },
         "lidarrApiKey": {
           "type": "string",

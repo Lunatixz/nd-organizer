@@ -785,11 +785,25 @@ pub(crate) mod wasm {
 
         let empty = HashMap::new();
 
-        // AcoustID sidecar
+        // 1. Navidrome (the server we run inside — always check first)
+        {
+            let user = crate::wasm::scan_user(cfg);
+            if user.is_empty() {
+                arr.push(json!({"name":"Navidrome","state":"ok","detail":"plugin active, no user configured"}));
+            } else {
+                match host::subsonicapi::call(&format!("ping?u={user}")) {
+                    Ok(json) if json.contains("\"ok\"") && json.contains("true") => {
+                        arr.push(json!({"name":"Navidrome","state":"ok","detail":"api reachable"}));
+                    }
+                    Ok(other) => arr.push(json!({"name":"Navidrome","state":"unreachable","detail":"unexpected response"})),
+                    Err(e) => arr.push(json!({"name":"Navidrome","state":"unreachable","detail":e.to_string()})),
+                }
+            }
+        }
+
+        // 2. AcoustID sidecar (local Docker — fingerprinting)
         if cfg.acoustid_url.trim().is_empty() {
-            arr.push(
-                json!({"name":"AcoustID","state":"notConfigured","detail":"acoustidUrl not set"}),
-            );
+            arr.push(json!({"name":"AcoustID","state":"notConfigured","detail":"acoustidUrl not set"}));
         } else {
             let url = format!("{}/health", cfg.acoustid_url.trim_end_matches('/'));
             match probe_ok("acoustid", &url, &empty) {
@@ -798,7 +812,7 @@ pub(crate) mod wasm {
             }
         }
 
-        // Lidarr
+        // 3. Lidarr (local Docker — metadata + ratings)
         if cfg.lidarr_url.trim().is_empty() {
             arr.push(json!({"name":"Lidarr","state":"notConfigured","detail":"lidarrUrl not set"}));
         } else {
@@ -826,24 +840,18 @@ pub(crate) mod wasm {
             }
         }
 
-        // AudioMuse-AI (heavy Flask app - slow to respond, so use a longer
-        // timeout and a shorter cache so recovery shows quickly). Uses the
-        // resolved base: configured URL, falling back to the server host's
-        // published port when the container IP isn't reachable from Navidrome.
+        // 4. AudioMuse-AI (local Docker — acoustic analysis, heavy Flask app)
         if cfg.audiomuse_url.trim().is_empty() {
             arr.push(json!({"name":"AudioMuse-AI","state":"notConfigured","detail":"audiomuseUrl not set"}));
         } else {
             let url = crate::audiomuse::resolve_base(cfg);
             match probe_ok_timeout("audiomuse-v2", &url, &empty, 20_000, 300) {
                 None => arr.push(json!({"name":"AudioMuse-AI","state":"ok","detail":url})),
-                Some(w) => {
-                    arr.push(json!({"name":"AudioMuse-AI","state":"unreachable","detail":w}))
-                }
+                Some(w) => arr.push(json!({"name":"AudioMuse-AI","state":"unreachable","detail":w})),
             }
         }
 
-        // MusicBrainz (slow API - give it a real timeout and a short cache so a
-        // transient slow response doesn't stick as "unreachable" for an hour).
+        // 5. MusicBrainz (external API — metadata source, slow at times)
         {
             let url = "https://musicbrainz.org/ws/2/";
             let detail = if cfg.musicbrainz_token.trim().is_empty() {
@@ -857,16 +865,23 @@ pub(crate) mod wasm {
             }
         }
 
-        // Last.fm
+        // 6. ListenBrainz (external API — scrobble + ratings, same token as MB)
+        if cfg.musicbrainz_token.trim().is_empty() {
+            arr.push(json!({"name":"ListenBrainz","state":"notConfigured","detail":"set musicbrainzToken"}));
+        } else {
+            match probe_ok("listenbrainz", "https://api.listenbrainz.org/1/status", &empty) {
+                None => arr.push(json!({"name":"ListenBrainz","state":"ok","detail":"token set, api reachable"})),
+                Some(w) => arr.push(json!({"name":"ListenBrainz","state":"unreachable","detail":w})),
+            }
+        }
+
+        // 7. Last.fm (external API — scrobble + favorites)
         if cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty() {
             arr.push(json!({"name":"Last.fm","state":"notConfigured","detail":"set lastfmApiKey + lastfmUser"}));
         } else if cfg.favorites_sync_lastfm
             && !cfg.lastfm_api_secret.trim().is_empty()
             && !cfg.lastfm_password.trim().is_empty()
         {
-            // Favorites sync does a real login - reflect its actual auth state
-            // instead of only checking that the API is reachable. Shared with
-            // collect_warnings so the login is attempted at most once per 5 min.
             match lastfm_auth_issue(cfg) {
                 Some(issue) => arr.push(json!({"name":"Last.fm","state":"authFailed","detail":issue})),
                 None => arr.push(json!({"name":"Last.fm","state":"ok","detail":"auth ok (favorites)"})),
@@ -879,6 +894,22 @@ pub(crate) mod wasm {
             match probe_ok("lastfm", &url, &empty) {
                 None => arr.push(json!({"name":"Last.fm","state":"ok","detail":"api reachable"})),
                 Some(w) => arr.push(json!({"name":"Last.fm","state":"unreachable","detail":w})),
+            }
+        }
+
+        // 8. Sidecars (local Docker containers — the plugin's own infrastructure)
+        let sidecars = [
+            ("Webhook", 8099),
+            ("Filter Proxy", 4534),
+            ("MySQL", 8098),
+            ("Radio", 8100),
+            ("Essentia", 8080),
+        ];
+        for (name, port) in sidecars {
+            let url = format!("http://localhost:{port}/health");
+            match probe_ok(&name.to_lowercase().replace(' ', ""), &url, &empty) {
+                None => arr.push(json!({"name":name,"state":"ok","detail":format!("port {port}")})),
+                Some(w) => arr.push(json!({"name":name,"state":"unreachable","detail":w})),
             }
         }
 
