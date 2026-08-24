@@ -181,6 +181,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
 | `ghcr.io/lunatixz/nd-organizer/radio:latest` | Internet radio sidecar (based on WB2024/Add-Navidrome-Radios) — search the Radio-Browser community DB and add stations straight into Navidrome's `radio` table (no restart). The webhook dashboard has a Radio panel. |
+| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | Genre/mood ML analysis using Essentia (Discogs-400 + MTG-Jamendo models). Fallback when AudioMuse-AI is down, or primary genre source when `genreFrom=essentia`. |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
 The compose files reference the published GHCR images — `docker compose up`
@@ -691,6 +692,22 @@ cd radio && docker compose up -d
   `nd-organizer-radio` sidecar card once the sidecar is running.
 - The sidecar is registered in `SIDECAR_LOG_PORTS` (port `8100`).
 
+### Smart playlists
+
+The webhook dashboard includes a **Smart Playlists** panel for managing
+Navidrome playlists (`.nsp` files stored in `PLAYLIST_DIR`):
+
+- **15 preset templates** — Top Rated, Recently Played, Skip-Heavy, High Energy,
+  Chill Vibes, Deep Cuts, New Discoveries, Artist Essentials, Decade Explorer,
+  Genre Journey, Mood Board, Length Filter, Playcount extremes, Star Rating
+  ranges, and more.
+- **Rule builder** — create custom playlists by combining field/operator/value
+  rules (e.g. rating >= 4, playcount > 10, artist contains "Pink Floyd").
+- **CRUD** — save, delete, and list playlists via AJAX (no page reload).
+- **Deploy presets** — one-click deploy of any preset into the playlist folder.
+- All operations use the webhook's `/playlist-save`, `/playlist-delete`,
+  `/playlist-list`, and `/playlist-presets` endpoints.
+
 ### Persistence: external MySQL / MariaDB
 
 By default the plugin's cache/state (scan index, task log, stats, caches) lives in
@@ -963,8 +980,6 @@ maintenance happens in my spare time — your support keeps it going.
 ## Built with the help of AI
 
 This project was developed with the assistance of an AI coding agent. The
-architecture, code, tests, and documentation were all produced through a
-collaborative process between human intent and machine execution. The result is
-a codebase that's been reviewed, tested, and shipped — the AI didn't just
-generate code, it helped build a product.
+architecture, code, tests, and documentation were produced through a
+collaborative process between human intent and machine execution.
 

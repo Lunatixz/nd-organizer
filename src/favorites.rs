@@ -456,6 +456,107 @@ pub mod host_favorites {
             _ => crate::wasm::log_warn("ListenBrainz scrobble failed (no response)"),
         }
     }
+
+    /// Submit a track rating to ListenBrainz. The recording_mbid is required.
+    /// Rating scale: 0-100 (ListenBrainz uses 0-100, we convert from 0-5).
+    pub(crate) fn listenbrainz_rate_track(
+        cfg: &Config,
+        recording_mbid: &str,
+        rating: f64,
+    ) {
+        let token = cfg.musicbrainz_token.trim();
+        if token.is_empty() || recording_mbid.is_empty() {
+            return;
+        }
+        // Convert 0-5 star rating to 0-100 ListenBrainz scale
+        let lb_rating = (rating / 5.0 * 100.0).round() as i32;
+        let body = serde_json::json!({
+            "rating": {
+                "rating_type": "track",
+                "rating_value": lb_rating,
+                "recording_mbid": recording_mbid,
+            }
+        });
+        listenbrainz_post(cfg, "https://api.listenbrainz.org/1/rating", body);
+    }
+
+    /// Submit an album (release group) rating to ListenBrainz.
+    pub(crate) fn listenbrainz_rate_album(
+        cfg: &Config,
+        release_group_mbid: &str,
+        rating: f64,
+    ) {
+        let token = cfg.musicbrainz_token.trim();
+        if token.is_empty() || release_group_mbid.is_empty() {
+            return;
+        }
+        let lb_rating = (rating / 5.0 * 100.0).round() as i32;
+        let body = serde_json::json!({
+            "rating": {
+                "rating_type": "release-group",
+                "rating_value": lb_rating,
+                "release_group_mbid": release_group_mbid,
+            }
+        });
+        listenbrainz_post(cfg, "https://api.listenbrainz.org/1/rating", body);
+    }
+
+    /// Submit an artist rating to ListenBrainz.
+    pub(crate) fn listenbrainz_rate_artist(
+        cfg: &Config,
+        artist_mbid: &str,
+        rating: f64,
+    ) {
+        let token = cfg.musicbrainz_token.trim();
+        if token.is_empty() || artist_mbid.is_empty() {
+            return;
+        }
+        let lb_rating = (rating / 5.0 * 100.0).round() as i32;
+        let body = serde_json::json!({
+            "rating": {
+                "rating_type": "artist",
+                "rating_value": lb_rating,
+                "artist_mbid": artist_mbid,
+            }
+        });
+        listenbrainz_post(cfg, "https://api.listenbrainz.org/1/rating", body);
+    }
+
+    fn listenbrainz_post(cfg: &Config, url: &str, body: serde_json::Value) {
+        let token = cfg.musicbrainz_token.trim();
+        if token.is_empty() {
+            return;
+        }
+        if !crate::net::circuit_probe(
+            "listenbrainz",
+            "https://api.listenbrainz.org",
+            &HashMap::new(),
+            10_000,
+        ) {
+            return;
+        }
+        let req = host::http::HTTPRequest {
+            method: "POST".into(),
+            url: url.to_string(),
+            headers: HashMap::from([
+                ("Authorization".to_string(), format!("Token {token}")),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ]),
+            no_follow_redirects: false,
+            body: body.to_string().into_bytes(),
+            timeout_ms: 15_000,
+        };
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                crate::wasm::log_info(&format!("ListenBrainz rating OK: {url}"));
+            }
+            Ok(Some(_resp)) => crate::net::circuit_mark_failed("listenbrainz"),
+            _ => {
+                crate::net::circuit_mark_failed("listenbrainz");
+            }
+        }
+    }
+
     /// Scrobble a full listen to Last.fm so its playcount grows too. Best-effort
     /// (fails silently on auth/config problems - session() logs the issue).
     /// Callers should only invoke this when the user opted into lastfmScrobble,

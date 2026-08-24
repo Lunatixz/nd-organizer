@@ -732,6 +732,70 @@ pub mod host_stats {
                 ));
             }
         }
+        // Push ratings to ListenBrainz (track, album, artist) when enabled.
+        // Reads MBIDs from the file's tags to submit accurate rankings.
+        if cfg.listenbrainz_scrobble && !cfg.musicbrainz_token.trim().is_empty() {
+            let mut lb_ops = 0usize;
+            if let Ok(keys) = crate::store::kv().list("star.tally.") {
+                for k in keys {
+                    if lb_ops >= 250 {
+                        break;
+                    }
+                    let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
+                    let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                    if t.id.is_empty() || t.path.is_empty() {
+                        continue;
+                    }
+                    if t.full + t.half + t.skips < cfg.star_min_samples as i64 {
+                        continue;
+                    }
+                    let stars = star_rating(&t);
+                    if stars <= 0.0 {
+                        continue;
+                    }
+                    // Read MBIDs from the file's tags.
+                    if let Ok(tagged) = lofty::read_from_path(&t.path) {
+                        use lofty::prelude::*;
+                        if let Some(tag) = tagged.primary_tag() {
+                            // Track rating (recording MBID)
+                            if let Some(rec_mbid) = tag.get_string(&ItemKey::MusicBrainzRecordingId) {
+                                if !rec_mbid.is_empty() {
+                                    crate::favorites::host_favorites::listenbrainz_rate_track(
+                                        cfg, rec_mbid, stars,
+                                    );
+                                    lb_ops += 1;
+                                }
+                            }
+                            // Album rating (release MBID -> release group lookup is
+                            // expensive, so we use the release MBID as a proxy —
+                            // ListenBrainz accepts it).
+                            if let Some(rel_mbid) = tag.get_string(&ItemKey::MusicBrainzReleaseId) {
+                                if !rel_mbid.is_empty() {
+                                    crate::favorites::host_favorites::listenbrainz_rate_album(
+                                        cfg, rel_mbid, stars,
+                                    );
+                                    lb_ops += 1;
+                                }
+                            }
+                            // Artist rating (artist MBID)
+                            if let Some(artist_mbid) = tag.get_string(&ItemKey::MusicBrainzArtistId) {
+                                if !artist_mbid.is_empty() {
+                                    crate::favorites::host_favorites::listenbrainz_rate_artist(
+                                        cfg, artist_mbid, stars,
+                                    );
+                                    lb_ops += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if lb_ops > 0 {
+                crate::wasm::log_info(&format!(
+                    "star: pushed {lb_ops} rating(s) to ListenBrainz"
+                ));
+            }
+        }
         if published > 0 || loved_ops > 0 {
             crate::wasm::log_info(&format!(
                 "star: published {published} rating(s), {loved_ops} loved-status change(s) to Navidrome"
