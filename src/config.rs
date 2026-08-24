@@ -151,10 +151,9 @@ pub struct Config {
     /// Last.fm (double counting). Needs Last.fm auth (session key).
     pub lastfm_scrobble: bool,
     /// Scrobble full listens to ListenBrainz (MusicBrainz ecosystem). Keep
-    /// OFF if Navidrome already scrobbles via ListenBrainz.
+    /// OFF if Navidrome already scrobbles via ListenBrainz. Uses the same
+    /// token as musicbrainzToken (MusicBrainz ecosystem, same account).
     pub listenbrainz_scrobble: bool,
-    /// ListenBrainz write token for API auth.
-    pub listenbrainz_token: String,
     /// Seed a track's playcount baseline from Last.fm on first observation.
     pub lastfm_import_playcount: bool,
     /// When set, the next run pass rolls back that run's changes instead of
@@ -305,6 +304,8 @@ pub struct Config {
     // AudioMuse-AI
     pub audiomuse_url: String,
     pub audiomuse_token: String,
+    /// URL of the Essentia genre/mood analysis sidecar (fallback when AudioMuse is unreachable).
+    pub essentia_url: String,
     pub notify_audiomuse_after_run: bool,
     pub write_acoustic_tags: bool,
 
@@ -346,7 +347,6 @@ impl Default for Config {
             loved_threshold_stars: 3.0,
             lastfm_scrobble: false,
             listenbrainz_scrobble: false,
-            listenbrainz_token: String::new(),
             lastfm_import_playcount: false,
     rollback_run_id: String::new(),
             log_webhook_url: "http://nd-organizer-webhook:8099".into(),
@@ -426,6 +426,7 @@ impl Default for Config {
             lidarr_force_search_incomplete: false,
             use_lidarr_naming_schema: false,
             audiomuse_url: String::new(),
+            essentia_url: String::new(),
             audiomuse_token: String::new(),
             notify_audiomuse_after_run: true,
             write_acoustic_tags: false,
@@ -475,7 +476,6 @@ impl Config {
             "lovedThresholdStars",
             "lastfmScrobble",
             "listenbrainzScrobble",
-            "listenbrainzToken",
             "lastfmImportPlaycount",
             "rollbackRunId",
             "logWebhookUrl",
@@ -559,6 +559,7 @@ impl Config {
             "lidarrForceSearchIncomplete",
             "useLidarrNamingSchema",
             "audiomuseUrl",
+            "essentiaUrl",
             "audiomuseToken",
             "notifyAudiomuseAfterRun",
             "writeAcousticTags",
@@ -695,9 +696,6 @@ impl Config {
         }
         c.lastfm_scrobble = bool(map, "lastfmScrobble", c.lastfm_scrobble);
         c.listenbrainz_scrobble = bool(map, "listenbrainzScrobble", c.listenbrainz_scrobble);
-        if let Some(v) = map.get("listenbrainzToken") {
-            c.listenbrainz_token = v.trim().to_string();
-        }
         c.lastfm_import_playcount = bool(map, "lastfmImportPlaycount", c.lastfm_import_playcount);
         if let Some(v) = map.get("soundtrackFolder") {
             c.soundtrack_folder = v.clone();
@@ -862,6 +860,9 @@ impl Config {
         c.use_lidarr_naming_schema = bool(map, "useLidarrNamingSchema", c.use_lidarr_naming_schema);
         if let Some(v) = map.get("audiomuseUrl") {
             c.audiomuse_url = v.clone();
+        if let Some(v) = map.get("essentiaUrl") {
+            c.essentia_url = v.trim().to_string();
+        }
         }
         if let Some(v) = map.get("audiomuseToken") {
             c.audiomuse_token = v.clone();

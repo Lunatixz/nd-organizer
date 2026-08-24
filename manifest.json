@@ -869,11 +869,11 @@
           "default": false,
           "description": "Scrobble full listens (>= starFullPlayPercent) to ListenBrainz (MusicBrainz ecosystem). Keep OFF if Navidrome already scrobbles via ListenBrainz. Needs listenbrainzToken."
         },
-        "listenbrainzToken": {
+        "essentiaUrl": {
           "type": "string",
-          "title": "ListenBrainz write token",
+          "title": "Essentia analysis URL",
           "default": "",
-          "description": "ListenBrainz API write token for scrobbling. Get from https://listenbrainz.org/settings."
+          "description": "URL of the Essentia genre/mood sidecar (e.g. http://nd-organizer-essentia:8080 on the shared network). When set, acts as a fallback when AudioMuse is unreachable. Leave empty to skip."
         }
       },
       "required": [
@@ -1262,13 +1262,6 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/listenbrainzToken",
-              "options": {
-                "format": "password"
-              }
-            },
-            {
-              "type": "Control",
               "scope": "#/properties/lastfmImportPlaycount"
             },
             {
@@ -1354,6 +1347,10 @@
                   "scope": "#/properties/writeAcousticTags"
                 }
               ]
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/essentiaUrl"
             }
           ]
         },

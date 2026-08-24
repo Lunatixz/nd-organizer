@@ -411,7 +411,7 @@ pub mod host_favorites {
         album: &str,
         ts: i64,
     ) {
-        let token = cfg.listenbrainz_token.trim();
+        let token = cfg.musicbrainz_token.trim();
         if token.is_empty() {
             return;
         }

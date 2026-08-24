@@ -243,7 +243,7 @@ def sidecar_logs_html():
 def radio_html():
     """Internet radio panel: existing stations + AJAX search/add/remove/rename.
     All operations use fetch() so the page never reloads."""
-    health = _fetch_json("nd-organizer-radio", 8100, "/health", _sidecar_status, timeout=1.5)
+    health = _fetch_json("nd-organizer-radio", 8100, "/health", _sidecar_status, timeout=3)
     if health is None:
         return ""
     out = "<div class='card now'><h2>Internet radio <span class='tag mode'>radio sidecar</span></h2>"
@@ -350,7 +350,7 @@ def delete_playlist(filename):
 
 def playlist_html():
     """Smart Playlist panel: list existing + create new / deploy presets."""
-    out = "<div class='card now'><h2>Smart Playlists <span class='tag mode'>nsp</span></h2>"
+    out = "<div class='card now'><h2>Smart Playlists</h2>"
     pl = list_playlists()
     rows = ""
     for p in pl[:30]:

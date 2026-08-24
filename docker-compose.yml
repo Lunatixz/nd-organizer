@@ -154,6 +154,25 @@ services:
   #   networks:
   #     - stack_network
 
+  # ===== Essentia (OPTIONAL - genre/mood ML analysis, AudioMuse fallback) =====
+  # When AudioMuse-AI is down, the plugin falls back to this service for
+  # genre/mood analysis using Essentia ML models (Discogs-400 + MTG-Jamendo).
+  # Requires ~100MB disk for models + 2-4GB RAM during analysis.
+  # After first start, run `docker exec nd-organizer-essentia python -c "import essentia"`.
+  # If Essentia isn't installed, the sidecar returns empty predictions (fail-soft).
+  # nd-organizer-essentia:
+  #   image: ghcr.io/lunatixz/nd-organizer/essentia:latest
+  #   container_name: nd-organizer-essentia
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8101:8101"
+  #   environment:
+  #     - WEBHOOK_URL=http://nd-organizer-webhook:8099
+  #   volumes:
+  #     - /path/to/music:/music:ro
+  #   networks:
+  #     - stack_network
+
   octo-fiesta:
     image: ghcr.io/v1ck3s/octo-fiesta
     container_name: octo-fiesta
@@ -257,6 +276,7 @@ services:
       # (octoFiestaUrl / octoFiestaProvider), reported in status POSTs. Only the
       # docker-log container name stays here (it's infrastructure, not a URL).
       - OCTO_FIESTA_CONTAINER=octo-fiesta
+      - PLAYLIST_DIR=/data/playlists
     networks:
       - stack_network
     # The dashboard pulls each sidecar's /logs by container name (same
