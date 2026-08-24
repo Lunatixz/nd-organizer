@@ -1102,10 +1102,6 @@
               "scope": "#/properties/autoTagFromMB"
             },
             {
-              "type": "Control",
-              "scope": "#/properties/writeReplayGain"
-            },
-            {
               "type": "HorizontalLayout",
               "elements": [
                 {
