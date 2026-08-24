@@ -1,3 +1,5 @@
+![PseudoTV Live](https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/landscape.png)
+
 # nd-organizer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
