@@ -138,18 +138,18 @@ services:
   # Requires ~100MB disk for models + 2-4GB RAM during analysis.
   # After first start, run `docker exec nd-organizer-essentia python -c "import essentia"`.
   # If Essentia isn't installed, the sidecar returns empty predictions (fail-soft).
-  # nd-organizer-essentia:
-  #   image: ghcr.io/lunatixz/nd-organizer/essentia:latest
-  #   container_name: nd-organizer-essentia
-  #   restart: unless-stopped
-  #   ports:
-  #     - "8101:8101"
-  #   environment:
-  #     - WEBHOOK_URL=http://nd-organizer-webhook:8099
-  #   volumes:
-  #     - /path/to/music:/music:ro
-  #   networks:
-  #     - stack_network
+  nd-organizer-essentia:
+    image: ghcr.io/lunatixz/nd-organizer/essentia:latest
+    container_name: nd-organizer-essentia
+    restart: unless-stopped
+    ports:
+      - "8101:8101"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099
+    volumes:
+      - /path/to/music:/music:ro
+    networks:
+      - stack_network
 
   octo-fiesta:
     image: ghcr.io/v1ck3s/octo-fiesta
