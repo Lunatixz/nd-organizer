@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libessentia-dev ffmpeg libavcodec-dev && \
+    ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswresample-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
