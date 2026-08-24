@@ -1,2 +1,2 @@
-essentia-tensorflow>=2.1
+essentia-tensorflow
 numpy
