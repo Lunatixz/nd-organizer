@@ -349,6 +349,10 @@ pub(crate) mod wasm {
                             0
                         };
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
+                        // Pull star ratings from Navidrome before publishing
+                        // outward, so manually-set ratings in the UI are
+                        // captured into the plugin DB first.
+                        let _pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
                         let ratings = crate::stats::host_stats::publish_star_ratings(&cfg).unwrap_or(0);
                         let meta_writes = crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0);
                         let top_rated: Vec<serde_json::Value> = crate::stats::host_stats::top_rated(12)
@@ -925,7 +929,7 @@ pub(crate) mod wasm {
             w.push("acoustidApiKey is empty but acoustidMode is enabled".into());
         }
         if cfg.verify_identity && cfg.acoustid_url.trim().is_empty() {
-            w.push("verifyIdentity is on but acoustidUrl is empty - files without an MBID/ISRC cannot be verified and will be left in place. Deploy the AcoustID sidecar (acoustid/) and set its URL.".into());
+            w.push("verifyIdentity is on but acoustidUrl is empty - files without an MBID/ISRC cannot be verified and will be routed to Singles. Deploy the AcoustID sidecar (acoustid/) and set its URL.".into());
         }
         if cfg.write_playcount
             && (cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty())

@@ -342,6 +342,71 @@ pub mod host_lidarr {
             Err(e) => Err(e),
         }
     }
+
+    /// Write a user rating (0.0-5.0) to a Lidarr album. Requires the album
+    /// id (from `find_album`). Best-effort — never fails the run.
+    pub fn set_album_rating(cfg: &Config, album_id: i64, rating: f64) -> Result<(), String> {
+        let base = base_url(cfg);
+        let url = format!("{base}/api/v1/album/{album_id}");
+        let body = serde_json::json!({
+            "ratings": { "value": (rating * 10.0).round() / 10.0 }
+        });
+        match lidarr_send(cfg, "PUT", url, body.to_string().into_bytes()) {
+            Ok(Some(resp)) if resp.status_code < 300 => Ok(()),
+            Ok(Some(resp)) => Err(format!("Lidarr setRating returned HTTP {}", resp.status_code)),
+            Ok(None) => Err("no response".into()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Write a user rating (0.0-5.0) to a Lidarr track. Looks up the track
+    /// by album + title, then PUTs the rating. Best-effort — never fails the
+    /// run. Returns the track id on success.
+    pub fn set_track_rating(
+        cfg: &Config,
+        album: &str,
+        artist: &str,
+        title: &str,
+        rating: f64,
+    ) -> Result<Option<i64>, String> {
+        let Some(a) = find_album(cfg, album, artist) else {
+            return Ok(None);
+        };
+        if a.id <= 0 {
+            return Ok(None);
+        }
+        let base = base_url(cfg);
+        let url = format!("{base}/api/v1/track?albumId={}", a.id);
+        let tracks = match lidarr_send(cfg, "GET", url, vec![]) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                serde_json::from_slice::<Value>(&resp.body)
+                    .ok()
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default()
+            }
+            _ => return Ok(None),
+        };
+        let track = tracks.iter().find(|t| {
+            t.get("title")
+                .and_then(|t| t.as_str())
+                .map(|t| t.eq_ignore_ascii_case(title))
+                .unwrap_or(false)
+        });
+        let track_id = match track.and_then(|t| t.get("id")).and_then(|id| id.as_i64()) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let body = serde_json::json!({
+            "ratings": { "value": (rating * 10.0).round() / 10.0 }
+        });
+        let put_url = format!("{base}/api/v1/track/{track_id}");
+        match lidarr_send(cfg, "PUT", put_url, body.to_string().into_bytes()) {
+            Ok(Some(resp)) if resp.status_code < 300 => Ok(Some(track_id)),
+            Ok(Some(resp)) => Err(format!("Lidarr track setRating returned HTTP {}", resp.status_code)),
+            Ok(None) => Err("no response".into()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]

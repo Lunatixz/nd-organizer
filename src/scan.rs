@@ -514,7 +514,6 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     // AcoustID (giving an album MBID to group by) or left unverified.
     let total_files = entries.len();
     let mut verified: Vec<(String, TrackTags)> = Vec::new();
-    let mut unverified = 0usize;
     if cfg.verify_identity {
         for (rel, t) in entries {
             // AcoustID dropped mid-batch: pause now; verified files still get
@@ -560,26 +559,16 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
                         verified.push((rel, t2));
                     }
                     None => {
-                        if cfg.skip_unverified {
-                            unverified += 1;
-                        } else {
-                            // skipUnverified off: still organize by tag/folder
-                            // heuristics (pairing is less certain, but nothing
-                            // is left stranded).
-                            verified.push((rel, t));
-                        }
+                        // Unverified: organize into Singles folder by tag
+                        // heuristics instead of leaving in place. The
+                        // organizer routes these to {albumArtist}/Singles/.
+                        verified.push((rel, t));
                     }
                 }
             }
         }
     } else {
         verified = entries;
-    }
-
-    if unverified > 0 {
-        crate::wasm::log_info(&format!(
-            "library {library_id}: {unverified} files could not be verified (no MBID/ISRC/AcoustID); left in place"
-        ));
     }
 
     // Report files across the library that share an audio fingerprint (size +
@@ -960,6 +949,15 @@ let mut total_to_move = 0usize;
                     "text": format!("moved {} -> {}", m.from, m.to),
                 }));
             }
+            // Trigger an early Navidrome scan right after moves so the player
+            // can access new files immediately, before slow tag writes (artwork,
+            // lyrics, acoustic) complete. The later scan (after tags) will pick
+            // up the final metadata.
+            if cfg.scan_after_album {
+                if let Err(e) = crate::wasm::trigger_navidrome_scan(cfg) {
+                    crate::wasm::log_warn(&format!("early scan trigger failed: {e}"));
+                }
+            }
             // Record each move so the run can be rolled back.
             let run_id = crate::wasm::current_run_id(library_id)?;
             // Back up the album's current album.nfo (if any) BEFORE we rewrite it,
@@ -1042,10 +1040,22 @@ let mut total_to_move = 0usize;
                     }));
                 }
             }
-            // Scan as we go so the player never points at moved files or stale
-            // tags (scanAfterAlbum = after moves; scanAfterTagWrite = tag/NFO
-            // writes too).
-            if cfg.scan_after_album || cfg.scan_after_tag_write {
+            // Essentia genre/mood: fetch from the Essentia sidecar and write
+            // genres (when genreFrom=essentia) and mood (fallback when AudioMuse
+            // didn't provide it). Requires essentiaUrl to be set.
+            if cfg.genre_from == "essentia" && !cfg.essentia_url.trim().is_empty() {
+                let n = crate::stats::host_stats::write_essentia_genres(cfg, &root, &plan, &files);
+                if n > 0 {
+                    actions.push(serde_json::json!({
+                        "ts": crate::state::now_ts(),
+                        "text": format!("essentia genres: {n} track(s) tagged"),
+                    }));
+                }
+            }
+            // Scan after tag writes (artwork, lyrics, acoustic tags, essentia)
+            // to pick up the final metadata. The early scan (scanAfterAlbum)
+            // already made files accessible to the player.
+            if cfg.scan_after_tag_write {
                 if let Err(e) = crate::wasm::trigger_navidrome_scan(cfg) {
                     crate::wasm::log_warn(&format!("scan trigger failed: {e}"));
                 }
@@ -1063,10 +1073,13 @@ let mut total_to_move = 0usize;
             }
             // Keep Lidarr's DB in sync after we move files for this album
             // (only in metadataPlusRescan mode, and once per artist per 5 min).
+            // Also refresh the SOURCE artist when files move between different
+            // artists, so Lidarr prunes stale paths from the old location.
             if cfg.lidarr_mode == crate::config::LidarrMode::MetadataPlusRescan
                 && !cfg.lidarr_url.trim().is_empty()
                 && !cfg.lidarr_api_key.trim().is_empty()
             {
+                // Refresh destination artist.
                 if let Some(lidar) =
                     crate::lidarr::host_lidarr::find_album(cfg, &info.album, &info.album_artist)
                 {
@@ -1083,6 +1096,41 @@ let mut total_to_move = 0usize;
                                 }));
                             }
                             Err(e) => crate::wasm::log_warn(&format!("Lidarr RefreshArtist failed: {e}")),
+                        }
+                    }
+                }
+                // When files move between different artists (e.g., compilation
+                // split), also refresh the source artists so Lidarr prunes the
+                // old paths. Only needed when distinct artists differ from the
+                // album artist.
+                for src_artist in &info.distinct_artists {
+                    if src_artist.eq_ignore_ascii_case(&info.album_artist) {
+                        continue;
+                    }
+                    if let Some(src_album) = crate::lidarr::host_lidarr::find_album(
+                        cfg,
+                        &info.album,
+                        src_artist,
+                    ) {
+                        if crate::net::throttle(
+                            &format!("lidarr-refresh-{}", src_album.artist_id),
+                            300_000,
+                        ) {
+                            match crate::lidarr::host_lidarr::refresh_artist(cfg, src_album.artist_id) {
+                                Ok(()) => {
+                                    crate::wasm::log_info(&format!(
+                                        "Lidarr: RefreshArtist submitted for source artist {}",
+                                        src_album.artist
+                                    ));
+                                    actions.push(serde_json::json!({
+                                        "ts": crate::state::now_ts(),
+                                        "text": format!("lidarr: RefreshArtist for source artist {}", src_album.artist),
+                                    }));
+                                }
+                                Err(e) => crate::wasm::log_warn(&format!(
+                                    "Lidarr RefreshArtist (source) failed: {e}"
+                                )),
+                            }
                         }
                     }
                 }
@@ -1361,7 +1409,7 @@ fn group_report(plan: &crate::organizer::GroupPlan, dry: bool) -> String {
         }
     }
     for p in &plan.unverified {
-        s.push_str(&format!("    - {p}  --  unverified (no MBID/ISRC); not moved. Set up AcoustID to identify it.\n"));
+        s.push_str(&format!("    - {p}  --  unverified (no MBID/ISRC); routed to Singles folder.\n"));
     }
     for (path, reason) in &plan.skipped {
         s.push_str(&format!("    - {path}  --  {reason}\n"));

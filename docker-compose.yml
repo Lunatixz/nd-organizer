@@ -132,28 +132,6 @@ services:
   #   networks:
   #     - stack_network
 
-  # ===== AudioMuse-AI MusicServer (OPTIONAL - Subsonic music server) =====
-  # A Subsonic/OpenSubsonic music server showcasing AudioMuse-AI's sonic
-  # analysis - an optional alternative to Navidrome (or run both side by side).
-  # Commented out by default. Uncomment to use:
-  #   - web UI:      http://<your-nas>:3000
-  #   - Subsonic API http://<your-nas>:8080/rest/  (first login admin/admin)
-  #   - mount the SAME library paths Navidrome uses, then add them in the UI
-  #     (admin tab) and start the scan. Configure AudioMuse-AI's URL in the
-  #     admin tab to enable the sonic features.
-  # audiomuse:
-  #   image: ghcr.io/neptunehub/audiomuse-ai-musicserver:latest
-  #   container_name: audiomuse
-  #   restart: unless-stopped
-  #   ports:
-  #     - "3000:3000"   # web UI
-  #     - "8080:8080"   # Open Subsonic API
-  #   volumes:
-  #     - /path/to/music:/music        # same library as Navidrome
-  #     - ./audiomuse-ms-config:/config  # DB + settings persist here
-  #   networks:
-  #     - stack_network
-
   # ===== Essentia (OPTIONAL - genre/mood ML analysis, AudioMuse fallback) =====
   # When AudioMuse-AI is down, the plugin falls back to this service for
   # genre/mood analysis using Essentia ML models (Discogs-400 + MTG-Jamendo).

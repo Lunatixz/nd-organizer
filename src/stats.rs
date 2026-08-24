@@ -650,12 +650,179 @@ pub mod host_stats {
                 }
             }
         }
+        // Push ratings to Lidarr (album + track) when enabled. Only for
+        // Lidarr-tracked artists; best-effort, never fails the run.
+        if cfg.rating_sync_write_to_lidarr
+            && !cfg.lidarr_url.trim().is_empty()
+            && !cfg.lidarr_api_key.trim().is_empty()
+        {
+            let mut lidarr_album_ops = 0usize;
+            let mut lidarr_track_ops = 0usize;
+            if let Ok(keys) = crate::store::kv().list("star.tally.") {
+                for k in keys {
+                    if lidarr_track_ops >= 250 {
+                        break;
+                    }
+                    let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
+                    let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                    if t.id.is_empty() || t.path.is_empty() {
+                        continue;
+                    }
+                    if t.full + t.half + t.skips < cfg.star_min_samples as i64 {
+                        continue;
+                    }
+                    let stars = star_rating(&t);
+                    if stars <= 0.0 {
+                        continue;
+                    }
+                    // Push track rating.
+                    if !t.artist.is_empty() && !t.title.is_empty() {
+                        // Extract album name from the path (parent dir name).
+                        let album_name = std::path::Path::new(&t.path)
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if !album_name.is_empty() {
+                            match crate::lidarr::host_lidarr::set_track_rating(
+                                cfg, &album_name, &t.artist, &t.title, stars,
+                            ) {
+                                Ok(Some(_)) => lidarr_track_ops += 1,
+                                Ok(None) => {} // track not in Lidarr
+                                Err(e) => crate::wasm::log_warn(&format!(
+                                    "Lidarr track setRating {} - {}: {e}",
+                                    t.artist, t.title
+                                )),
+                            }
+                        }
+                    }
+                    // Push album rating (average of track ratings in this album).
+                    let album_dir = std::path::Path::new(&t.path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !album_dir.is_empty() && !t.artist.is_empty() {
+                        let album_name = std::path::Path::new(&album_dir)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if !album_name.is_empty() {
+                            if let Some(album_stars) = album_rating_for(&album_dir, None) {
+                                if let Some(album) = crate::lidarr::host_lidarr::find_album(
+                                    cfg, &album_name, &t.artist,
+                                ) {
+                                    match crate::lidarr::host_lidarr::set_album_rating(
+                                        cfg, album.id, album_stars,
+                                    ) {
+                                        Ok(()) => lidarr_album_ops += 1,
+                                        Err(e) => crate::wasm::log_warn(&format!(
+                                            "Lidarr album setRating {} - {}: {e}",
+                                            t.artist, album_name
+                                        )),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if lidarr_album_ops > 0 || lidarr_track_ops > 0 {
+                crate::wasm::log_info(&format!(
+                    "star: pushed {lidarr_track_ops} track(s), {lidarr_album_ops} album(s) to Lidarr"
+                ));
+            }
+        }
         if published > 0 || loved_ops > 0 {
             crate::wasm::log_info(&format!(
                 "star: published {published} rating(s), {loved_ops} loved-status change(s) to Navidrome"
             ));
         }
         Ok(published)
+    }
+
+    /// Pull star ratings from Navidrome (setRating) into the plugin DB.
+    /// Reads getStarred2 to find rated/loved tracks, then seeds the plugin's
+    /// StarTally with the external rating when no local data exists yet.
+    /// Useful when ratings were set manually in Navidrome's UI or another
+    /// Subsonic client. Returns how many tracks were seeded.
+    pub fn pull_navidrome_ratings(cfg: &Config) -> Result<usize, String> {
+        use crate::config::Mode;
+        if !cfg.rating_sync_pull_from_navidrome || cfg.mode != Mode::Apply {
+            return Ok(0);
+        }
+        let user = crate::wasm::scan_user(cfg);
+        if user.is_empty() {
+            return Ok(0);
+        }
+        let uri = format!("getStarred2?u={user}");
+        let json = host::subsonicapi::call(&uri).map_err(|e| e.to_string())?;
+        let songs = crate::favorites::parse_starred(&json);
+        let mut seeded = 0usize;
+        for song in &songs {
+            // Find the file by its Navidrome id (we need the path to look up
+            // the tally). The starred list doesn't include the path, so we
+            // search for it via search3.
+            if song.title.is_empty() || song.artist.is_empty() {
+                continue;
+            }
+            let search_uri = format!(
+                "search3?query={}&songCount=1&u={user}",
+                crate::favorites::host_favorites::urlencode(&format!("{} {}", song.artist, song.title))
+            );
+            let search_json = match host::subsonicapi::call(&search_uri) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            let results = crate::favorites::parse_starred(&search_json);
+            let found = results.iter().find(|s| crate::favorites::same_track(
+                &song.title, &song.artist, &song.mbid, s,
+            ));
+            // We need the file path from the song id — look it up via
+            // getSong with the id to get the path.
+            let song_id = match found {
+                Some(s) if !s.id.is_empty() => &s.id,
+                _ => continue,
+            };
+            let song_uri = format!("getSong?id={song_id}&u={user}");
+            let song_json = match host::subsonicapi::call(&song_uri) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            let path = extract_path_from_song(&song_json);
+            let Some(path) = path else { continue };
+            // Only seed when the plugin has no local data yet.
+            let existing = load_star(&path);
+            if existing.is_some() {
+                continue;
+            }
+            let mut t = StarTally {
+                path: path.clone(),
+                id: song_id.to_string(),
+                title: song.title.clone(),
+                artist: song.artist.clone(),
+                ..Default::default()
+            };
+            // Check if this song has a rating (star/unstar implies loved, but
+            // getStarred2 doesn't carry the numeric rating — we treat starred
+            // as loved = 3 stars baseline).
+            t.loved = true;
+            t = seed_initial_rating(t, 0, true);
+            save_star(&t);
+            seeded += 1;
+        }
+        if seeded > 0 {
+            crate::wasm::log_info(&format!(
+                "star: pulled {seeded} rating(s) from Navidrome into plugin DB"
+            ));
+        }
+        Ok(seeded)
+    }
+
+    fn extract_path_from_song(json: &str) -> Option<String> {
+        let v: Value = serde_json::from_str(json).ok()?;
+        v.pointer("/subsonic-response/song/path")
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string())
     }
 
     /// Cumulative play/skip counters + how many distinct songs are tracked.
@@ -904,6 +1071,115 @@ pub mod host_stats {
             Err(e) => Err(e.to_string()),
         }
     }
+
+    /// Fetch genre/mood predictions from the Essentia sidecar and write them
+    /// to each track's GENRE and MOOD tags. Called when genreFrom == "essentia".
+    /// Also writes mood as a fallback when AudioMuse didn't provide it.
+    /// Returns the count of files whose tags were actually modified.
+    pub fn write_essentia_genres(
+        cfg: &crate::config::Config,
+        root: &std::path::Path,
+        _plan: &crate::organizer::GroupPlan,
+        files: &[(String, crate::tags::TrackTags)],
+    ) -> usize {
+        let base = cfg.essentia_url.trim().trim_end_matches('/');
+        if base.is_empty() {
+            return 0;
+        }
+        let mut written = 0usize;
+        for (rel, _ft) in files {
+            let abs = root.join(rel);
+            let path_str = abs.to_string_lossy().to_string();
+            let cache_key = format!("essentia:{}", path_str);
+            // Check cache first (7-day TTL).
+            if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&v) {
+                    if write_essentia_tags(&abs, &val, cfg.overwrite_existing_tags) {
+                        written += 1;
+                    }
+                }
+                continue;
+            }
+            let body = serde_json::json!({"path": &path_str, "genres": true, "moods": true});
+            let mut headers = std::collections::HashMap::new();
+            headers.insert("Content-Type".into(), "application/json".into());
+            let req = host::http::HTTPRequest {
+                method: "POST".into(),
+                url: format!("{base}/analyze"),
+                headers,
+                no_follow_redirects: false,
+                body: body.to_string().into_bytes(),
+                timeout_ms: 20_000,
+            };
+            match host::http::send(req) {
+                Ok(Some(resp)) if resp.status_code == 200 => {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                        let _ = crate::store::kv().set_with_ttl(
+                            &cache_key,
+                            serde_json::to_vec(&val).unwrap_or_default(),
+                            7 * 24 * 3600,
+                        );
+                        if write_essentia_tags(&abs, &val, cfg.overwrite_existing_tags) {
+                            written += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        written
+    }
+}
+
+/// Write Essentia-predicted genres and mood to a file's tags. Returns true
+/// when at least one tag was modified.
+fn write_essentia_tags(path: &std::path::Path, data: &serde_json::Value, overwrite: bool) -> bool {
+    use lofty::prelude::*;
+    let Ok(mut tagged) = lofty::read_from_path(path) else {
+        return false;
+    };
+    let mut tag = match tagged.primary_tag() {
+        Some(t) => t.to_owned(),
+        None => return false,
+    };
+    let mut changed = false;
+    // Genres: semicolon-separated from Essentia's top predictions.
+    if let Some(genres) = data.get("genres").and_then(|g| g.as_array()) {
+        let genre_str: String = genres
+            .iter()
+            .filter_map(|g| g.get("name").and_then(|n| n.as_str()))
+            .filter(|n| !n.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !genre_str.is_empty() {
+            let existing = tag.get_string(&ItemKey::Genre).unwrap_or("");
+            if crate::tags::should_write(existing, &genre_str, overwrite) {
+                tag.insert_text(ItemKey::Genre, genre_str);
+                changed = true;
+            }
+        }
+    }
+    // Mood: only set when empty (don't overwrite AudioMuse's mood).
+    if let Some(moods) = data.get("moods").and_then(|m| m.as_array()) {
+        let mood_str: String = moods
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+            .filter(|n| !n.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !mood_str.is_empty() {
+            let existing = tag.get_string(&ItemKey::Unknown("MOOD".into())).unwrap_or("");
+            if existing.is_empty() {
+                tag.insert_text(ItemKey::Unknown("MOOD".into()), mood_str);
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return false;
+    }
+    let _ = tagged.insert_tag(tag);
+    crate::tags::save_tagged_atomic(&tagged, path).is_ok()
 }
 
 #[cfg(test)]

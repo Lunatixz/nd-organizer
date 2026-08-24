@@ -1,5 +1,11 @@
 # nd-organizer
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.75+-orange.svg)](https://www.rust-lang.org/)
+[![Navidrome](https://img.shields.io/badge/Navidrome-Plugin-green.svg)](https://www.navidrome.org/)
+[![Docker](https://img.shields.io/badge/Docker-Sidecars-blue.svg)](docker-compose.yml)
+[![GitHub release](https://img.shields.io/github/v/release/lunatixz/nd-organizer)](https://github.com/lunatixz/nd-organizer/releases)
+
 A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged as
 `.ndp`) that organizes your music library — slowly and accurately:
 
@@ -9,8 +15,8 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   as one album instead of a pile of "singles".
 - **Identity verification before anything moves**: files with no reliable ID
   (MBID/ISRC) are fingerprinted via an **AcoustID sidecar** (Docker) so a song
-  is only paired to an album when it's actually identified. Anything still
-  unverifiable is left in place and reported.
+  is only paired to an album when it's actually identified. Unverified files
+  are routed to the artist's Singles folder.
 - **Classifies albums** (Soundtrack > Various Artist > Singles > Normal) and
   renames folders/files to your schemas:
   - Soundtracks → `Various Artist/Sound Tracks/{album} ({year})`
@@ -72,7 +78,7 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
    slow-and-accurate, not repeated.
 2. **Verify** — files with a MusicBrainz ID or ISRC are verified. Files without
    one are fingerprinted via the AcoustID sidecar to obtain an album MBID.
-   Files that still can't be identified are left in place (reported).
+   Files that still can't be identified are routed to Singles (reported).
 3. **Group** — verified files are grouped into albums by album MBID, or by
    album artist + album + year. Files with no usable tags fall back to
    **filename parsing** (`parseFilenames`), and files sharing an audio
@@ -136,6 +142,32 @@ granularity:
 - The **dry-run report** previews each tracked file's current stars + playcount,
   so you see exactly what an apply run would publish.
 
+## Rating sync (multi-source)
+
+Ratings and loved/favorite status stay in sync across all configured sources:
+
+| Source | Read | Write | Config |
+|--------|------|-------|--------|
+| **Navidrome** (Subsonic) | Stars + setRating | setRating + star/unstar | always (hub) |
+| **Last.fm** | Loved tracks + playcount | track.love | `favoritesSyncLastfm` |
+| **Lidarr** | Track + album ratings | Track + album ratings | `ratingSyncWriteToLidarr` |
+| **Plugin DB** | Star tally (canonical) | — | `starTallyEnabled` |
+
+**How it works:**
+- The plugin DB is the **canonical source** — it has the most granular data
+  (play/skip ratio, half-star precision).
+- **Initial seed**: when a track is first observed, the highest external rating
+  wins (Lidarr > Last.fm > Navidrome playcount mapping).
+- **Ongoing**: the plugin's computed rating propagates outward on every stats
+  pass — to Navidrome (`setRating` + `star`/`unstar`) and optionally to
+  Lidarr (track + album ratings).
+- **Pull from Navidrome**: `ratingSyncPullFromNavidrome` imports ratings set
+  manually in Navidrome's UI into the plugin DB.
+- **Loved = OR**: if any source says loved, mark as loved. Unlove is only
+  propagated via Navidrome unstar (additive-only for Last.fm).
+- **Conflict resolution**: higher rating wins on initial import; after that,
+  the plugin DB value propagates outward.
+
 ## Docker setup (docker-compose)
 
 The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
@@ -149,7 +181,6 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
 | `ghcr.io/lunatixz/nd-organizer/radio:latest` | Internet radio sidecar (based on WB2024/Add-Navidrome-Radios) — search the Radio-Browser community DB and add stations straight into Navidrome's `radio` table (no restart). The webhook dashboard has a Radio panel. |
-| `ghcr.io/neptunehub/audiomuse-ai-musicserver:latest` | Optional Subsonic music server (third-party, AGPL-3.0) — an open-source alternative to Navidrome showcasing AudioMuse-AI's sonic analysis. Web UI `:3000`, Open Subsonic API `:8080`. **Commented out** in the compose. |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
 The compose files reference the published GHCR images — `docker compose up`
@@ -292,28 +323,6 @@ services:
   #     - audiomuse-temp-worker:/app/temp_audio
   #   depends_on:
   #     - audiomuse-postgres
-  #   networks:
-  #     - stack_network
-
-  # ===== AudioMuse-AI MusicServer (OPTIONAL - Subsonic music server) =====
-  # A Subsonic/OpenSubsonic music server showcasing AudioMuse-AI's sonic
-  # analysis - an optional alternative to Navidrome (or run both side by side).
-  # Commented out by default. Uncomment to use:
-  #   - web UI:      http://<your-nas>:3000
-  #   - Subsonic API http://<your-nas>:8080/rest/  (first login admin/admin)
-  #   - mount the SAME library paths Navidrome uses, then add them in the UI
-  #     (admin tab) and start the scan. Configure AudioMuse-AI's URL in the
-  #     admin tab to enable the sonic features.
-  # audiomuse:
-  #   image: ghcr.io/neptunehub/audiomuse-ai-musicserver:latest
-  #   container_name: audiomuse
-  #   restart: unless-stopped
-  #   ports:
-  #     - "3000:3000"   # web UI
-  #     - "8080:8080"   # Open Subsonic API
-  #   volumes:
-  #     - /path/to/music:/music        # same library as Navidrome
-  #     - ./audiomuse-ms-config:/config  # DB + settings persist here
   #   networks:
   #     - stack_network
 
@@ -920,9 +929,24 @@ Pushing the tag also re-publishes the sidecar Docker images
 
 - AudioMuse-AI acoustic features only exist for tracks it has already analyzed.
 - AcoustID requires the **Docker sidecar** to be reachable; without it, files
-  lacking an MBID/ISRC are left in place (unverified) rather than guessed.
+  lacking an MBID/ISRC are routed to Singles (unverified) rather than guessed.
 - First full scan of a large library takes a while by design (accuracy over
   speed); subsequent passes are incremental.
 - After renames, Navidrome favorites/playcounts survive only if **Persistent
   IDs** are enabled in Navidrome config.
+
+## Sponsor
+
+If this plugin saves you time, consider buying me a coffee. Development and
+maintenance happens in my spare time — your support keeps it going.
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsor-ea4aaa.svg)](https://github.com/sponsors/lunatixz)
+
+## Built with the help of AI
+
+This project was developed with the assistance of an AI coding agent. The
+architecture, code, tests, and documentation were all produced through a
+collaborative process between human intent and machine execution. The result is
+a codebase that's been reviewed, tested, and shipped — the AI didn't just
+generate code, it helped build a product.
 

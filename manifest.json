@@ -439,7 +439,7 @@
           "type": "boolean",
           "title": "Skip unverified tracks",
           "default": true,
-          "description": "Never tag or rename files that fail verification. When off, unverified files are still organized by their tag/folder metadata and listed in the report."
+          "description": "When on, files that fail identity verification are routed to the artist's Singles folder instead of being left in place. When off, unverified files are organized by their tag/folder metadata."
         },
         "acoustidMode": {
           "type": "string",
@@ -545,9 +545,13 @@
             {
               "const": "lastfm",
               "title": "Last.fm"
+            },
+            {
+              "const": "essentia",
+              "title": "Essentia (ML audio analysis)"
             }
           ],
-          "description": "Where genres come from: 'musicbrainz', 'tags', or 'both'."
+          "description": "Where genres come from: 'musicbrainz', 'lastfm', or 'essentia' (ML audio analysis, requires essentiaUrl)."
         },
         "overwriteExistingTags": {
           "type": "boolean",
@@ -862,6 +866,18 @@
           "minimum": 1,
           "maximum": 5,
           "description": "Tracks rated at or above this star value are marked as loved/favorite (Navidrome star + LOVED tag)."
+        },
+        "ratingSyncWriteToLidarr": {
+          "type": "boolean",
+          "title": "Push ratings to Lidarr",
+          "default": false,
+          "description": "Push computed star ratings (track + album) to Lidarr when publishing to Navidrome. Only works for Lidarr-tracked artists. Requires lidarrUrl + lidarrApiKey."
+        },
+        "ratingSyncPullFromNavidrome": {
+          "type": "boolean",
+          "title": "Pull ratings from Navidrome",
+          "default": false,
+          "description": "Import star ratings from Navidrome (set via Subsonic clients) into the plugin DB on each stats pass. Useful when ratings were set manually in the UI."
         },
         "listenbrainzScrobble": {
           "type": "boolean",
@@ -1467,6 +1483,14 @@
             {
               "type": "Control",
               "scope": "#/properties/writePlaycount"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/ratingSyncWriteToLidarr"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/ratingSyncPullFromNavidrome"
             }
           ]
         },

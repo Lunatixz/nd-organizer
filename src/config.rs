@@ -146,6 +146,13 @@ pub struct Config {
     pub star_min_samples: i32,
     /// Tracks rated at or above this star value are marked loved/favorite.
     pub loved_threshold_stars: f64,
+    /// Push plugin star ratings to Lidarr when publishing to Navidrome.
+    /// Requires lidarrUrl + lidarrApiKey. Only works for tracked artists.
+    pub rating_sync_write_to_lidarr: bool,
+    /// Pull star ratings from Navidrome (setRating) into the plugin DB on
+    /// startup. Useful when ratings were set manually in Navidrome's UI or
+    /// another Subsonic client.
+    pub rating_sync_pull_from_navidrome: bool,
     /// Scrobble full listens (>= starFullPlayPercent) to Last.fm so its
     /// playcount grows too. Keep OFF if Navidrome already scrobbles to
     /// Last.fm (double counting). Needs Last.fm auth (session key).
@@ -345,6 +352,8 @@ impl Default for Config {
             star_ignore_percent: 5,
             star_min_samples: 3,
             loved_threshold_stars: 3.0,
+            rating_sync_write_to_lidarr: false,
+            rating_sync_pull_from_navidrome: false,
             lastfm_scrobble: false,
             listenbrainz_scrobble: false,
             lastfm_import_playcount: false,
@@ -695,6 +704,8 @@ impl Config {
             }
         }
         c.lastfm_scrobble = bool(map, "lastfmScrobble", c.lastfm_scrobble);
+        c.rating_sync_write_to_lidarr = bool(map, "ratingSyncWriteToLidarr", c.rating_sync_write_to_lidarr);
+        c.rating_sync_pull_from_navidrome = bool(map, "ratingSyncPullFromNavidrome", c.rating_sync_pull_from_navidrome);
         c.listenbrainz_scrobble = bool(map, "listenbrainzScrobble", c.listenbrainz_scrobble);
         c.lastfm_import_playcount = bool(map, "lastfmImportPlaycount", c.lastfm_import_playcount);
         if let Some(v) = map.get("soundtrackFolder") {

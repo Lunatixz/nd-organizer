@@ -138,7 +138,7 @@ pub mod host_favorites {
         format!("{:x}", h.finalize())
     }
 
-    fn urlencode(s: &str) -> String {
+    pub(crate) fn urlencode(s: &str) -> String {
         let mut out = String::new();
         for b in s.bytes() {
             match b {
