@@ -1,4 +1,4 @@
-![nd-organizer](https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/banner.png)
+![nd-organizer](https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/landscape.png)
 
 # nd-organizer
 
