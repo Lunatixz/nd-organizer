@@ -103,14 +103,14 @@ jobs:
           if [ "${{ github.ref_type }}" = "tag" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             # Version bump: (re)create the release for THIS version only.
             gh release delete "${{ steps.ver.outputs.tag }}" --yes || true
-            gh release create "${{ steps.ver.outputs.tag }}" dist/*.ndp \
+            gh release create "${{ steps.ver.outputs.tag }}" "dist/nd-organizer-${{ steps.ver.outputs.version }}.ndp" \
               --title "v${{ steps.ver.outputs.version }}" --generate-notes
           else
             # Every commit to main -> update the "latest" release (tag: latest).
-            # The version release (vX.Y.Z) is untouched here.
+            # Only upload the generic nd-organizer.ndp, not the versioned one.
             if gh release view latest >/dev/null 2>&1; then
-              gh release upload latest dist/*.ndp --clobber
+              gh release upload latest dist/nd-organizer.ndp --clobber
             else
-              gh release create latest dist/*.ndp --title "latest" --generate-notes
+              gh release create latest dist/nd-organizer.ndp --title "latest" --generate-notes
             fi
           fi
