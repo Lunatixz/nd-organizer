@@ -2065,7 +2065,7 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
 </style></head><body><div class="wrap">
 <header>
 <h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px">nd-organizer</h1>
-<div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; mode: <b>__MODE__</b> &middot; checked __UPDATED__ &middot; auto-refresh 5s &middot; log: __LOG__</div>
+<div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; mode: <b>__MODE__</b> &middot; checked __UPDATED__ &middot; auto-refresh 30s &middot; log: __LOG__</div>
 </header>
 __BANNER__
 <details class="collapse" open><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
@@ -2099,12 +2099,24 @@ __BANNER__
         if (v === "0") d.open = false;
     });
 })();
-// Silent refresh: every 5s swap in the new content WITHOUT reloading the page,
+// Silent refresh: every 30s swap in the new content WITHOUT reloading the page,
 // so open/closed sections stay open and the page never flashes or jumps.
-// Skips refresh when user is typing in a search/form input.
+// Pauses for 60s after any user interaction (click, scroll, type).
 (function () {
+    var paused = false;
+    var pauseTimer = null;
+    function pauseRefresh() {
+        paused = true;
+        clearTimeout(pauseTimer);
+        pauseTimer = setTimeout(function () { paused = false; }, 60000);
+    }
+    // Pause on any meaningful user interaction
+    document.addEventListener("click", pauseRefresh);
+    document.addEventListener("keydown", pauseRefresh);
+    document.addEventListener("scroll", pauseRefresh);
+    document.addEventListener("focusin", pauseRefresh);
     function refresh() {
-        // Don't refresh while user is typing in any input/textarea
+        if (paused) return;
         var a = document.activeElement;
         if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT")) return;
         fetch(location.href, { headers: { Accept: "text/html" } })
@@ -2126,7 +2138,7 @@ __BANNER__
             })
             .catch(function () {});
     }
-    setInterval(refresh, 5000);
+    setInterval(refresh, 30000);
 })();
 </script>
 </body></html>"""
