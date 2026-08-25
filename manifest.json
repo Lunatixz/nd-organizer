@@ -701,7 +701,8 @@
         "audiomuseUrl": {
           "type": "string",
           "title": "AudioMuse-AI URL",
-          "description": "Base URL of your self-hosted AudioMuse-AI instance (github.com/NeptuneHub/AudioMuse-AI), e.g. http://audiomuse-ai-flask-app:8000 on the shared Docker network. Prefer the container name over a static IP so it survives container recreates. Used for the connectivity check and to trigger analysis after renames."
+          "default": "http://audiomuse-ai-flask-app:8000",
+          "description": "AudioMuse-AI instance URL. Default is http://audiomuse-ai-flask-app:8000 (Docker container name). Empty disables acoustic analysis."
         },
         "audiomuseToken": {
           "type": "string",
@@ -753,8 +754,8 @@
         "octoFiestaUrl": {
           "type": "string",
           "title": "Octo-Fiesta proxy URL",
-          "default": "",
-          "description": "URL of the octo-fiesta Subsonic proxy (e.g. http://octo-fiesta:8080 on the shared Docker network). The webhook dashboard reads this from the plugin status to probe its health. Leave empty to hide the octo-fiesta card."
+          "default": "http://octo-fiesta:8080",
+          "description": "Octo-Fiesta missing-track proxy URL. Default is http://octo-fiesta:8080 (Docker container name). The webhook dashboard reads this to probe health. Leave empty to hide the octo-fiesta card."
         },
         "octoFiestaProvider": {
           "type": "string",
@@ -889,8 +890,8 @@
         "essentiaUrl": {
           "type": "string",
           "title": "Essentia analysis URL",
-          "default": "",
-          "description": "URL of the Essentia genre/mood sidecar (e.g. http://nd-organizer-essentia:8080 on the shared network). When set, acts as a fallback when AudioMuse is unreachable. Leave empty to skip."
+          "default": "http://nd-organizer-essentia:8080",
+          "description": "Essentia genre/mood ML sidecar URL. Default is http://nd-organizer-essentia:8080 (Docker container name). Acts as fallback when AudioMuse is unreachable, or primary source when genreFrom=essentia."
         }
       },
       "required": [

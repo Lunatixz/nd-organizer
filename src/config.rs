@@ -360,7 +360,7 @@ impl Default for Config {
     rollback_run_id: String::new(),
             log_webhook_url: "http://nd-organizer-webhook:8099".into(),
             log_webhook_token: String::new(),
-            octo_fiesta_url: String::new(),
+            octo_fiesta_url: "http://octo-fiesta:8080".into(),
             octo_fiesta_provider: "SquidWTF".into(),
             persistence_backend: "host".into(),
             persistence_url: "http://nd-organizer-mysql:8098".into(),
@@ -428,14 +428,14 @@ impl Default for Config {
             artwork_booklet: false,
             download_lyrics: false,
             lyrics_format: "lrc".into(),
-            lidarr_url: String::new(),
+            lidarr_url: "http://lidarr:8686".into(),
             lidarr_api_key: String::new(),
             lidarr_mode: LidarrMode::Disabled,
             write_tags_for_tracked: false,
             lidarr_force_search_incomplete: false,
             use_lidarr_naming_schema: false,
-            audiomuse_url: String::new(),
-            essentia_url: String::new(),
+            audiomuse_url: "http://audiomuse-ai-flask-app:8000".into(),
+            essentia_url: "http://nd-organizer-essentia:8080".into(),
             audiomuse_token: String::new(),
             notify_audiomuse_after_run: true,
             write_acoustic_tags: false,
@@ -1137,7 +1137,7 @@ mod tests {
         assert_eq!(c.octo_fiesta_url, "http://octo-fiesta:8080");
         assert_eq!(c.octo_fiesta_provider, "Deezer");
         let d = Config::from_map(&HashMap::new());
-        assert_eq!(d.octo_fiesta_url, "");
+        assert_eq!(d.octo_fiesta_url, "http://octo-fiesta:8080");
         assert_eq!(d.octo_fiesta_provider, "SquidWTF");
     }
 
