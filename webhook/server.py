@@ -67,7 +67,7 @@ def _within_budget():
     return _render_deadline == 0.0 or time.time() < _render_deadline
 
 
-def _fetch_json(name, port, path, cache, ttl=30, timeout=1.5):
+def _fetch_json(name, port, path, cache, ttl=30, timeout=1.0):
     now = time.time()
     # Use name+path as cache key so /health and /list don't collide.
     key = "%s%s" % (name, path)
@@ -90,7 +90,7 @@ def _fetch_json(name, port, path, cache, ttl=30, timeout=1.5):
         return None
 
 
-def _fetch_logs(name, port, timeout=1.5):
+def _fetch_logs(name, port, timeout=1.0):
     now = time.time()
     c = _sidecar_logs.get(name)
     if c and now - c[0] < 30:
@@ -1753,7 +1753,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         last_any_request = time.time()
         # Bound the whole render (~3.5s): sidecar probes that run past this are
         # skipped (cached/None) so the page never blocks on unreachable services.
-        _render_deadline = time.time() + 3.5
+        _render_deadline = time.time() + 5.0
         try:
             self._render()
         finally:
