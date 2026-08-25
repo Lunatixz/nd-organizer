@@ -2080,8 +2080,12 @@ __BANNER__
 })();
 // Silent refresh: every 5s swap in the new content WITHOUT reloading the page,
 // so open/closed sections stay open and the page never flashes or jumps.
+// Skips refresh when user is typing in a search/form input.
 (function () {
     function refresh() {
+        // Don't refresh while user is typing in any input/textarea
+        var a = document.activeElement;
+        if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT")) return;
         fetch(location.href, { headers: { Accept: "text/html" } })
             .then(function (r) { return r.text(); })
             .then(function (html) {
