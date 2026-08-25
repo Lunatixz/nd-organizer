@@ -842,7 +842,7 @@ pub(crate) mod wasm {
             arr.push(json!({"name":"AudioMuse-AI","state":"notConfigured","detail":"audiomuseUrl not set"}));
         } else {
             let url = crate::audiomuse::resolve_base(cfg);
-            match probe_ok_timeout("audiomuse-v2", &url, &empty, 20_000, 300) {
+            match probe_ok_timeout("audiomuse-v2", &url, &empty, 20_000, 60) {
                 None => arr.push(json!({"name":"AudioMuse-AI","state":"ok","detail":url})),
                 Some(w) => arr.push(json!({"name":"AudioMuse-AI","state":"unreachable","detail":w})),
             }
