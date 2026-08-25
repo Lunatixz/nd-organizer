@@ -1846,6 +1846,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif mode == "apply":
             banner = ("<div class='banner on'><b>APPLY mode</b> - the plugin may "
                       "move files. Rollback data is kept for every run.</div>")
+        # Sidecar checks FIRST — they're the only network calls, do them
+        # before the budget is consumed by rendering other panels.
+        sidecars_html = sidecar_logs_html()
         albums_html = actions_html()
         rows = ""
         # Render only the most recent entries - iterating all 100k+ events on
@@ -1873,7 +1876,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 .replace("__PLAYLISTS__", playlist_html())
                 .replace("__ALBUMS__", albums_html)
                 .replace("__TASKS__", tasks_html())
-                .replace("__SIDECARS__", sidecar_logs_html())
+                .replace("__SIDECARS__", sidecars_html)
                 .replace("__RECENT__", recent_actions_html())
                 .replace("__ROWS__", rows))
         data = page.encode("utf-8")
