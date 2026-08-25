@@ -717,7 +717,7 @@ pub(crate) mod wasm {
         url: &str,
         headers: &HashMap<String, String>,
     ) -> Option<String> {
-        probe_ok_timeout(key, url, headers, 5_000, 300)
+        probe_ok_timeout(key, url, headers, 5_000, 60)
     }
 
     /// Probe a service URL with an explicit timeout + cache TTL. Slow services
@@ -786,7 +786,7 @@ pub(crate) mod wasm {
     /// so the webhook dashboard can render it. Cached 5 min so it can't hammer
     /// the external APIs (it does real probes + a Last.fm login).
     pub(crate) fn integration_health(cfg: &Config) -> serde_json::Value {
-        crate::net::cached("health", 120, || Some(integration_health_uncached(cfg)))
+        crate::net::cached("health", 60, || Some(integration_health_uncached(cfg)))
             .unwrap_or_else(|| serde_json::json!([]))
     }
 
@@ -848,7 +848,7 @@ pub(crate) mod wasm {
             }
         }
 
-        // 4. MusicBrainz (external API — metadata source, slow at times)
+        // 4. MusicBrainz (external API — metadata source, 1 req/s rate limit)
         {
             let url = "https://musicbrainz.org/ws/2/artist/?query=beatles&limit=1";
             let detail = if cfg.musicbrainz_token.trim().is_empty() {
@@ -858,7 +858,8 @@ pub(crate) mod wasm {
             };
             let mut mb_headers = HashMap::new();
             mb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
-            match probe_ok_timeout("musicbrainz-hc", url, &mb_headers, 20_000, 120) {
+            // Cache 30s — metadata changes, 1 req/s rate limit
+            match probe_ok_timeout("musicbrainz-hc", url, &mb_headers, 15_000, 30) {
                 None => arr.push(json!({"name":"MusicBrainz","state":"ok","detail":detail})),
                 Some(w) => arr.push(json!({"name":"MusicBrainz","state":"unreachable","detail":w})),
             }
@@ -870,7 +871,8 @@ pub(crate) mod wasm {
         } else {
             let mut lb_headers = HashMap::new();
             lb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
-            match probe_ok("listenbrainz", "https://api.listenbrainz.org/1/", &lb_headers) {
+            // Cache 30s — dynamic data
+            match probe_ok_timeout("listenbrainz", "https://api.listenbrainz.org/1/", &lb_headers, 10_000, 30) {
                 None => arr.push(json!({"name":"ListenBrainz","state":"ok","detail":"token set, api reachable"})),
                 Some(w) => arr.push(json!({"name":"ListenBrainz","state":"unreachable","detail":w})),
             }
