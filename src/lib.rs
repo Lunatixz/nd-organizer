@@ -622,6 +622,7 @@ pub(crate) mod wasm {
             "integrations": integration_health(cfg),
             "octoFiestaUrl": cfg.octo_fiesta_url,
             "octoFiestaProvider": cfg.octo_fiesta_provider,
+            "persistenceBackend": cfg.persistence_backend,
             "tasks": task_log(),
         })
         .to_string()
