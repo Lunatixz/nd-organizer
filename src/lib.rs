@@ -785,12 +785,11 @@ pub(crate) mod wasm {
 
         let empty = HashMap::new();
 
-        // 1. Navidrome (we run inside it — always OK)
-        arr.push(json!({"name":"Navidrome","state":"ok","detail":"plugin active"}));
-
-        // 2. AcoustID sidecar (local Docker — fingerprinting)
+        // 1. AcoustID sidecar (local Docker — fingerprinting)
         if cfg.acoustid_url.trim().is_empty() {
-            arr.push(json!({"name":"AcoustID","state":"notConfigured","detail":"acoustidUrl not set"}));
+            arr.push(
+                json!({"name":"AcoustID","state":"notConfigured","detail":"acoustidUrl not set"}),
+            );
         } else {
             let url = format!("{}/health", cfg.acoustid_url.trim_end_matches('/'));
             match probe_ok("acoustid", &url, &empty) {
@@ -799,7 +798,7 @@ pub(crate) mod wasm {
             }
         }
 
-        // 3. Lidarr (local Docker — metadata + ratings)
+        // 2. Lidarr (local Docker — metadata + ratings)
         if cfg.lidarr_url.trim().is_empty() {
             arr.push(json!({"name":"Lidarr","state":"notConfigured","detail":"lidarrUrl not set"}));
         } else {
@@ -827,7 +826,7 @@ pub(crate) mod wasm {
             }
         }
 
-        // 4. AudioMuse-AI (local Docker — acoustic analysis, heavy Flask app)
+        // 3. AudioMuse-AI (local Docker — acoustic analysis, heavy Flask app)
         if cfg.audiomuse_url.trim().is_empty() {
             arr.push(json!({"name":"AudioMuse-AI","state":"notConfigured","detail":"audiomuseUrl not set"}));
         } else {
@@ -838,7 +837,7 @@ pub(crate) mod wasm {
             }
         }
 
-        // 5. MusicBrainz (external API — metadata source, slow at times)
+        // 4. MusicBrainz (external API — metadata source, slow at times)
         {
             let url = "https://musicbrainz.org/ws/2/";
             let detail = if cfg.musicbrainz_token.trim().is_empty() {
@@ -852,7 +851,7 @@ pub(crate) mod wasm {
             }
         }
 
-        // 6. ListenBrainz (external API — scrobble + ratings, same token as MB)
+        // 5. ListenBrainz (external API — scrobble + ratings, same token as MB)
         if cfg.musicbrainz_token.trim().is_empty() {
             arr.push(json!({"name":"ListenBrainz","state":"notConfigured","detail":"set musicbrainzToken"}));
         } else {
@@ -862,7 +861,7 @@ pub(crate) mod wasm {
             }
         }
 
-        // 7. Last.fm (external API — scrobble + favorites)
+        // 6. Last.fm (external API — scrobble + favorites)
         if cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty() {
             arr.push(json!({"name":"Last.fm","state":"notConfigured","detail":"set lastfmApiKey + lastfmUser"}));
         } else if cfg.favorites_sync_lastfm
