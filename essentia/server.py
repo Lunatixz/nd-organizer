@@ -170,6 +170,19 @@ class Handler(BaseHTTPRequestHandler):
                 "uptime": int(time.time() - STARTED),
             })
             return
+        if path == "/status":
+            self._send(200, {
+                "service": SERVICE,
+                "ok": ESSENTIA_AVAILABLE,
+                "uptime": int(time.time() - STARTED),
+                "stats": {
+                    "essentia_loaded": ESSENTIA_AVAILABLE,
+                    "genre_model": GENRE_MODEL is not None,
+                    "mood_model": MOOD_MODEL is not None,
+                    "genre_labels": len(GENRE_LABELS),
+                },
+            })
+            return
         if path == "/logs":
             body = "\n".join(LOG_BUFFER).encode()
             self.send_response(200)

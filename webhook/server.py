@@ -45,11 +45,12 @@ _playback_state = {}  # accumulated playback data across status posts
 # Known sidecars and their HTTP ports, so the dashboard can pull each one's
 # /logs by container name (they must share a Docker network with this webhook).
 SIDECAR_LOG_PORTS = {
+    "nd-organizer-webhook": 8099,
     "nd-organizer-acoustid": 8097,
     "nd-organizer-proxy": 4534,
     "nd-organizer-mysql": 8098,
     "nd-organizer-radio": 8100,
-    "nd-organizer-essentia": 8080,
+    "nd-organizer-essentia": 8101,
 }
 _sidecar_logs = {}  # name -> (fetched_ts, text|None); refreshed every 30s
 _sidecar_status = {}  # name -> (fetched_ts, dict|None)
@@ -1762,6 +1763,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = json.dumps({
                 "ok": True, "service": "nd-organizer-webhook", "port": PORT,
                 "events": len(entries), "log": LOGFILE,
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self._wfile_write(data)
+            return
+        if self.path.startswith("/status"):
+            data = json.dumps({
+                "service": "nd-organizer-webhook",
+                "ok": True,
+                "uptime": int(time.time() - STARTED),
+                "events": len(entries),
+                "log": LOGFILE,
+                "stats": {
+                    "entries": len(entries),
+                    "services": len(services),
+                    "sidecars_known": len(SIDECAR_LOG_PORTS),
+                },
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
