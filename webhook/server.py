@@ -914,7 +914,6 @@ def integrations_html():
     else:
         summary = ""
 
-    cards += service_cards(skip=plugin_names)
     return banner + summary + "<div class='integrations'>%s</div>" % cards
 
 
@@ -2041,7 +2040,9 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px s
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
 .journal{font-size:12px;color:var(--text2);padding:6px 0;border-top:1px solid var(--border);margin-top:8px}
-footer{color:var(--text2);font-size:11px;text-align:center;margin-top:32px;letter-spacing:.3px}
+.footer-art{text-align:center;margin-top:24px;opacity:.8}
+.footer-art img{max-height:80px;width:auto}
+footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;letter-spacing:.3px}
 </style></head><body><div class="wrap">
 <header>
 <h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px">nd-organizer</h1>
@@ -2058,6 +2059,7 @@ __BANNER__
 <details class="collapse"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
 <details class="collapse"><summary>Recent actions</summary><div class="collapse-body">__RECENT__</div></details>
 <details class="collapse"><summary>Activity &amp; reports</summary><div class="collapse-body">__ROWS__</div></details>
+<div class="footer-art"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/footer.png" alt="" style="width:100%;max-width:600px;border-radius:8px;opacity:.6"></div>
 <footer>nd-organizer webhook dashboard</footer>
 </div>
 <script>
