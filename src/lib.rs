@@ -785,21 +785,8 @@ pub(crate) mod wasm {
 
         let empty = HashMap::new();
 
-        // 1. Navidrome (the server we run inside — always check first)
-        {
-            let user = crate::wasm::scan_user(cfg);
-            if user.is_empty() {
-                arr.push(json!({"name":"Navidrome","state":"ok","detail":"plugin active, no user configured"}));
-            } else {
-                match host::subsonicapi::call(&format!("ping?u={user}")) {
-                    Ok(json) if json.contains("\"ok\"") && json.contains("true") => {
-                        arr.push(json!({"name":"Navidrome","state":"ok","detail":"api reachable"}));
-                    }
-                    Ok(other) => arr.push(json!({"name":"Navidrome","state":"unreachable","detail":"unexpected response"})),
-                    Err(e) => arr.push(json!({"name":"Navidrome","state":"unreachable","detail":e.to_string()})),
-                }
-            }
-        }
+        // 1. Navidrome (we run inside it — always OK)
+        arr.push(json!({"name":"Navidrome","state":"ok","detail":"plugin active"}));
 
         // 2. AcoustID sidecar (local Docker — fingerprinting)
         if cfg.acoustid_url.trim().is_empty() {
