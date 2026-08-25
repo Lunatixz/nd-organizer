@@ -1,6 +1,6 @@
 [package]
 name = "nd-organizer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Navidrome plugin that organizes music, refreshes tags/artwork, and triggers rescans"
 license = "GPL-3.0"
