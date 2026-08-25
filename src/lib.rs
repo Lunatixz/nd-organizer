@@ -884,16 +884,16 @@ pub(crate) mod wasm {
         }
 
         // 8. Sidecars (local Docker containers — the plugin's own infrastructure)
+        // Webhook is excluded — if you can see this dashboard, it's running.
         let sidecars = [
-            ("Webhook", 8099),
-            ("Filter Proxy", 4534),
-            ("MySQL", 8098),
-            ("Radio", 8100),
-            ("Essentia", 8080),
+            ("nd-organizer-proxy", "Filter Proxy", 4534),
+            ("nd-organizer-mysql", "MySQL", 8098),
+            ("nd-organizer-radio", "Radio", 8100),
+            ("nd-organizer-essentia", "Essentia", 8101),
         ];
-        for (name, port) in sidecars {
-            let url = format!("http://localhost:{port}/health");
-            match probe_ok(&name.to_lowercase().replace(' ', ""), &url, &empty) {
+        for (container, name, port) in sidecars {
+            let url = format!("http://{container}:{port}/health");
+            match probe_ok(container, &url, &empty) {
                 None => arr.push(json!({"name":name,"state":"ok","detail":format!("port {port}")})),
                 Some(w) => arr.push(json!({"name":name,"state":"unreachable","detail":w})),
             }

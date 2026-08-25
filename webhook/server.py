@@ -45,7 +45,6 @@ _playback_state = {}  # accumulated playback data across status posts
 # Known sidecars and their HTTP ports, so the dashboard can pull each one's
 # /logs by container name (they must share a Docker network with this webhook).
 SIDECAR_LOG_PORTS = {
-    "nd-organizer-webhook": 8099,
     "nd-organizer-acoustid": 8097,
     "nd-organizer-proxy": 4534,
     "nd-organizer-mysql": 8098,
