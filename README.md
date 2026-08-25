@@ -103,6 +103,8 @@ nothing. Review the report/status, then switch to `apply`. If a required
 metadata source (AcoustID / MusicBrainz / Lidarr) is unreachable, the run skips
 and retries later instead of acting on degraded data (`metaGateEnabled`).
 
+![nd-organizer showcase](https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/fanart1.png)
+
 ## Star rating & playcount (0–5.0)
 
 A universal 5-star rating derived from how you actually listen, at half-star

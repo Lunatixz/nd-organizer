@@ -2064,6 +2064,7 @@ a:hover{text-decoration:underline}
 footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;letter-spacing:.3px}
 </style></head><body><div class="wrap">
 <header>
+<div style="text-align:center;margin-bottom:16px"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/banner.png" alt="nd-organizer" style="max-width:100%;height:auto;border-radius:8px;opacity:.9"></div>
 <h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px">nd-organizer</h1>
 <div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; mode: <b>__MODE__</b> &middot; checked __UPDATED__ &middot; auto-refresh 30s &middot; log: __LOG__</div>
 </header>
