@@ -1,4 +1,4 @@
-![PseudoTV Live](https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/landscape.png)
+![nd-organizer](https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/banner.png)
 
 # nd-organizer
 
@@ -102,6 +102,8 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
 nothing. Review the report/status, then switch to `apply`. If a required
 metadata source (AcoustID / MusicBrainz / Lidarr) is unreachable, the run skips
 and retries later instead of acting on degraded data (`metaGateEnabled`).
+
+![Webhook Dashboard](https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/assets1.png)
 
 ## Star rating & playcount (0–5.0)
 

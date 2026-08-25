@@ -40,14 +40,17 @@ PLAYLIST_DIR = os.environ.get("PLAYLIST_DIR", "/data/playlists")
 entries = []  # list of (ts, path, body)
 services = {}  # sidecar name -> last heartbeat unix ts
 last_any_request = time.time()  # webhook's own liveness
+_playback_state = {}  # accumulated playback data across status posts
 
 # Known sidecars and their HTTP ports, so the dashboard can pull each one's
 # /logs by container name (they must share a Docker network with this webhook).
 SIDECAR_LOG_PORTS = {
+    "nd-organizer-webhook": 8099,
     "nd-organizer-acoustid": 8097,
     "nd-organizer-proxy": 4534,
     "nd-organizer-mysql": 8098,
     "nd-organizer-radio": 8100,
+    "nd-organizer-essentia": 8080,
 }
 _sidecar_logs = {}  # name -> (fetched_ts, text|None); refreshed every 30s
 _sidecar_status = {}  # name -> (fetched_ts, dict|None)
@@ -136,13 +139,13 @@ def _fhist_html(st):
 
 
 def _sidecar_card(name, status, logs):
-    """One rich card per sidecar. Unreachable sidecars are hidden entirely so
-    the UI only shows what is actually running."""
-    if status is None and logs is None:
-        return ""
+    """One rich card per sidecar. Unreachable sidecars show as 'OFFLINE' instead
+    of being hidden, so the user sees all services at a glance."""
     short = name.replace("nd-organizer-", "")
     state, state_cls = "OK", "ok"
-    if status:
+    if status is None and logs is None:
+        state, state_cls = "OFFLINE", "bad"
+    elif status:
         if status.get("inUse"):
             state, state_cls = "IN USE", "run"
         elif status.get("service") != name:
@@ -222,9 +225,26 @@ def _fmt_bytes(n):
 def sidecar_logs_html():
     """Fetch each sidecar's /status + /logs (cached 30s) and render rich cards
     so this dashboard is the single UI for the whole project. Unreachable
-    sidecars are hidden entirely."""
+    sidecars show as OFFLINE. MySQL card is hidden when persistenceBackend != mysql."""
+    # Check if MySQL is actually in use by looking at the latest status
+    mysql_in_use = False
+    for _, _, body in reversed(entries):
+        try:
+            j = json.loads(body)
+            if isinstance(j, dict) and j.get("persistenceBackend") == "mysql":
+                mysql_in_use = True
+                break
+        except Exception:
+            continue
     out = []
     for name, port in sorted(SIDECAR_LOG_PORTS.items()):
+        # Hide MySQL card when not configured — show SQLite placeholder instead
+        if name == "nd-organizer-mysql" and not mysql_in_use:
+            out.append(("<div class='sc'><div class='sc-top'><b>MySQL</b>"
+                        "<span class='tag dim'>NOT CONFIGURED</span></div>"
+                        "<div class='sc-stats'><span>backend <b>SQLite (default)</b></span>"
+                        "<span class='dim'>set persistenceBackend=mysql to use MySQL</span></div></div>"))
+            continue
         card = _sidecar_card(name, _fetch_json(name, port, "/status", _sidecar_status), _fetch_logs(name, port))
         if card:
             out.append(card)
@@ -305,20 +325,37 @@ def radio_html():
             "function radioAdd(name,url,hp){"
             "  fetch('/radio-add',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({stations:[{name:name,url:url,homepage:hp||''}]})"
-            "  }).then(function(){location.reload()});"
+            "  }).then(function(){radioRefreshList()});"
             "}"
             "function radioRemove(name,url){"
             "  if(!confirm('Remove '+name+'?'))return;"
             "  fetch('/radio-remove',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({name:name,url:url})"
-            "  }).then(function(){location.reload()});"
+            "  }).then(function(){radioRefreshList()});"
             "}"
             "function radioRename(oldName){"
             "  var nn=prompt('Rename station:',oldName);"
             "  if(!nn||nn===oldName)return;"
             "  fetch('/radio-rename',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({old_name:oldName,new_name:nn})"
-            "  }).then(function(){location.reload()});"
+            "  }).then(function(){radioRefreshList()});"
+            "}"
+            "function radioRefreshList(){"
+            "  fetch('/radio-lookup?type=list',{headers:{'Accept':'application/json'}})"
+            "  .then(function(r){return r.json()}).then(function(d){"
+            "    var el=document.getElementById('radio-stations');"
+            "    if(!el)return;"
+            "    var st=d.stations||[];"
+            "    if(!st.length){el.innerHTML='<div class=\"note\">No stations configured.</div>';return;}"
+            "    var h='<table><tr><th>Name</th><th>URL</th><th></th></tr>';"
+            "    st.forEach(function(s){"
+            "      h+='<tr><td>'+esc(s.name)+'</td><td class=\"dim\">'+esc(s.url)+'</td>"
+            "      <td><button onclick=\"radioRemove(\\''+esc(s.name).replace(/'/g,\"\\\\'\")+'\\',\\''+esc(s.url).replace(/'/g,\"\\\\'\")+'\\')\">x</button> "
+            "      <button onclick=\"radioRename(\\''+esc(s.name).replace(/'/g,\"\\\\'\")+'\\')\">rename</button></td></tr>';"
+            "    });"
+            "    h+='</table>';"
+            "    el.innerHTML=h;"
+            "  }).catch(function(){});"
             "}"
             "</script>")
     out += "</div>"
@@ -464,13 +501,13 @@ def playlist_html():
             "function playlistSave(name,comment,body){"
             "  fetch('/playlist-save',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({name:name,comment:comment,nsp:body})"
-            "  }).then(function(){location.reload()});"
+            "  }).then(function(){radioRefreshList()});"
             "}"
             "function playlistDelete(file){"
             "  if(!confirm('Delete '+file+'?'))return;"
             "  fetch('/playlist-delete',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({file:file})"
-            "  }).then(function(){location.reload()});"
+            "  }).then(function(){radioRefreshList()});"
             "}"
             "function deployPreset(){"
             "  var s=document.getElementById('presetSelect').value;"
@@ -551,20 +588,20 @@ def playlist_html():
             "function radioAdd(name,url,hp){"
             "  fetch('/radio-add',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({stations:[{name:name,url:url,homepage:hp||''}]})"
-            "  }).then(function(){location.reload()});"
+            "  }).then(function(){radioRefreshList()});"
             "}"
             "function radioRemove(name,url){"
             "  if(!confirm('Remove '+name+'?'))return;"
             "  fetch('/radio-remove',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({name:name,url:url})"
-            "  }).then(function(){location.reload()});"
+            "  }).then(function(){radioRefreshList()});"
             "}"
             "function radioRename(oldName){"
             "  var nn=prompt('Rename station:',oldName);"
             "  if(!nn||nn===oldName)return;"
             "  fetch('/radio-rename',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({old_name:oldName,new_name:nn})"
-            "  }).then(function(){location.reload()});"
+            "  }).then(function(){radioRefreshList()});"
             "}"
             "</script>")
     out += "</div>"
@@ -1164,9 +1201,35 @@ def _stars_html(stars):
     return s + " <span class='dim'>%s</span>" % stars
 
 
+def _accumulate_playback(status_j):
+    """Accumulate playback data across multiple status posts so the panel
+    retains history between refreshes."""
+    global _playback_state
+    if not status_j:
+        return
+    # Merge topRated - keep top 20 by rating
+    existing = {t.get("name"): t for t in _playback_state.get("topRated", [])}
+    for t in (status_j.get("topRated") or []):
+        if isinstance(t, dict) and t.get("name"):
+            name = t["name"]
+            if name not in existing or t.get("stars", 0) > existing[name].get("stars", 0):
+                existing[name] = t
+    _playback_state["topRated"] = sorted(existing.values(), key=lambda x: x.get("stars", 0), reverse=True)[:20]
+    # Accumulate filtered items (keep last 50)
+    filtered = _playback_state.get("filtered", [])
+    new_filtered = status_j.get("filtered") or []
+    if new_filtered:
+        filtered = (new_filtered + filtered)[:50]
+        _playback_state["filtered"] = filtered
+    # Accumulate stats
+    _playback_state["plays"] = _playback_state.get("plays", 0) + (status_j.get("playsDelta") or 0)
+    _playback_state["skips"] = _playback_state.get("skips", 0) + (status_j.get("skipsDelta") or 0)
+
+
 def playback_html(status_j):
     """'Playback' panel: what is playing right now, playcounts + star ratings,
-    and what the filter proxy has been filtering/skipping."""
+    and what the filter proxy has been filtering/skipping. Uses accumulated data
+    so the panel retains history between status posts."""
     if not status_j:
         return "<div class='card now'><h2>Playback</h2><div class='note'>Waiting for playback data&hellip;</div></div>"
     out = "<div class='card now'><h2>Playback</h2>"
@@ -1191,13 +1254,14 @@ def playback_html(status_j):
     else:
         out += "<div class='np-head'>Now playing</div><div class='note'>Nothing is playing right now.</div>"
 
-    # Playcounts + star ratings (top tracks by rating).
-    tr = status_j.get("topRated")
-    if isinstance(tr, list) and tr:
+    # Playcounts + star ratings - merge current with accumulated
+    current_tr = {t.get("name"): t for t in (status_j.get("topRated") or []) if isinstance(t, dict)}
+    acc_tr = {t.get("name"): t for t in _playback_state.get("topRated", []) if isinstance(t, dict)}
+    acc_tr.update(current_tr)  # current takes precedence
+    merged_tr = sorted(acc_tr.values(), key=lambda x: x.get("stars", 0), reverse=True)[:10]
+    if merged_tr:
         rows = ""
-        for t in tr[:10]:
-            if not isinstance(t, dict):
-                continue
+        for t in merged_tr:
             rows += ("<div class='tr'><span class='tr-stars'>%s</span>"
                      "<span class='tr-name'>%s</span>"
                      "<span class='dim'>%d plays</span></div>") % (
@@ -1208,12 +1272,12 @@ def playback_html(status_j):
         out += ("<div class='np-head'>Playcounts &amp; star ratings</div>"
                 "<div class='note'>No ratings yet - they build up as music plays.</div>")
 
-    # What the filter proxy has been dropping.
+    # What the filter proxy has been dropping - use accumulated list
     proxy = _fetch_json("nd-organizer-proxy", 4534, "/status", _sidecar_status)
-    filtered = (proxy or {}).get("filtered") or []
+    filtered = (proxy or {}).get("filtered") or _playback_state.get("filtered", [])
     if filtered:
         rows = ""
-        for it in filtered[:10]:
+        for it in filtered[:15]:
             if not isinstance(it, dict):
                 continue
             reason = it.get("reason", "")
@@ -1227,10 +1291,13 @@ def playback_html(status_j):
         out += ("<div class='np-head'>Recently filtered by the proxy</div>"
                 "<div class='note'>Nothing filtered recently.</div>")
 
+    # Cumulative stats
+    plays = status_j.get("plays", 0) or _playback_state.get("plays", 0)
+    skips = status_j.get("skips", 0) or _playback_state.get("skips", 0)
+    ratings = status_j.get("ratings", 0)
     out += ("<div class='sc-stats'><span>plays observed <b>%s</b></span>"
             "<span>skips observed <b>%s</b></span>"
-            "<span>ratings published <b>%s</b></span></div>") % (
-        status_j.get("plays", 0), status_j.get("skips", 0), status_j.get("ratings", 0))
+            "<span>ratings published <b>%s</b></span></div>") % (plays, skips, ratings)
     out += "</div>"
     return out
 
@@ -1499,7 +1566,27 @@ def activity_entry(ts, path, body, fallback_mode):
         if warns:
             detail += ("<div class='warn'><b>Warnings:</b><ul>%s</ul></div>"
                        % "".join("<li>%s</li>" % esc(str(w)) for w in warns))
-        detail += "<details><summary>raw json</summary><pre>%s</pre></details>" % esc(body)
+        # Journal-style summary instead of raw JSON dump
+        journal = []
+        if j.get("runId"):
+            journal.append("run %s" % esc(j["runId"]))
+        if j.get("phase"):
+            journal.append("phase: %s" % esc(j["phase"]))
+        if j.get("batch"):
+            b = j["batch"]
+            if isinstance(b, dict) and b.get("total"):
+                journal.append("batch %d/%d" % (int(b.get("index", 0)) + 1, int(b["total"])))
+        if j.get("totalAlbumsToMove"):
+            journal.append("%s album(s) to move" % j["totalAlbumsToMove"])
+        if j.get("totalFileMoves"):
+            journal.append("%s file move(s)" % j["totalFileMoves"])
+        if j.get("plans"):
+            journal.append("%s plan(s)" % len(j["plans"]))
+        if j.get("actions"):
+            journal.append("%s action(s)" % len(j["actions"]))
+        if journal:
+            detail += "<div class='dim journal'>%s</div>" % " &middot; ".join(journal)
+        detail += "<details><summary>raw</summary><pre>%s</pre></details>" % esc(body)
     else:
         # Plain text / legacy report: label it with the latest known mode.
         if fallback_mode == "dryRun":
@@ -1641,6 +1728,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         entries.append((ts, self.path, body))
         if len(entries) > MAX_ENTRIES:
             del entries[: len(entries) - MAX_ENTRIES]
+        # Accumulate playback data for the Playback panel
+        try:
+            _accumulate_playback(json.loads(body))
+        except Exception:
+            pass
         # Never crash the request on a log-file problem: create the directory if
         # needed and fall back to memory-only if it still can't be written.
         try:
@@ -1807,6 +1899,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>nd-organizer</title>
+<link rel="icon" href="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png">
 <style>
 :root{color-scheme:dark;--bg:#0f1318;--surface:#161b22;--surface2:#1c2128;--border:#2d333b;--border2:#373e47;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--green-bg:rgba(63,185,80,.12);--red:#f85149;--red-bg:rgba(248,81,73,.1);--yellow:#d29922;--yellow-bg:rgba(210,153,34,.1);--blue:#58a6ff;--blue-bg:rgba(88,166,255,.1);--radius:8px;--radius-lg:12px}
 *{box-sizing:border-box}
@@ -1945,6 +2038,7 @@ details summary{cursor:pointer;color:var(--text2);font-size:12px}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px;font:12px/1.5 "SFMono-Regular",Consolas,monospace;color:var(--text);max-height:340px;overflow:auto;margin:8px 0 0}
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
+.journal{font-size:12px;color:var(--text2);padding:6px 0;border-top:1px solid var(--border);margin-top:8px}
 footer{color:var(--text2);font-size:11px;text-align:center;margin-top:32px;letter-spacing:.3px}
 </style></head><body><div class="wrap">
 <header>
