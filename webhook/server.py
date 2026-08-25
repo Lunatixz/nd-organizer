@@ -222,7 +222,7 @@ def _fmt_bytes(n):
 
 
 def sidecar_logs_html():
-    """Fetch each sidecar's /status + /logs (cached 30s) and render rich cards
+    """Fetch each sidecar's /health + /logs (cached 30s) and render rich cards
     so this dashboard is the single UI for the whole project. Unreachable
     sidecars show as OFFLINE. MySQL card is hidden when persistenceBackend != mysql."""
     # Check if MySQL is actually in use by looking at the latest status
@@ -244,7 +244,7 @@ def sidecar_logs_html():
                         "<div class='sc-stats'><span>backend <b>SQLite (default)</b></span>"
                         "<span class='dim'>set persistenceBackend=mysql to use MySQL</span></div></div>"))
             continue
-        card = _sidecar_card(name, _fetch_json(name, port, "/status", _sidecar_status), _fetch_logs(name, port))
+        card = _sidecar_card(name, _fetch_json(name, port, "/health", _sidecar_status), _fetch_logs(name, port))
         if card:
             out.append(card)
     octo = _octo_fiesta_card()
@@ -585,9 +585,12 @@ def playlist_html():
             "  return false;"
             "}"
             "function radioAdd(name,url,hp){"
+            "  var btn=event.target;"
+            "  btn.disabled=true;btn.textContent='Adding...';"
             "  fetch('/radio-add',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({stations:[{name:name,url:url,homepage:hp||''}]})"
-            "  }).then(function(){radioRefreshList()});"
+            "  }).then(function(){radioRefreshList()})"
+            "  .catch(function(){btn.disabled=false;btn.textContent='Add';});"
             "}"
             "function radioRemove(name,url){"
             "  if(!confirm('Remove '+name+'?'))return;"
@@ -2061,8 +2064,8 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px s
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
 .journal{font-size:12px;color:var(--text2);padding:6px 0;border-top:1px solid var(--border);margin-top:8px}
-.footer-art{text-align:center;margin-top:24px;opacity:.8}
-.footer-art img{max-height:80px;width:auto}
+.footer-art{text-align:center;margin-top:24px}
+.footer-art img{width:100%;max-width:700px;height:auto;border-radius:8px}
 footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;letter-spacing:.3px}
 </style></head><body><div class="wrap">
 <header>
@@ -2081,7 +2084,7 @@ __BANNER__
 <details class="collapse"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
 <details class="collapse"><summary>Recent actions</summary><div class="collapse-body">__RECENT__</div></details>
 <details class="collapse"><summary>Activity &amp; reports</summary><div class="collapse-body">__ROWS__</div></details>
-<div class="footer-art"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/footer.png" alt="" style="width:100%;max-width:600px;border-radius:8px;opacity:.6"></div>
+<div class="footer-art"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/footer.png" alt="" style="width:100%;max-width:700px;height:auto;border-radius:8px"></div>
 <footer>nd-organizer webhook dashboard</footer>
 </div>
 <script>

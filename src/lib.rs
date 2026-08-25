@@ -752,18 +752,29 @@ pub(crate) mod wasm {
             // login page) still proves the service is UP and reachable. Only a
             // transport failure (no response / refused / timeout) is "offline".
             Ok(Some(resp)) if resp.status_code < 400 => Ok(()),
+            Ok(Some(resp)) if resp.status_code == 429 => Err(format!("rate limited (HTTP {})", resp.status_code)),
             Ok(Some(resp)) => Err(format!(
                 "unreachable or wrong credentials (HTTP {})",
                 resp.status_code
             )),
             Ok(None) => Err("no response".into()),
-            Err(e) => Err(format!("connection failed: {e}")),
+            Err(e) => {
+                let msg = e.to_string();
+                // EOF = connection closed immediately — likely transient, not permanent failure
+                if msg.contains("EOF") {
+                    Err("transient (EOF, retrying)".into())
+                } else {
+                    Err(format!("connection failed: {e}"))
+                }
+            }
         };
+        // Don't cache transient errors (EOF, rate limit) — retry on next render
+        let cache_ttl_actual = if result.is_err() { 30 } else { cache_ttl };
         let cached = match &result {
             Ok(()) => "ok".to_string(),
             Err(w) => format!("warn:{w}"),
         };
-        let _ = crate::store::kv().set_with_ttl(&cache_key, cached.into_bytes(), cache_ttl);
+        let _ = crate::store::kv().set_with_ttl(&cache_key, cached.into_bytes(), cache_ttl_actual);
         match result {
             Ok(()) => None,
             Err(w) => Some(format!("{key}: {w}")),
@@ -847,7 +858,7 @@ pub(crate) mod wasm {
             };
             let mut mb_headers = HashMap::new();
             mb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
-            match probe_ok_timeout("musicbrainz-hc", url, &mb_headers, 20_000, 600) {
+            match probe_ok_timeout("musicbrainz-hc", url, &mb_headers, 20_000, 120) {
                 None => arr.push(json!({"name":"MusicBrainz","state":"ok","detail":detail})),
                 Some(w) => arr.push(json!({"name":"MusicBrainz","state":"unreachable","detail":w})),
             }
