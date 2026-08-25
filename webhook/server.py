@@ -1921,7 +1921,7 @@ PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>nd-organizer</title>
 <link rel="icon" href="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png">
 <style>
-:root{color-scheme:dark;--bg:#0c1017;--surface:#131920;--surface2:#1a222c;--border:#283040;--border2:#354050;--text:#d0d8e4;--text2:#7a8599;--accent:#6cb4ee;--green:#4ade80;--green-bg:rgba(74,222,128,.1);--red:#f87171;--red-bg:rgba(248,113,113,.1);--yellow:#fbbf24;--yellow-bg:rgba(251,191,36,.1);--blue:#60a5fa;--blue-bg:rgba(96,165,250,.1);--radius:8px;--radius-lg:12px}
+:root{color-scheme:dark;--bg:#0a0e1a;--surface:#111827;--surface2:#1a2332;--border:#1e2d3d;--border2:#2a3a4d;--text:#e2e8f0;--text2:#64748b;--accent:#00d4ff;--green:#22c55e;--green-bg:rgba(34,197,94,.12);--red:#ef4444;--red-bg:rgba(239,68,68,.1);--yellow:#eab308;--yellow-bg:rgba(234,179,8,.1);--blue:#00d4ff;--blue-bg:rgba(0,212,255,.1);--purple:#a855f7;--purple-bg:rgba(168,85,247,.1);--radius:8px;--radius-lg:12px}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;margin:0;min-height:100vh;-webkit-font-smoothing:antialiased}
 .wrap{max-width:1080px;margin:0 auto;padding:28px 24px 60px}
