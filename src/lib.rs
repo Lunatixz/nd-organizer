@@ -717,7 +717,7 @@ pub(crate) mod wasm {
         url: &str,
         headers: &HashMap<String, String>,
     ) -> Option<String> {
-        probe_ok_timeout(key, url, headers, 5_000, 3600)
+        probe_ok_timeout(key, url, headers, 5_000, 300)
     }
 
     /// Probe a service URL with an explicit timeout + cache TTL. Slow services
@@ -775,7 +775,7 @@ pub(crate) mod wasm {
     /// so the webhook dashboard can render it. Cached 5 min so it can't hammer
     /// the external APIs (it does real probes + a Last.fm login).
     pub(crate) fn integration_health(cfg: &Config) -> serde_json::Value {
-        crate::net::cached("health", 300, || Some(integration_health_uncached(cfg)))
+        crate::net::cached("health", 120, || Some(integration_health_uncached(cfg)))
             .unwrap_or_else(|| serde_json::json!([]))
     }
 
