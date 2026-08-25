@@ -1903,7 +1903,7 @@ PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>nd-organizer</title>
 <link rel="icon" href="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png">
 <style>
-:root{color-scheme:dark;--bg:#0f1318;--surface:#161b22;--surface2:#1c2128;--border:#2d333b;--border2:#373e47;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--green-bg:rgba(63,185,80,.12);--red:#f85149;--red-bg:rgba(248,81,73,.1);--yellow:#d29922;--yellow-bg:rgba(210,153,34,.1);--blue:#58a6ff;--blue-bg:rgba(88,166,255,.1);--radius:8px;--radius-lg:12px}
+:root{color-scheme:dark;--bg:#0c1017;--surface:#131920;--surface2:#1a222c;--border:#283040;--border2:#354050;--text:#d0d8e4;--text2:#7a8599;--accent:#6cb4ee;--green:#4ade80;--green-bg:rgba(74,222,128,.1);--red:#f87171;--red-bg:rgba(248,113,113,.1);--yellow:#fbbf24;--yellow-bg:rgba(251,191,36,.1);--blue:#60a5fa;--blue-bg:rgba(96,165,250,.1);--radius:8px;--radius-lg:12px}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;margin:0;min-height:100vh;-webkit-font-smoothing:antialiased}
 .wrap{max-width:1080px;margin:0 auto;padding:28px 24px 60px}
@@ -2044,7 +2044,7 @@ a:hover{text-decoration:underline}
 footer{color:var(--text2);font-size:11px;text-align:center;margin-top:32px;letter-spacing:.3px}
 </style></head><body><div class="wrap">
 <header>
-<h1><span class="dot"></span>nd-organizer</h1>
+<h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px">nd-organizer</h1>
 <div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; mode: <b>__MODE__</b> &middot; checked __UPDATED__ &middot; auto-refresh 5s &middot; log: __LOG__</div>
 </header>
 __BANNER__
