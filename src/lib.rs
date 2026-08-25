@@ -845,7 +845,9 @@ pub(crate) mod wasm {
             } else {
                 "token set".to_string()
             };
-            match probe_ok_timeout("musicbrainz-hc", url, &empty, 20_000, 600) {
+            let mut mb_headers = HashMap::new();
+            mb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
+            match probe_ok_timeout("musicbrainz-hc", url, &mb_headers, 20_000, 600) {
                 None => arr.push(json!({"name":"MusicBrainz","state":"ok","detail":detail})),
                 Some(w) => arr.push(json!({"name":"MusicBrainz","state":"unreachable","detail":w})),
             }
@@ -855,7 +857,9 @@ pub(crate) mod wasm {
         if cfg.musicbrainz_token.trim().is_empty() {
             arr.push(json!({"name":"ListenBrainz","state":"notConfigured","detail":"set musicbrainzToken"}));
         } else {
-            match probe_ok("listenbrainz", "https://api.listenbrainz.org/1/", &empty) {
+            let mut lb_headers = HashMap::new();
+            lb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
+            match probe_ok("listenbrainz", "https://api.listenbrainz.org/1/", &lb_headers) {
                 None => arr.push(json!({"name":"ListenBrainz","state":"ok","detail":"token set, api reachable"})),
                 Some(w) => arr.push(json!({"name":"ListenBrainz","state":"unreachable","detail":w})),
             }

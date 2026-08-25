@@ -926,11 +926,13 @@ def service_cards(skip=None):
     skip = skip or set()
     now = time.time()
     services["webhook"] = last_any_request
-    display = {"acoustid": "AcoustID", "mysql": "MySQL", "proxy": "Proxy", "webhook": "Webhook"}
+    display = {"acoustid": "AcoustID", "proxy": "Proxy", "webhook": "Webhook"}
     cards = ""
     for name in sorted(services):
         if name.lower() in skip:
             continue
+        if name.lower() == "mysql":
+            continue  # MySQL is handled separately in sidecar_logs_html
         age = max(0, int(now - services[name]))
         if age > 120:
             continue  # no signal in 2 min -> not running, hide it
