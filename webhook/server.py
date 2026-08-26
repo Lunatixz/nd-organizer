@@ -808,7 +808,7 @@ def _probe_ext_api(name, url, cache_ttl=60):
 
 def integrations_html():
     """Render the integrations panel. Combines plugin-reported status with
-    webhook-probed external API health (MusicBrainz, ListenBrainz).
+    webhook-probed external API health (MusicBrainz, ListenBrainz)."""
     found = None
     ts = None
     for _, _, body in reversed(entries):
