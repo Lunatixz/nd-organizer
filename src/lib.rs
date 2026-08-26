@@ -851,7 +851,7 @@ pub(crate) mod wasm {
 
         // 4. MusicBrainz (external API — metadata source, 1 req/s rate limit)
         {
-            let url = "https://musicbrainz.org/ws/2/artist/?query=beatles&limit=1";
+            let url = "https://musicbrainz.org/ws/2/";
             let detail = if cfg.musicbrainz_token.trim().is_empty() {
                 "no token (optional, 1 req/s)".to_string()
             } else {
@@ -859,7 +859,7 @@ pub(crate) mod wasm {
             };
             let mut mb_headers = HashMap::new();
             mb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
-            // Cache 30s — metadata changes, 1 req/s rate limit
+            // Use same probe as actual lookups — cache 30s
             match probe_ok_timeout("musicbrainz-hc", url, &mb_headers, 15_000, 30) {
                 None => arr.push(json!({"name":"MusicBrainz","state":"ok","detail":detail})),
                 Some(w) => arr.push(json!({"name":"MusicBrainz","state":"unreachable","detail":w})),
