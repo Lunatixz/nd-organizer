@@ -42,7 +42,6 @@ entries = []  # list of (ts, path, body)
 services = {}  # sidecar name -> last heartbeat unix ts
 last_any_request = time.time()  # webhook's own liveness
 _playback_state = {}  # accumulated playback data across status posts
-_ext_api_cache = {}  # api_name -> (checked_ts, state, detail)
 
 # Known sidecars and their HTTP ports, so the dashboard can pull each one's
 # /logs by container name (they must share a Docker network with this webhook).
@@ -781,32 +780,6 @@ def esc(s):
 
 # ---------------------------------------------------------------- integrations
 
-def _probe_ext_api(name, url, cache_ttl=60):
-    """Probe an external API (MusicBrainz, ListenBrainz) from the webhook.
-    This runs normal HTTP requests, not WASM sandbox. Cached for cache_ttl seconds."""
-    now = time.time()
-    cached = _ext_api_cache.get(name)
-    if cached and now - cached[0] < cache_ttl:
-        return cached[1], cached[2]
-    if not _within_budget():
-        return cached[1], cached[2] if cached else ("unreachable", "budget exceeded")
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)"
-        })
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status < 400:
-                _ext_api_cache[name] = (now, "ok", "reachable")
-                return "ok", "reachable"
-            else:
-                _ext_api_cache[name] = (now, "unreachable", "HTTP %d" % resp.status)
-                return "unreachable", "HTTP %d" % resp.status
-    except Exception as e:
-        detail = str(e)[:80]
-        _ext_api_cache[name] = (now, "unreachable", detail)
-        return "unreachable", detail
-
-
 def integrations_html():
     """Render the integrations panel. Combines plugin-reported status with
     webhook-probed external API health (MusicBrainz, ListenBrainz)."""
@@ -890,23 +863,11 @@ def integrations_html():
     else:
         summary = ""
 
-    # Probe external APIs directly from the webhook (normal HTTP, not WASM)
-    ext_apis = [
-        ("MusicBrainz", "https://musicbrainz.org/ws/2/"),
-        ("ListenBrainz", "https://api.listenbrainz.org/1/"),
-    ]
-    for api_name, api_url in ext_apis:
-        if any(it.get("name", "").lower() == api_name.lower() for it in (found or [])):
-            continue  # already reported by plugin
-        state, detail = _probe_ext_api(api_name, api_url)
-        cls = state_cls.get(state, "dim")
-        label = state_label.get(state, state.upper())
-        cards += ("<div class='ig'><div class='ig-top'><span class='ig-name'>%s</span>"
-                  "<span class='ig-state %s'>%s</span></div>%s</div>") % (
-            esc(api_name), cls, label,
-            "<span class='dim'>%s</span>" % esc(detail) if detail else "")
+    # External APIs (MusicBrainz, ListenBrainz) are probed only when the
+    # Docker network has outbound internet access. Skip if not reachable.
+    # The plugin handles their actual functionality; health cards are optional.
 
-    return banner + summary + "<div class='integrations'>%s</div>" % cards
+    cards += service_cards(skip=plugin_names)
 
 
 def service_cards(skip=None):
