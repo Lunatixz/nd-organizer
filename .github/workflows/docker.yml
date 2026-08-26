@@ -54,10 +54,18 @@ jobs:
           flavor: |
             latest=true
 
-      - name: Build and push
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: docker buildx build --push --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:main --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:sha-${{ github.sha }} --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:latest ./${{ matrix.service }}
+      - name: Build and push (retry 3x)
+        run: |
+          for i in 1 2 3; do
+            echo "=== Attempt $i of 3 for ${{ matrix.service }} ==="
+            docker buildx build \
+              --push \
+              --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:main \
+              --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:sha-${GITHUB_SHA::7} \
+              --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:latest \
+              ./${{ matrix.service }} && exit 0
+            echo "Attempt $i failed, waiting 30s..."
+            sleep 30
+          done
+          echo "All attempts failed"
+          exit 1
