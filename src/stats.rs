@@ -879,6 +879,48 @@ pub mod host_stats {
                 "star: pulled {seeded} rating(s) from Navidrome into plugin DB"
             ));
         }
+        // Pull loved/hated feedback from ListenBrainz for tracks not yet seeded.
+        if !cfg.musicbrainz_token.trim().is_empty() {
+            let lb_feedback = crate::favorites::host_favorites::listenbrainz_get_feedback(cfg);
+            if !lb_feedback.is_empty() {
+                let mut lb_seeded = 0usize;
+                if let Ok(keys) = crate::store::kv().list("star.tally.") {
+                    // Find existing tallies by MBID to match ListenBrainz feedback.
+                    for k in &keys {
+                        let Ok(Some(v)) = crate::store::kv().get(k) else { continue };
+                        let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
+                        // Already has local data — skip.
+                        if t.full + t.half + t.skips > 0 {
+                            continue;
+                        }
+                        // Read MBID from file tags.
+                        if let Ok(tagged) = lofty::read_from_path(&t.path) {
+                            use lofty::prelude::*;
+                            if let Some(tag) = tagged.primary_tag() {
+                                if let Some(rec_mbid) = tag.get_string(&ItemKey::MusicBrainzRecordingId) {
+                                    if let Some(&score) = lb_feedback.get(rec_mbid) {
+                                        let mut t2 = t.clone();
+                                        if score == 1 {
+                                            t2.loved = true;
+                                        }
+                                        let full = t2.full;
+                                        let loved = t2.loved;
+                                        t2 = seed_initial_rating(t2, full, loved);
+                                        save_star(&t2);
+                                        lb_seeded += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if lb_seeded > 0 {
+                    crate::wasm::log_info(&format!(
+                        "star: seeded {lb_seeded} rating(s) from ListenBrainz feedback"
+                    ));
+                }
+            }
+        }
         Ok(seeded)
     }
 

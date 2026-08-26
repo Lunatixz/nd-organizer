@@ -391,11 +391,25 @@ pub mod host_favorites {
         nav_call(cfg, &format!("star?id={id}")).map(|_| ())
     }
 
+    fn nav_unstar(cfg: &Config, id: &str) -> Result<(), String> {
+        nav_call(cfg, &format!("unstar?id={id}")).map(|_| ())
+    }
+
     fn lastfm_love(cfg: &Config, sk: &str, artist: &str, title: &str) -> Result<(), String> {
         lastfm_post(
             cfg,
             sk,
             "track.love",
+            &[("artist", artist), ("track", title)],
+        )
+        .map(|_| ())
+    }
+
+    fn lastfm_unlove(cfg: &Config, sk: &str, artist: &str, title: &str) -> Result<(), String> {
+        lastfm_post(
+            cfg,
+            sk,
+            "track.unlove",
             &[("artist", artist), ("track", title)],
         )
         .map(|_| ())
@@ -557,6 +571,90 @@ pub mod host_favorites {
         }
     }
 
+    /// Fetch a user's loved/hated feedback from ListenBrainz. Returns a map of
+    /// recording_mbid -> score (1 = loved, -1 = hated).
+    pub(crate) fn listenbrainz_get_feedback(
+        cfg: &Config,
+    ) -> HashMap<String, i32> {
+        let mut result = HashMap::new();
+        let token = cfg.musicbrainz_token.trim();
+        if token.is_empty() {
+            return result;
+        }
+        if !crate::net::circuit_probe(
+            "listenbrainz",
+            "https://api.listenbrainz.org",
+            &HashMap::new(),
+            10_000,
+        ) {
+            return result;
+        }
+        // Fetch loved tracks (score=1)
+        let url = format!(
+            "https://api.listenbrainz.org/1/feedback/user/{}/get-feedback?score=1&count=1000&metadata=true",
+            cfg.lastfm_user
+        );
+        let req = host::http::HTTPRequest {
+            method: "GET".into(),
+            url,
+            headers: HashMap::from([
+                ("Authorization".to_string(), format!("Token {token}")),
+                ("User-Agent".to_string(), "nd-organizer/0.2.0".to_string()),
+            ]),
+            no_follow_redirects: false,
+            body: vec![],
+            timeout_ms: 15_000,
+        };
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                crate::net::circuit_clear("listenbrainz");
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                    if let Some(fb) = val.get("feedback").and_then(|f| f.as_array()) {
+                        for item in fb {
+                            if let Some(mbid) = item.get("recording_mbid").and_then(|m| m.as_str()) {
+                                result.insert(mbid.to_string(), 1);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Some(_)) | Ok(None) | Err(_) => {
+                crate::net::circuit_mark_failed("listenbrainz");
+            }
+        }
+        // Fetch hated tracks (score=-1)
+        let url = format!(
+            "https://api.listenbrainz.org/1/feedback/user/{}/get-feedback?score=-1&count=1000&metadata=true",
+            cfg.lastfm_user
+        );
+        let req = host::http::HTTPRequest {
+            method: "GET".into(),
+            url,
+            headers: HashMap::from([
+                ("Authorization".to_string(), format!("Token {token}")),
+                ("User-Agent".to_string(), "nd-organizer/0.2.0".to_string()),
+            ]),
+            no_follow_redirects: false,
+            body: vec![],
+            timeout_ms: 15_000,
+        };
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                    if let Some(fb) = val.get("feedback").and_then(|f| f.as_array()) {
+                        for item in fb {
+                            if let Some(mbid) = item.get("recording_mbid").and_then(|m| m.as_str()) {
+                                result.insert(mbid.to_string(), -1);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        result
+    }
+
     /// Scrobble a full listen to Last.fm so its playcount grows too. Best-effort
     /// (fails silently on auth/config problems - session() logs the issue).
     /// Callers should only invoke this when the user opted into lastfmScrobble,
@@ -676,9 +774,10 @@ pub mod host_favorites {
         let starred = nav_starred(cfg);
         let loved = lastfm_loved(cfg);
         crate::wasm::log_info(&format!(
-            "favorites sync: {} starred in Navidrome, {} loved on Last.fm",
+            "favorites sync: {} starred in Navidrome, {} loved on Last.fm (bidirectional={})",
             starred.len(),
-            loved.len()
+            loved.len(),
+            cfg.favorites_sync_bidirectional
         ));
 
         // Navidrome -> Last.fm (love what's starred but not loved).
@@ -706,6 +805,34 @@ pub mod host_favorites {
                         "love failed {} - {}: {e}",
                         song.artist, song.title
                     ));
+                }
+            }
+        }
+
+        // Bidirectional: unlove on Last.fm what's no longer starred in Navidrome.
+        if cfg.favorites_sync_bidirectional {
+            for t in loved.iter().take(max) {
+                if starred
+                    .iter()
+                    .any(|s| same_track(&t.title, &t.artist, &t.mbid, s))
+                {
+                    continue;
+                }
+                match lastfm_unlove(cfg, &sk, &t.artist, &t.title) {
+                    Ok(_) => {
+                        summary.nav_to_lastfm += 1;
+                        crate::wasm::log_info(&format!(
+                            "Last.fm unloved: {} - {}",
+                            t.artist, t.title
+                        ));
+                    }
+                    Err(e) => {
+                        summary.errors += 1;
+                        crate::wasm::log_warn(&format!(
+                            "unlove failed {} - {}: {e}",
+                            t.artist, t.title
+                        ));
+                    }
                 }
             }
         }
@@ -738,6 +865,38 @@ pub mod host_favorites {
                 }
             }
         }
+
+        // Bidirectional: unstar in Navidrome what's no longer loved on Last.fm.
+        if cfg.favorites_sync_bidirectional {
+            for song in starred.iter().take(max) {
+                if song.title.trim().is_empty() || song.artist.trim().is_empty() {
+                    continue;
+                }
+                if loved
+                    .iter()
+                    .any(|l| same_track(&l.title, &l.artist, &l.mbid, song))
+                {
+                    continue;
+                }
+                match nav_unstar(cfg, &song.id) {
+                    Ok(_) => {
+                        summary.lastfm_to_nav += 1;
+                        crate::wasm::log_info(&format!(
+                            "Navidrome unstarred: {} - {}",
+                            song.artist, song.title
+                        ));
+                    }
+                    Err(e) => {
+                        summary.errors += 1;
+                        crate::wasm::log_warn(&format!(
+                            "unstar failed {} - {}: {e}",
+                            song.artist, song.title
+                        ));
+                    }
+                }
+            }
+        }
+
         crate::wasm::log_info(&format!(
             "favorites sync done: {}+Navidrome->Last.fm, {}+Last.fm->Navidrome, {} errors",
             summary.nav_to_lastfm, summary.lastfm_to_nav, summary.errors

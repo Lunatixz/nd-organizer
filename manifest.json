@@ -533,6 +533,12 @@
           "default": 500,
           "description": "Maximum number of favorites to process per sync pass (a safety cap)."
         },
+        "favoritesSyncBidirectional": {
+          "type": "boolean",
+          "title": "Bidirectional favorites sync",
+          "default": false,
+          "description": "When on, unstar in Navidrome propagates to unlove on Last.fm and vice versa. When off, sync is additive-only (never removes). Enable if you want both sources to stay perfectly in sync."
+        },
         "genreFrom": {
           "type": "string",
           "title": "Genre source",
@@ -1285,6 +1291,10 @@
             {
               "type": "Control",
               "scope": "#/properties/favoritesSyncMax"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/favoritesSyncBidirectional"
             }
           ]
         },

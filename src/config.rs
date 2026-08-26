@@ -109,6 +109,9 @@ pub struct Config {
     // Favorites sync (Navidrome hub <-> Last.fm loved tracks)
     pub favorites_sync_lastfm: bool,
     pub favorites_sync_max: usize,
+    /// When true, unstar in Navidrome propagates to unlove on Last.fm (and
+    /// vice versa). When false, sync is additive-only (never removes).
+    pub favorites_sync_bidirectional: bool,
 
     // Playback stats (plays/skips weighting + Top Picks playlist)
     pub playback_stats_enabled: bool,
@@ -338,6 +341,7 @@ impl Default for Config {
             run_only_when_idle: true,
             favorites_sync_lastfm: false,
             favorites_sync_max: 500,
+            favorites_sync_bidirectional: false,
             playback_stats_enabled: false,
             stats_poll_minutes: 5,
             top_picks_count: 50,
@@ -663,6 +667,7 @@ impl Config {
         if let Some(v) = map.get("favoritesSyncMax") {
             c.favorites_sync_max = v.trim().parse().unwrap_or(c.favorites_sync_max);
         }
+        c.favorites_sync_bidirectional = bool(map, "favoritesSyncBidirectional", c.favorites_sync_bidirectional);
         c.playback_stats_enabled = bool(map, "playbackStatsEnabled", c.playback_stats_enabled);
         if let Some(v) = map.get("statsPollMinutes") {
             c.stats_poll_minutes = v.trim().parse().unwrap_or(c.stats_poll_minutes);
