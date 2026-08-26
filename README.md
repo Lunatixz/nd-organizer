@@ -72,6 +72,9 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   (`rollbackRunId`, auto-pruned after `rollbackRetentionDays`), metadata-only
   backups, per-run reports + a live status feed with album plans and a rollback
   callout.
+- **Bidirectional sync**: ratings, loved/hearts, and playcounts sync across
+  Navidrome, Last.fm, ListenBrainz, and Lidarr. Album, artist, and track level
+  where supported. See [Rating & Favorites Sync](#rating--favorites-sync) below.
 
 ## How it works (pipeline)
 
@@ -146,31 +149,65 @@ granularity:
 - The **dry-run report** previews each tracked file's current stars + playcount,
   so you see exactly what an apply run would publish.
 
-## Rating sync (multi-source)
+## Rating & Favorites Sync
 
-Ratings and loved/favorite status stay in sync across all configured sources:
+Bidirectional sync across Navidrome, Last.fm, ListenBrainz, and Lidarr.
 
-| Source | Read | Write | Config |
-|--------|------|-------|--------|
-| **Navidrome** (Subsonic) | Stars + setRating | setRating + star/unstar | always (hub) |
-| **Last.fm** | Loved tracks + playcount | track.love | `favoritesSyncLastfm` |
-| **Lidarr** | Track + album ratings | Track + album ratings | `ratingSyncWriteToLidarr` |
-| **Plugin DB** | Star tally (canonical) | — | `starTallyEnabled` |
+### What syncs where
 
-**How it works:**
-- The plugin DB is the **canonical source** — it has the most granular data
-  (play/skip ratio, half-star precision).
-- **Initial seed**: when a track is first observed, the highest external rating
-  wins (Lidarr > Last.fm > Navidrome playcount mapping).
-- **Ongoing**: the plugin's computed rating propagates outward on every stats
-  pass — to Navidrome (`setRating` + `star`/`unstar`) and optionally to
-  Lidarr (track + album ratings).
-- **Pull from Navidrome**: `ratingSyncPullFromNavidrome` imports ratings set
-  manually in Navidrome's UI into the plugin DB.
-- **Loved = OR**: if any source says loved, mark as loved. Unlove is only
-  propagated via Navidrome unstar (additive-only for Last.fm).
-- **Conflict resolution**: higher rating wins on initial import; after that,
-  the plugin DB value propagates outward.
+| Source | Ratings | Loved/Heart | Playcount | Track | Album | Artist |
+|--------|---------|-------------|-----------|-------|-------|--------|
+| **Navidrome** | setRating | star/unstar | observed | ✓ | - | - |
+| **Last.fm** | ✗ | loved tracks | scrobble | ✓ | ✗ | ✗ |
+| **ListenBrainz** | feedback (love/hate) | feedback | scrobble | ✓ | ✗ | ✗ |
+| **Lidarr** | track + album | ✗ | ✗ | ✓ | ✓ | ✗ |
+
+### How it works
+
+**Plugin DB is the canonical source** — it tracks play/skip behavior with half-star precision and publishes outward.
+
+**Inbound (pull into plugin DB):**
+- **Navidrome** starred tracks → seed as 3-star loved (only if no local data yet)
+- **Last.fm** playcount + loved → seed baseline on first sight
+- **ListenBrainz** loved feedback → seed as loved on first sight
+- **Lidarr** track/album rating → seed initial rating (highest concrete wins)
+
+**Outbound (push from plugin DB):**
+- **Navidrome** `setRating` + `star`/`unstar` (every stats pass)
+- **Lidarr** track + album ratings (if `ratingSyncWriteToLidarr`)
+- **ListenBrainz** track/album/artist ratings (if `listenbrainzScrobble`)
+- **Last.fm** scrobble on full plays (if `lastfmScrobble`)
+
+**Bidirectional favorites** (`favoritesSyncBidirectional`):
+- When ON: unstar in Navidrome → unlove on Last.fm (and vice versa)
+- When OFF: additive-only (never removes)
+
+### Config options
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `starTallyEnabled` | true | Master switch for the rating system |
+| `ratingSyncWriteToLidarr` | false | Push ratings to Lidarr (track + album) |
+| `ratingSyncPullFromNavidrome` | false | Import manual ratings from Navidrome UI |
+| `favoritesSyncLastfm` | false | Bidirectional loved sync with Last.fm |
+| `favoritesSyncBidirectional` | false | Propagate unstar/unlove (not just add) |
+| `favoritesSyncMax` | 500 | Max favorites per sync pass |
+| `lastfmScrobble` | false | Scrobble full plays to Last.fm |
+| `listenbrainzScrobble` | false | Scrobble + push ratings to ListenBrainz |
+| `lastfmImportPlaycount` | false | Seed playcount from Last.fm on first sight |
+
+### Conflict resolution
+
+- **First sight**: highest concrete rating wins (Lidarr > Last.fm > playcount mapping)
+- **Ongoing**: plugin DB is authoritative — computed rating propagates outward
+- **Loved = OR**: if any source says loved, mark as loved
+- **ListenBrainz**: uses recording MBID from file tags (must be tagged for track-level sync)
+
+### MusicBrainz note
+
+MusicBrainz has no favorites/ratings API. ListenBrainz is its companion service
+for ratings (same account, same token). Ratings pushed to ListenBrainz appear on
+your MusicBrainz profile.
 
 ## Docker setup (docker-compose)
 
