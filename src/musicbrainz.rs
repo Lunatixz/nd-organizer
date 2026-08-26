@@ -281,3 +281,20 @@ fn parse_release_tracks(v: &Value) -> Vec<MbTrack> {
     }
     out
 }
+
+/// Look up the release_group_mbid from the KVStore cache by release_mbid.
+/// Returns None if not cached. Used by ListenBrainz album rating.
+pub fn release_group_for_release(release_mbid: &str) -> Option<String> {
+    if let Ok(keys) = crate::store::kv().list("mb:") {
+        for k in keys {
+            if let Ok(Some(v)) = crate::store::kv().get(&k) {
+                if let Ok(r) = serde_json::from_slice::<MbRelease>(&v) {
+                    if r.release_mbid == release_mbid && !r.release_group_mbid.is_empty() {
+                        return Some(r.release_group_mbid);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
