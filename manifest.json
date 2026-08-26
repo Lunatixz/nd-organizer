@@ -898,6 +898,30 @@
           "title": "Essentia analysis URL",
           "default": "http://nd-organizer-essentia:8080",
           "description": "Essentia genre/mood ML sidecar URL. Default is http://nd-organizer-essentia:8080 (Docker container name). Acts as fallback when AudioMuse is unreachable, or primary source when genreFrom=essentia."
+        },
+        "discogsToken": {
+          "type": "string",
+          "title": "Discogs personal access token",
+          "default": "",
+          "description": "Discogs API token for fetching release credits (performers, producers, engineers) and community ratings. Get one at https://www.discogs.com/settings/developers"
+        },
+        "discogsCredits": {
+          "type": "boolean",
+          "title": "Fetch credits from Discogs",
+          "default": false,
+          "description": "When enabled, fetches detailed release credits (who played what, produced, engineered) from Discogs and includes them in album.nfo files. Requires discogsToken."
+        },
+        "theAudioDbKey": {
+          "type": "string",
+          "title": "TheAudioDB API key",
+          "default": "",
+          "description": "TheAudioDB public API key for fetching fanart, artist bios, and album descriptions. Get a free key at https://www.theaudiodb.com/api"
+        },
+        "theAudioDbFanart": {
+          "type": "boolean",
+          "title": "Fetch fanart from TheAudioDB",
+          "default": false,
+          "description": "When enabled, fetches artist fanart (backgrounds, banners) and album art from TheAudioDB as additional artwork sources. Requires theAudioDbKey."
         }
       },
       "required": [
@@ -1375,6 +1399,42 @@
             {
               "type": "Control",
               "scope": "#/properties/essentiaUrl"
+            }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Discogs (credits & ratings)",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Fetch detailed release credits (who played what, produced, engineered) and community ratings from Discogs. Enhances album.nfo files with rich metadata."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/discogsToken"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/discogsCredits"
+            }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "TheAudioDB (fanart & bios)",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Fetch artist fanart (backgrounds, banners), album art, and artist biographies from TheAudioDB. Enhances the visual experience in media centers."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/theAudioDbKey"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/theAudioDbFanart"
             }
           ]
         },

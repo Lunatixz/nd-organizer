@@ -13,6 +13,8 @@ mod config;
 mod artwork;
 #[cfg(target_arch = "wasm32")]
 mod audiomuse;
+mod discogs;
+mod theaudiodb;
 mod favorites;
 mod identity;
 mod lidarr;

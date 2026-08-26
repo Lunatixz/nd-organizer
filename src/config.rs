@@ -319,6 +319,14 @@ pub struct Config {
     pub notify_audiomuse_after_run: bool,
     pub write_acoustic_tags: bool,
 
+    // Discogs (credits, release info, community ratings)
+    pub discogs_token: String,
+    pub discogs_credits: bool,
+
+    // TheAudioDB (fanart, artist bios, album descriptions)
+    pub theaudiodb_key: String,
+    pub theaudiodb_fanart: bool,
+
     // Scanning
     pub scan_user: String,
     pub trigger_scan_after_run: bool,
@@ -443,6 +451,10 @@ impl Default for Config {
             audiomuse_token: String::new(),
             notify_audiomuse_after_run: true,
             write_acoustic_tags: false,
+            discogs_token: String::new(),
+            discogs_credits: false,
+            theaudiodb_key: String::new(),
+            theaudiodb_fanart: false,
             scan_user: String::new(),
             trigger_scan_after_run: true,
             scan_after_album: true,
@@ -886,6 +898,14 @@ impl Config {
         c.notify_audiomuse_after_run =
             bool(map, "notifyAudiomuseAfterRun", c.notify_audiomuse_after_run);
         c.write_acoustic_tags = bool(map, "writeAcousticTags", c.write_acoustic_tags);
+        if let Some(v) = map.get("discogsToken") {
+            c.discogs_token = v.clone();
+        }
+        c.discogs_credits = bool(map, "discogsCredits", c.discogs_credits);
+        if let Some(v) = map.get("theAudioDbKey") {
+            c.theaudiodb_key = v.clone();
+        }
+        c.theaudiodb_fanart = bool(map, "theAudioDbFanart", c.theaudiodb_fanart);
         if let Some(v) = map.get("scanUser") {
             c.scan_user = v.clone();
         }
