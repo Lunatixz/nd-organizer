@@ -105,7 +105,7 @@ def is_filler_title(title):
     for k in KEYWORDS:
         if not k:
             continue
-        if t == k or t.startswith(k + " ") or t.endswith(" " + k) or (" " + k + " ") in t:
+        if k in t:
             return True
     return False
 
