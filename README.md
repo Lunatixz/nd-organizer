@@ -159,7 +159,7 @@ Bidirectional sync across Navidrome, Last.fm, ListenBrainz, and Lidarr.
 |--------|---------|-------------|-----------|-------|-------|--------|
 | **Navidrome** | setRating | star/unstar | observed | ✓ | - | - |
 | **Last.fm** | ✗ | loved tracks | scrobble | ✓ | ✗ | ✗ |
-| **ListenBrainz** | feedback (love/hate) | feedback | scrobble | ✓ | ✗ | ✗ |
+| **ListenBrainz** | feedback (0-100) | feedback | scrobble | ✓ | ✗ | ✗ |
 | **Lidarr** | track + album | ✗ | ✗ | ✓ | ✓ | ✗ |
 
 ### How it works
@@ -207,7 +207,8 @@ Bidirectional sync across Navidrome, Last.fm, ListenBrainz, and Lidarr.
 
 MusicBrainz has no favorites/ratings API. ListenBrainz is its companion service
 for ratings (same account, same token). Ratings pushed to ListenBrainz appear on
-your MusicBrainz profile.
+your MusicBrainz profile. The plugin pulls loved/hated feedback from ListenBrainz
+to seed initial ratings.
 
 ## Docker setup (docker-compose)
 
