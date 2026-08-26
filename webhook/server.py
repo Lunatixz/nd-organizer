@@ -31,6 +31,7 @@ log = logging.getLogger("webhook")
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8099
 LOGFILE = sys.argv[2] if len(sys.argv) > 2 else "webhook.log"
+STARTED = time.time()
 
 # Cap how many status events we keep in memory (oldest dropped). Older events
 # stay in webhook.log; the dashboard shows the most recent MAX_ENTRIES.
@@ -286,10 +287,12 @@ def radio_html():
                  " <button class='radio-rn' onclick='radioRename(%s)'>Rename</button>"
                  "</div>") % (n, u, name_json, url_json, name_json)
     out += "<div class='sc-stats'><span>stations <b>%d</b></span></div>" % len(stations)
+    out += "<div class='np-head'>Stations</div><div id='radio-stations'>"
     if rows:
-        out += "<div class='np-head'>Stations</div>" + rows
+        out += rows
     else:
-        out += "<div class='np-head'>Stations</div><div class='note'>None yet — search below.</div>"
+        out += "<div class='note'>None yet — search below.</div>"
+    out += "</div>"
     # --- Search form (AJAX) ---
     out += ("<form class='radio-search' onsubmit='return radioSearch(event)'>"
             "<input type='text' id='radioQ' placeholder='Search name / genre / country' autocomplete='off'>"
@@ -471,10 +474,12 @@ def playlist_html():
         rows += ("<div class='fh'><b>%s</b> <span class='dim'>%s</span>"
                  "<button class='radio-rm' onclick=\"playlistDelete('%s')\">Remove</button></div>") % (nm, cm, fn)
     out += "<div class='sc-stats'><span>playlists <b>%d</b></span></div>" % len(pl)
+    out += "<div class='np-head'>Saved Playlists</div><div id='playlist-list'>"
     if rows:
-        out += "<div class='np-head'>Saved Playlists</div>" + rows
+        out += rows
     else:
-        out += "<div class='np-head'>Saved Playlists</div><div class='note'>None yet — create one or deploy a preset.</div>"
+        out += "<div class='note'>None yet — create one or deploy a preset.</div>"
+    out += "</div>"
     # Preset deploy
     out += ("<div class='np-head'>Presets</div>"
             "<select id='presetSelect' class='radio-search'>"
