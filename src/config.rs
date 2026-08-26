@@ -331,6 +331,9 @@ pub struct Config {
     pub genius_token: String,
     pub genius_lyrics: bool,
 
+    // ListenBrainz username (defaults to lastfmUser if empty)
+    pub listenbrainz_user: String,
+
     // Community ratings (opt-in)
     /// When enabled, community ratings from Discogs and MusicBrainz are used
     /// to seed initial star ratings. When disabled (default), only personal
@@ -467,6 +470,7 @@ impl Default for Config {
             theaudiodb_fanart: false,
             genius_token: String::new(),
             genius_lyrics: false,
+            listenbrainz_user: String::new(),
             use_community_ratings: false,
             scan_user: String::new(),
             trigger_scan_after_run: true,
@@ -606,6 +610,19 @@ impl Config {
             "scanAfterAlbum",
             "scanAfterTagWrite",
             "scanDebounceSeconds",
+            // New metadata sources
+            "discogsToken",
+            "discogsCredits",
+            "theAudioDbKey",
+            "theAudioDbFanart",
+            "geniusToken",
+            "geniusLyrics",
+            // Rating sync
+            "favoritesSyncBidirectional",
+            "ratingSyncWriteToLidarr",
+            "ratingSyncPullFromNavidrome",
+            "useCommunityRatings",
+            "listenbrainzUser",
         ] {
             if let Ok(Some(v)) = nd_pdk::host::config::get(key) {
                 map.insert(key.to_string(), v);
@@ -901,9 +918,9 @@ impl Config {
         c.use_lidarr_naming_schema = bool(map, "useLidarrNamingSchema", c.use_lidarr_naming_schema);
         if let Some(v) = map.get("audiomuseUrl") {
             c.audiomuse_url = v.clone();
+        }
         if let Some(v) = map.get("essentiaUrl") {
             c.essentia_url = v.trim().to_string();
-        }
         }
         if let Some(v) = map.get("audiomuseToken") {
             c.audiomuse_token = v.clone();
@@ -923,6 +940,9 @@ impl Config {
             c.genius_token = v.clone();
         }
         c.genius_lyrics = bool(map, "geniusLyrics", c.genius_lyrics);
+        if let Some(v) = map.get("listenbrainzUser") {
+            c.listenbrainz_user = v.clone();
+        }
         c.use_community_ratings = bool(map, "useCommunityRatings", c.use_community_ratings);
         if let Some(v) = map.get("scanUser") {
             c.scan_user = v.clone();

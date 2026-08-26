@@ -766,17 +766,17 @@ pub mod host_stats {
                                     lb_ops += 1;
                                 }
                             }
-                            // Album rating (release MBID -> release group lookup is
-                            // expensive, so we use the release MBID as a proxy —
-                            // ListenBrainz accepts it).
-                            if let Some(rel_mbid) = tag.get_string(&ItemKey::MusicBrainzReleaseId) {
-                                if !rel_mbid.is_empty() {
-                                    crate::favorites::host_favorites::listenbrainz_rate_album(
-                                        cfg, rel_mbid, stars,
-                                    );
-                                    lb_ops += 1;
-                                }
-                            }
+                            // Album rating requires release_group_mbid which isn't
+                            // stored in file tags — only release_mbid is. Passing
+                            // release_mbid where release_group_mbid is expected
+                            // would cause ListenBrainz to reject it. Skip until
+                            // we can fetch release_group_mbid from MusicBrainz.
+                            // if let Some(rel_mbid) = tag.get_string(&ItemKey::MusicBrainzReleaseId) {
+                            //     if !rel_mbid.is_empty() {
+                            //         crate::favorites::host_favorites::listenbrainz_rate_album(cfg, rel_mbid, stars);
+                            //         lb_ops += 1;
+                            //     }
+                            // }
                             // Artist rating (artist MBID)
                             if let Some(artist_mbid) = tag.get_string(&ItemKey::MusicBrainzArtistId) {
                                 if !artist_mbid.is_empty() {

@@ -590,9 +590,14 @@ pub mod host_favorites {
             return result;
         }
         // Fetch loved tracks (score=1)
+        let lb_user = if cfg.listenbrainz_user.trim().is_empty() {
+            &cfg.lastfm_user
+        } else {
+            &cfg.listenbrainz_user
+        };
         let url = format!(
             "https://api.listenbrainz.org/1/feedback/user/{}/get-feedback?score=1&count=1000&metadata=true",
-            cfg.lastfm_user
+            lb_user
         );
         let req = host::http::HTTPRequest {
             method: "GET".into(),
@@ -625,7 +630,7 @@ pub mod host_favorites {
         // Fetch hated tracks (score=-1)
         let url = format!(
             "https://api.listenbrainz.org/1/feedback/user/{}/get-feedback?score=-1&count=1000&metadata=true",
-            cfg.lastfm_user
+            lb_user
         );
         let req = host::http::HTTPRequest {
             method: "GET".into(),

@@ -869,6 +869,7 @@ def integrations_html():
 
     cards += service_cards(skip=plugin_names)
 
+    return banner + summary + "<div class='integrations'>%s</div>" % cards
 
 def service_cards(skip=None):
     """Sidecar liveness cards (from heartbeats + the webhook's own last
