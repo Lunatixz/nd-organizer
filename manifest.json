@@ -922,6 +922,24 @@
           "title": "Fetch fanart from TheAudioDB",
           "default": false,
           "description": "When enabled, fetches artist fanart (backgrounds, banners) and album art from TheAudioDB as additional artwork sources. Requires theAudioDbKey."
+        },
+        "geniusToken": {
+          "type": "string",
+          "title": "Genius API access token",
+          "default": "",
+          "description": "Genius client access token for fetching lyrics, annotations, and artist backgrounds. Register at https://genius.com/api-clients"
+        },
+        "geniusLyrics": {
+          "type": "boolean",
+          "title": "Fetch lyrics from Genius",
+          "default": false,
+          "description": "When enabled, fetches song lyrics from Genius as a fallback when LRCLIB doesn't have them. Requires geniusToken."
+        },
+        "useCommunityRatings": {
+          "type": "boolean",
+          "title": "Use community ratings for seeding",
+          "default": false,
+          "description": "When enabled, community ratings from Discogs are used to seed initial star ratings. When disabled (default), only personal ratings from Lidarr and your own play/skip behavior are used. Ratings are always personal unless you enable this."
         }
       },
       "required": [
@@ -1440,6 +1458,24 @@
         },
         {
           "type": "Group",
+          "label": "Genius (lyrics & annotations)",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Fetch song lyrics from Genius as a fallback when LRCLIB doesn't have them. Also provides artist backgrounds and song annotations."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/geniusToken"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/geniusLyrics"
+            }
+          ]
+        },
+        {
+          "type": "Group",
           "label": "Filter proxy (playback sidecar)",
           "elements": [
             {
@@ -1559,6 +1595,10 @@
             {
               "type": "Control",
               "scope": "#/properties/ratingSyncPullFromNavidrome"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/useCommunityRatings"
             }
           ]
         },

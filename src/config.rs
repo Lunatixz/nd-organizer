@@ -327,6 +327,16 @@ pub struct Config {
     pub theaudiodb_key: String,
     pub theaudiodb_fanart: bool,
 
+    // Genius (lyrics, annotations, artist backgrounds)
+    pub genius_token: String,
+    pub genius_lyrics: bool,
+
+    // Community ratings (opt-in)
+    /// When enabled, community ratings from Discogs and MusicBrainz are used
+    /// to seed initial star ratings. When disabled (default), only personal
+    /// ratings from Lidarr and the plugin's own play/skip behavior are used.
+    pub use_community_ratings: bool,
+
     // Scanning
     pub scan_user: String,
     pub trigger_scan_after_run: bool,
@@ -455,6 +465,9 @@ impl Default for Config {
             discogs_credits: false,
             theaudiodb_key: String::new(),
             theaudiodb_fanart: false,
+            genius_token: String::new(),
+            genius_lyrics: false,
+            use_community_ratings: false,
             scan_user: String::new(),
             trigger_scan_after_run: true,
             scan_after_album: true,
@@ -906,6 +919,11 @@ impl Config {
             c.theaudiodb_key = v.clone();
         }
         c.theaudiodb_fanart = bool(map, "theAudioDbFanart", c.theaudiodb_fanart);
+        if let Some(v) = map.get("geniusToken") {
+            c.genius_token = v.clone();
+        }
+        c.genius_lyrics = bool(map, "geniusLyrics", c.genius_lyrics);
+        c.use_community_ratings = bool(map, "useCommunityRatings", c.use_community_ratings);
         if let Some(v) = map.get("scanUser") {
             c.scan_user = v.clone();
         }

@@ -15,6 +15,7 @@ mod artwork;
 mod audiomuse;
 mod discogs;
 mod theaudiodb;
+mod genius;
 mod favorites;
 mod identity;
 mod lidarr;
