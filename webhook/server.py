@@ -278,12 +278,13 @@ def radio_html():
     for s in stations[:50]:
         n = esc(s.get("name", "?"))
         u = esc(s.get("url", ""))
-        hn = esc(s.get("name", "")).replace("&", "&amp;").replace("'", "\\'")
-        hu = esc(s.get("url", "")).replace("&", "&amp;").replace("'", "\\'")
+        # Use JSON encoding for safe onclick args (handles quotes, special chars)
+        name_json = json.dumps(s.get("name", "")).replace('"', '&quot;')
+        url_json = json.dumps(s.get("url", "")).replace('"', '&quot;')
         rows += ("<div class='fh'><b>%s</b> <span class='dim'>%s</span>"
-                 " <button class='radio-rm' onclick='radioRemove(\"%s\",\"%s\")'>Remove</button>"
-                 " <button class='radio-rn' onclick='radioRename(\"%s\")'>Rename</button>"
-                 "</div>") % (n, u, hn, hu, hn)
+                 " <button class='radio-rm' onclick='radioRemove(%s,%s)'>Remove</button>"
+                 " <button class='radio-rn' onclick='radioRename(%s)'>Rename</button>"
+                 "</div>") % (n, u, name_json, url_json, name_json)
     out += "<div class='sc-stats'><span>stations <b>%d</b></span></div>" % len(stations)
     if rows:
         out += "<div class='np-head'>Stations</div>" + rows
@@ -340,7 +341,7 @@ def radio_html():
             "  }).then(function(){radioRefreshList()});"
             "}"
             "function radioRefreshList(){"
-            "  fetch('/radio-lookup?type=list',{headers:{'Accept':'application/json'}})"
+            "  fetch('/radio-list',{headers:{'Accept':'application/json'}})"
             "  .then(function(r){return r.json()}).then(function(d){"
             "    var el=document.getElementById('radio-stations');"
             "    if(!el)return;"
@@ -348,9 +349,10 @@ def radio_html():
             "    if(!st.length){el.innerHTML='<div class=\"note\">No stations configured.</div>';return;}"
             "    var h='<table><tr><th>Name</th><th>URL</th><th></th></tr>';"
             "    st.forEach(function(s){"
+            "      var nj=JSON.stringify(s.name);var uj=JSON.stringify(s.url);"
             "      h+='<tr><td>'+esc(s.name)+'</td><td class=\"dim\">'+esc(s.url)+'</td>"
-            "      <td><button onclick=\"radioRemove(\\''+esc(s.name).replace(/'/g,\"\\\\'\")+'\\',\\''+esc(s.url).replace(/'/g,\"\\\\'\")+'\\')\">x</button> "
-            "      <button onclick=\"radioRename(\\''+esc(s.name).replace(/'/g,\"\\\\'\")+'\\')\">rename</button></td></tr>';"
+            "      <td><button onclick=\"radioRemove('+nj+','+uj+')\">x</button> "
+            "      <button onclick=\"radioRename('+nj+')\">rename</button></td></tr>';"
             "    });"
             "    h+='</table>';"
             "    el.innerHTML=h;"
@@ -500,20 +502,41 @@ def playlist_html():
             "function playlistSave(name,comment,body){"
             "  fetch('/playlist-save',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({name:name,comment:comment,nsp:body})"
-            "  }).then(function(){radioRefreshList()});"
+            "  }).then(function(r){return r.json()})"
+            "  .then(function(d){if(!d.ok)alert(d.error||'Save failed');playlistRefreshList();})"
+            "  .catch(function(){alert('Save failed');});"
             "}"
             "function playlistDelete(file){"
             "  if(!confirm('Delete '+file+'?'))return;"
             "  fetch('/playlist-delete',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({file:file})"
-            "  }).then(function(){radioRefreshList()});"
+            "  }).then(function(r){return r.json()})"
+            "  .then(function(d){if(!d.ok)alert(d.error||'Delete failed');playlistRefreshList();})"
+            "  .catch(function(){alert('Delete failed');});"
+            "}"
+            "function playlistRefreshList(){"
+            "  fetch('/playlist-list').then(function(r){return r.json()})"
+            "  .then(function(d){"
+            "    var el=document.getElementById('playlist-list');"
+            "    if(!el)return;"
+            "    var pls=d.playlists||[];"
+            "    if(!pls.length){el.innerHTML='<div class=\"note\">No saved playlists.</div>';return;}"
+            "    var h='<table><tr><th>Name</th><th>Rules</th><th></th></tr>';"
+            "    pls.forEach(function(p){"
+            "      var fn=JSON.stringify(p.filename||p.name);"
+            "      h+='<tr><td>'+esc(p.name||p.filename)+'</td><td class=\"dim\">'+esc((p.comment||'').substring(0,40))+'</td>"
+            "      <td><button onclick=\"playlistDelete('+fn+')\">x</button></td></tr>';"
+            "    });"
+            "    h+='</table>';"
+            "    el.innerHTML=h;"
+            "  }).catch(function(){});"
             "}"
             "function deployPreset(){"
             "  var s=document.getElementById('presetSelect').value;"
             "  if(!s)return;"
             "  fetch('/playlist-presets?action=deploy&name='+encodeURIComponent(s))"
             "    .then(function(r){return r.json()})"
-            "    .then(function(d){alert(d.ok?'Deployed: '+d.filename:d.error);location.reload()})"
+            "    .then(function(d){alert(d.ok?'Deployed: '+d.filename:d.error);playlistRefreshList()})"
             "    .catch(function(){alert('Deploy failed')});"
             "}"
             "function createPlaylist(e){"
@@ -527,82 +550,6 @@ def playlist_html():
             "  var rule={}; rule[field]={}; rule[field][op]=val;"
             "  var nsp={name:n,comment:c,all:[rule]};"
             "  playlistSave(n,c,nsp);"
-            "}"
-            "</script>")
-    out += "</div>"
-    return out
-    st = _fetch_json("nd-organizer-radio", 8100, "/list", _sidecar_status, timeout=5) or {}
-    stations = st.get("stations") or []
-    # --- Station list with Remove + Rename buttons ---
-    rows = ""
-    for s in stations[:50]:
-        n = esc(s.get("name", "?"))
-        u = esc(s.get("url", ""))
-        hn = esc(s.get("name", "")).replace("&", "&amp;").replace("'", "\\'")
-        hu = esc(s.get("url", "")).replace("&", "&amp;").replace("'", "\\'")
-        rows += ("<div class='fh'>"
-                 "<b>%s</b> <span class='dim'>%s</span>"
-                 " <button class='radio-rm' onclick='radioRemove(\"%s\",\"%s\")'>Remove</button>"
-                 " <button class='radio-rn' onclick='radioRename(\"%s\",\"%s\")'>Rename</button>"
-                 "</div>") % (n, u, hn, hu, hn, hu)
-    out += "<div class='sc-stats'><span>stations <b>%d</b></span></div>" % len(stations)
-    if rows:
-        out += "<div class='np-head'>Stations</div>" + rows
-    else:
-        out += ("<div class='np-head'>Stations</div>"
-                "<div class='note'>None yet — search below.</div>")
-    # --- Search form (JavaScript AJAX, no page reload) ---
-    out += ("<form class='radio-search' onsubmit='return radioSearch(event)'>"
-            "<input type='text' id='radioQ' placeholder='Search name / genre / country' autocomplete='off'>"
-            "<select id='radioType'><option value='byname'>Name</option>"
-            "<option value='bytag'>Genre</option>"
-            "<option value='bycountry'>Country</option></select>"
-            "<button type='submit'>Search</button>"
-            "</form>"
-            "<div id='radioResults'></div>")
-    # --- Inline JavaScript ---
-    out += ("<script>"
-            "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;')}"
-            "function radioSearch(e){"
-            "  e.preventDefault();"
-            "  var q=document.getElementById('radioQ').value.trim();"
-            "  var t=document.getElementById('radioType').value;"
-            "  if(!q)return false;"
-            "  var el=document.getElementById('radioResults');"
-            "  el.innerHTML='<div class=\"note\">Searching...</div>';"
-            "  fetch('/radio-lookup?q='+encodeURIComponent(q)+'&type='+encodeURIComponent(t))"
-            "    .then(function(r){return r.json()})"
-            "    .then(function(d){"
-            "      var results=d.results||[];"
-            "      if(!results.length){el.innerHTML='<div class=\"note\">No results for \"'+esc(q)+'\".</div>';return}"
-            "      var h='<div class=\"np-head\">Results</div>';"
-            "      results.slice(0,20).forEach(function(s){"
-            "        h+='<div class=\"fh\"><b>'+esc(s.name||'')+'</b> <span class=\"dim\">'+esc((s.tags||'').substring(0,35))+'</span>'"
-            "          +'<button class=\"radio-rm\" onclick=\"radioAdd(this,\\''+esc(s.name).replace(/'/g,\"\\\\'\")+'\\',\\''+esc(s.url).replace(/'/g,\"\\\\'\")+'\\',\\''+esc(s.homepage||'').replace(/'/g,\"\\\\'\")+'\\')\">Add</button></div>';"
-            "      });"
-            "      el.innerHTML=h;"
-            "    }).catch(function(){el.innerHTML='<div class=\"note\">Search failed.</div>'});"
-            "  return false;"
-            "}"
-            "function radioAdd(btn,name,url,hp){"
-            "  btn.disabled=true;btn.textContent='Adding...';"
-            "  fetch('/radio-add',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "    body:JSON.stringify({stations:[{name:name,url:url,homepage:hp||''}]})"
-            "  }).then(function(){radioRefreshList()})"
-            "  .catch(function(){btn.disabled=false;btn.textContent='Add';});"
-            "}"
-            "function radioRemove(name,url){"
-            "  if(!confirm('Remove '+name+'?'))return;"
-            "  fetch('/radio-remove',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "    body:JSON.stringify({name:name,url:url})"
-            "  }).then(function(){radioRefreshList()});"
-            "}"
-            "function radioRename(oldName){"
-            "  var nn=prompt('Rename station:',oldName);"
-            "  if(!nn||nn===oldName)return;"
-            "  fetch('/radio-rename',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "    body:JSON.stringify({old_name:oldName,new_name:nn})"
-            "  }).then(function(){radioRefreshList()});"
             "}"
             "</script>")
     out += "</div>"
@@ -1792,6 +1739,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self._wfile_write(data)
             return
+        if self.path.startswith("/radio-list"):
+            # AJAX: fetch station list from the radio sidecar.
+            try:
+                req = urllib.request.Request(
+                    "http://nd-organizer-radio:8100/list",
+                    headers={"Accept": "application/json"},
+                )
+                data = urllib.request.urlopen(req, timeout=5).read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self._wfile_write(data)
+            except Exception as e:
+                err = json.dumps({"ok": False, "error": str(e), "stations": []}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self._wfile_write(err)
+            return
         if self.path.startswith("/radio-lookup"):
             # AJAX: proxy a radio search to the sidecar and return JSON directly.
             # No redirect — the JavaScript in the panel renders the results inline.
@@ -2110,15 +2078,20 @@ __BANNER__
 (function () {
     var paused = false;
     var pauseTimer = null;
+    var scrollTimer = null;
     function pauseRefresh() {
         paused = true;
         clearTimeout(pauseTimer);
         pauseTimer = setTimeout(function () { paused = false; }, 60000);
     }
-    // Pause on any meaningful user interaction
+    function throttledScroll() {
+        if (scrollTimer) return;
+        scrollTimer = setTimeout(function () { scrollTimer = null; pauseRefresh(); }, 200);
+    }
+    // Pause on meaningful user interaction
     document.addEventListener("click", pauseRefresh);
     document.addEventListener("keydown", pauseRefresh);
-    document.addEventListener("scroll", pauseRefresh);
+    document.addEventListener("scroll", throttledScroll, {passive: true});
     document.addEventListener("focusin", pauseRefresh);
     function refresh() {
         if (paused) return;
