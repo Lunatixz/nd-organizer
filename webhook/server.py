@@ -1626,11 +1626,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 import urllib.request as _ur
                 payload = json.dumps({"stations": [{"name": name, "url": url, "homepage": homepage}]}).encode()
+                log.info("radio-add: forwarding %s to nd-organizer-radio:8100/add", name)
                 req = _ur.Request("http://nd-organizer-radio:8100/add", data=payload,
                                   headers={"Content-Type": "application/json"})
-                _ur.urlopen(req, timeout=10).read()
+                resp = _ur.urlopen(req, timeout=10).read()
+                log.info("radio-add: response %s", resp.decode("utf-8", "replace")[:200])
             except Exception as e:
-                log.info("radio-add failed: %s", e)
+                log.warning("radio-add failed: %s", e)
             self.send_response(302)
             self.send_header("Location", "/")
             self.end_headers()
