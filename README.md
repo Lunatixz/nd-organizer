@@ -60,8 +60,9 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
    **ListenBrainz** (`listenbrainzScrobble`); the baseline can be
    **imported from Last.fm** (`lastfmImportPlaycount`).
    **No audio-file tags are written.**
-- **Refreshes metadata + artwork** from MusicBrainz, Cover Art Archive, iTunes
-  and Last.fm; reads/writes Kodi-style `album.nfo`/`artist.nfo` sidecars.
+- **Refreshes metadata + artwork** from MusicBrainz, Cover Art Archive, iTunes,
+  Last.fm, Discogs (credits), TheAudioDB (fanart/bios), and Genius (lyrics);
+  reads/writes Kodi-style `album.nfo`/`artist.nfo` sidecars.
 - **Integrates with Lidarr** (metadata/classification source, optional Lidarr
   naming schema, force-search for incomplete **monitored** albums) and
   **AudioMuse-AI** (acoustic BPM/key/mood tags, re-sync after renames).
@@ -209,6 +210,41 @@ MusicBrainz has no favorites/ratings API. ListenBrainz is its companion service
 for ratings (same account, same token). Ratings pushed to ListenBrainz appear on
 your MusicBrainz profile. The plugin pulls loved/hated feedback from ListenBrainz
 to seed initial ratings.
+
+## Metadata sources
+
+The plugin pulls metadata from multiple sources to enrich your library:
+
+| Source | What it provides | API Key | Config |
+|--------|------------------|---------|--------|
+| **MusicBrainz** | Release IDs, tracklists, classification | No (User-Agent only) | `musicbrainzToken` (optional, raises rate limit) |
+| **Cover Art Archive** | Front/back covers, liner notes, booklets | No | `artworkPriority = coverartarchive` |
+| **Last.fm** | Loved tracks, playcount, genres | Yes | `lastfmApiKey` + `lastfmUser` |
+| **ListenBrainz** | Listening metrics, scrobbles, ratings | Yes (MusicBrainz token) | `listenbrainzScrobble` |
+| **Lidarr** | Track/album ratings, monitored status | Yes | `lidarrUrl` + `lidarrApiKey` |
+| **Discogs** | Release credits, community ratings | Yes (personal token) | `discogsToken` + `discogsCredits` |
+| **TheAudioDB** | Artist fanart, bios, album descriptions | Yes (public key) | `theAudioDbKey` + `theAudioDbFanart` |
+| **Genius** | Lyrics, annotations, artist backgrounds | Yes (client token) | `geniusToken` + `geniusLyrics` |
+| **AcoustID** | Fingerprinting, identity verification | Yes | `acoustidUrl` + `acoustidApiKey` |
+| **AudioMuse-AI** | BPM/key/mood acoustic tags | No | `audiomuseUrl` |
+| **Essentia** | Genre/mood ML analysis | No | `essentiaUrl` |
+| **LRCLIB** | Synchronized lyrics | No | `downloadLyrics` |
+
+### Filling missing tags on AcoustID match
+
+When a file is identified via AcoustID, the plugin automatically fills in missing
+metadata from the available sources:
+- **MusicBrainz** fills missing title, artist, and MBID tags
+- **Discogs** fills missing credits and release info (if `discogsCredits` enabled)
+- **TheAudioDB** fills missing artist bios and album descriptions (if `theAudioDbFanart` enabled)
+- **Genius** fills missing lyrics (if `geniusLyrics` enabled)
+
+### Community vs personal ratings
+
+By default, ratings are **personal** — based on your own play/skip behavior and
+explicit ratings from Lidarr. Community ratings from Discogs are only used to
+seed initial star ratings when you enable `useCommunityRatings`. This ensures
+your ratings reflect your actual listening habits, not aggregate opinions.
 
 ## Docker setup (docker-compose)
 
