@@ -238,12 +238,8 @@ def sidecar_logs_html():
             continue
     out = []
     for name, port in sorted(SIDECAR_LOG_PORTS.items()):
-        # Hide MySQL card when not configured — show SQLite placeholder instead
+        # Hide MySQL card entirely when not configured
         if name == "nd-organizer-mysql" and not mysql_in_use:
-            out.append(("<div class='sc'><div class='sc-top'><b>MySQL</b>"
-                        "<span class='tag dim'>NOT CONFIGURED</span></div>"
-                        "<div class='sc-stats'><span>backend <b>SQLite (default)</b></span>"
-                        "<span class='dim'>set persistenceBackend=mysql to use MySQL</span></div></div>"))
             continue
         card = _sidecar_card(name, _fetch_json(name, port, "/health", _sidecar_status), _fetch_logs(name, port))
         if card:
