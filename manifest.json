@@ -713,7 +713,10 @@
         "audiomuseToken": {
           "type": "string",
           "title": "AudioMuse-AI API token",
-          "description": "API token for the AudioMuse-AI instance above, if it requires one (sent as a bearer token)."
+          "description": "API token for the AudioMuse-AI instance above, if it requires one (sent as a bearer token).",
+          "options": {
+            "format": "password"
+          }
         },
         "notifyAudiomuseAfterRun": {
           "type": "boolean",

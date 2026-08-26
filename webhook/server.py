@@ -1574,10 +1574,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Internet radio: add a station via the radio sidecar (form-encoded).
         if self.path.rstrip("/").endswith("/radio-add"):
             try:
-                qs = urllib.parse.parse_qs(body)
-                name = (qs.get("name") or [""])[0]
-                url = (qs.get("url") or [""])[0]
-                homepage = (qs.get("homepage") or [""])[0]
+                data = json.loads(body) if body else {}
+                stations = data.get("stations") or []
+                if not stations:
+                    self.send_response(400); self.send_header("Content-Length", "0"); self.end_headers()
+                    return
+                s = stations[0]
+                name = s.get("name", "")
+                url = s.get("url", "")
+                homepage = s.get("homepage", "")
                 if not name or not url:
                     self.send_response(400); self.send_header("Content-Length", "0"); self.end_headers()
                     return
