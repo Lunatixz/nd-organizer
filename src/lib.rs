@@ -852,35 +852,10 @@ pub(crate) mod wasm {
             }
         }
 
-        // 4. MusicBrainz (external API — metadata source, 1 req/s rate limit)
-        {
-            let url = "https://musicbrainz.org/ws/2/";
-            let detail = if cfg.musicbrainz_token.trim().is_empty() {
-                "no token (optional, 1 req/s)".to_string()
-            } else {
-                "token set".to_string()
-            };
-            let mut mb_headers = HashMap::new();
-            mb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
-            // Use same probe as actual lookups — cache 30s
-            match probe_ok_timeout("musicbrainz-hc", url, &mb_headers, 15_000, 30) {
-                None => arr.push(json!({"name":"MusicBrainz","state":"ok","detail":detail})),
-                Some(w) => arr.push(json!({"name":"MusicBrainz","state":"unreachable","detail":w})),
-            }
-        }
-
-        // 5. ListenBrainz (external API — scrobble + ratings, same token as MB)
-        if cfg.musicbrainz_token.trim().is_empty() {
-            arr.push(json!({"name":"ListenBrainz","state":"notConfigured","detail":"set musicbrainzToken"}));
-        } else {
-            let mut lb_headers = HashMap::new();
-            lb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
-            // Cache 30s — dynamic data
-            match probe_ok_timeout("listenbrainz", "https://api.listenbrainz.org/1/", &lb_headers, 10_000, 30) {
-                None => arr.push(json!({"name":"ListenBrainz","state":"ok","detail":"token set, api reachable"})),
-                Some(w) => arr.push(json!({"name":"ListenBrainz","state":"unreachable","detail":w})),
-            }
-        }
+        // 4. MusicBrainz — probed by webhook (not WASM sandbox)
+        // 5. ListenBrainz — probed by webhook (not WASM sandbox)
+        // These are external APIs unreachable from the WASM sandbox. The
+        // webhook probes them directly via normal HTTP.
 
         // 6. Last.fm (external API — scrobble + favorites)
         if cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty() {
