@@ -152,36 +152,42 @@ granularity:
 
 ## Rating & Favorites Sync
 
-Bidirectional sync across Navidrome, Last.fm, ListenBrainz, and Lidarr.
+Bidirectional sync across Navidrome, Last.fm, ListenBrainz, and Lidarr. The
+Plugin DB is the single source of truth — it accumulates from all sources and
+publishes outward.
 
-### What syncs where
+### Full sync matrix
 
-| Source | Ratings | Loved/Heart | Playcount | Track | Album | Artist |
-|--------|---------|-------------|-----------|-------|-------|--------|
-| **Navidrome** | setRating | star/unstar | observed | ✓ | - | - |
-| **Last.fm** | ✗ | loved tracks | scrobble | ✓ | ✗ | ✗ |
-| **ListenBrainz** | feedback (0-100) | feedback | scrobble | ✓ | ✗ | ✗ |
-| **Lidarr** | track + album | ✗ | ✗ | ✓ | ✓ | ✗ |
+| Source | Track Ratings | Album Ratings | Artist Ratings | Loved/Heart | Playcount | Direction |
+|--------|---------------|---------------|----------------|-------------|-----------|-----------|
+| **Navidrome** | setRating (1-5) | — | — | star/unstar | observed | In + Out |
+| **Last.fm** | — | — | — | love/unlove | scrobble | In + Out |
+| **ListenBrainz** | feedback (0-100) | release_group_mbid | artist_mbid | feedback | scrobble | In + Out |
+| **Lidarr** | track rating (0-5) | album rating (0-5) | — | — | — | In + Out |
+| **MusicBrainz** | — | — | — | — | — | In only (metadata) |
+| **Discogs** | community rating | credits | — | — | — | In only (metadata) |
 
-### How it works
+### Inbound (pull into plugin DB)
 
-**Plugin DB is the canonical source** — it tracks play/skip behavior with half-star precision and publishes outward.
-
-**Inbound (pull into plugin DB):**
 - **Navidrome** starred tracks → seed as 3-star loved (only if no local data yet)
 - **Last.fm** playcount + loved → seed baseline on first sight
-- **ListenBrainz** loved feedback → seed as loved on first sight
+- **ListenBrainz** loved/hated feedback → seed as loved on first sight
 - **Lidarr** track/album rating → seed initial rating (highest concrete wins)
+- **Discogs** community ratings → seed initial rating (if `useCommunityRatings` enabled)
+- **MusicBrainz** release type + tracklist → classification + auto-tagging
 
-**Outbound (push from plugin DB):**
+### Outbound (push from plugin DB)
+
 - **Navidrome** `setRating` + `star`/`unstar` (every stats pass)
 - **Lidarr** track + album ratings (if `ratingSyncWriteToLidarr`)
 - **ListenBrainz** track/album/artist ratings (if `listenbrainzScrobble`)
 - **Last.fm** scrobble on full plays (if `lastfmScrobble`)
 
-**Bidirectional favorites** (`favoritesSyncBidirectional`):
-- When ON: unstar in Navidrome → unlove on Last.fm (and vice versa)
-- When OFF: additive-only (never removes)
+### Favorites sync (Navidrome ↔ Last.fm)
+
+- **Bidirectional**: Navidrome stars ↔ Last.fm loved tracks
+- **Unstar/unlove propagation**: when `favoritesSyncBidirectional` is enabled
+- **Additive only** when bidirectional is off (never removes)
 
 ### Config options
 
@@ -196,6 +202,8 @@ Bidirectional sync across Navidrome, Last.fm, ListenBrainz, and Lidarr.
 | `lastfmScrobble` | false | Scrobble full plays to Last.fm |
 | `listenbrainzScrobble` | false | Scrobble + push ratings to ListenBrainz |
 | `lastfmImportPlaycount` | false | Seed playcount from Last.fm on first sight |
+| `useCommunityRatings` | false | Seed ratings from Discogs community |
+| `listenbrainzUser` | (empty) | ListenBrainz username (defaults to lastfmUser) |
 
 ### Conflict resolution
 
@@ -203,6 +211,7 @@ Bidirectional sync across Navidrome, Last.fm, ListenBrainz, and Lidarr.
 - **Ongoing**: plugin DB is authoritative — computed rating propagates outward
 - **Loved = OR**: if any source says loved, mark as loved
 - **ListenBrainz**: uses recording MBID from file tags (must be tagged for track-level sync)
+- **Album ratings**: release_group_mbid fetched from MusicBrainz cache
 
 ### MusicBrainz note
 
