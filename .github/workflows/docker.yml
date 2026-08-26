@@ -55,9 +55,9 @@ jobs:
             latest=true
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: nick-fields/retry@v3
         with:
-          context: ./${{ matrix.service }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: docker buildx build --push --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:main --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:sha-${{ github.sha }} --tag ghcr.io/${{ github.repository }}/${{ matrix.service }}:latest ./${{ matrix.service }}
