@@ -316,7 +316,7 @@ def radio_html():
             "      results.slice(0,20).forEach(function(s){"
             "        var nn=JSON.stringify(s.name);var u=JSON.stringify(s.url);var hp=JSON.stringify(s.homepage||'');"
             "        h+='<div class=\"fh\"><b>'+esc(s.name||'')+'</b> <span class=\"dim\">'+esc((s.tags||'').substring(0,35))+'</span>'"
-            "          +'<button class=\"radio-rm\" onclick=\"radioAdd('+nn+','+u+','+hp+')\">Add</button></div>';"
+            "          +'<button class=\"radio-add\" onclick=\\'radioAdd('+nn+','+u+','+hp+')\\'>Add</button></div>';"
             "      });"
             "      el.innerHTML=h;"
             "    }).catch(function(){el.innerHTML='<div class=\"note\">Search failed.</div>'});"
@@ -1577,6 +1577,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(body) if body else {}
                 stations = data.get("stations") or []
                 if not stations:
+                    log.warning("radio-add: no stations in request body")
                     self.send_response(400); self.send_header("Content-Length", "0"); self.end_headers()
                     return
                 s = stations[0]
@@ -1584,6 +1585,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 url = s.get("url", "")
                 homepage = s.get("homepage", "")
                 if not name or not url:
+                    log.warning("radio-add: missing name or url")
                     self.send_response(400); self.send_header("Content-Length", "0"); self.end_headers()
                     return
                 import urllib.request as _ur
@@ -1593,6 +1595,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   headers={"Content-Type": "application/json"})
                 resp = _ur.urlopen(req, timeout=10).read()
                 log.info("radio-add: response %s", resp.decode("utf-8", "replace")[:200])
+            except Exception as e:
+                log.warning("radio-add failed: %s", e)
             except Exception as e:
                 log.warning("radio-add failed: %s", e)
             self.send_response(302)
