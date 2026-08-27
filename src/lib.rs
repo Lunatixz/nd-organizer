@@ -16,6 +16,7 @@ mod audiomuse;
 mod discogs;
 mod theaudiodb;
 mod genius;
+mod librefm;
 mod favorites;
 mod identity;
 mod lidarr;
@@ -537,7 +538,7 @@ pub(crate) mod wasm {
     /// artists). Artwork/lyrics/acoustic are enrichment - they stay fail-soft.
     /// Returns the provider name so the run can skip and retry later.
     fn required_meta_unreachable(cfg: &Config) -> Option<&'static str> {
-        use crate::config::{AcoustIdMode, LidarrMode, PrimarySource};
+        use crate::config::{AcoustIdMode, LidarrMode};
         let empty = HashMap::new();
         if cfg.verify_identity
             && cfg.acoustid_mode != AcoustIdMode::Disabled
@@ -548,20 +549,9 @@ pub(crate) mod wasm {
                 return Some("AcoustID");
             }
         }
-        let uses_mb = cfg.classify_from_mb
-            || cfg.genre_from == "musicbrainz"
-            || cfg.genre_from == "both"
-            || cfg.primary_source == PrimarySource::MusicBrainz;
-        if uses_mb {
-            if !crate::net::circuit_check(
-                "musicbrainz",
-                "https://musicbrainz.org/ws/2/",
-                &empty,
-                15_000,
-            ) {
-                return Some("MusicBrainz");
-            }
-        }
+        // MusicBrainz is metadata enrichment (genres, classification), NOT
+        // identification. The plugin can scan and organize without it.
+        // Do NOT gate scans on MB availability.
         if cfg.lidarr_mode != LidarrMode::Disabled && !cfg.lidarr_url.trim().is_empty() {
             let mut h = HashMap::new();
             if !cfg.lidarr_api_key.trim().is_empty() {
@@ -879,7 +869,32 @@ pub(crate) mod wasm {
             }
         }
 
-        // 8. Sidecars (local Docker containers — the plugin's own infrastructure)
+        // 8. MusicBrainz — metadata source (genres, classification, tracklist)
+        {
+            let mut mb_headers = HashMap::new();
+            mb_headers.insert("User-Agent".to_string(), "nd-organizer/0.2.0 (https://github.com/Lunatixz/nd-organizer)".to_string());
+            let detail = if cfg.musicbrainz_token.trim().is_empty() {
+                "no token (optional, 1 req/s)".to_string()
+            } else {
+                "token set".to_string()
+            };
+            match probe_ok_timeout("musicbrainz-hc", "https://musicbrainz.org/ws/2/", &mb_headers, 15_000, 60) {
+                None => arr.push(json!({"name":"MusicBrainz","state":"ok","detail":detail})),
+                Some(w) => arr.push(json!({"name":"MusicBrainz","state":"unreachable","detail":w})),
+            }
+        }
+
+        // 9. ListenBrainz — scrobble + ratings (same token as MusicBrainz)
+        if cfg.musicbrainz_token.trim().is_empty() {
+            arr.push(json!({"name":"ListenBrainz","state":"notConfigured","detail":"set musicbrainzToken"}));
+        } else {
+            match probe_ok("listenbrainz", "https://api.listenbrainz.org/1/", &empty) {
+                None => arr.push(json!({"name":"ListenBrainz","state":"ok","detail":"token set, api reachable"})),
+                Some(w) => arr.push(json!({"name":"ListenBrainz","state":"unreachable","detail":w})),
+            }
+        }
+
+        // 10. Sidecars (local Docker containers — the plugin's own infrastructure)
         // Webhook is excluded — if you can see this dashboard, it's running.
         // MySQL is excluded — hidden when persistenceBackend != mysql.
         let sidecars = [

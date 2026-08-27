@@ -943,6 +943,33 @@
           "title": "Use community ratings for seeding",
           "default": false,
           "description": "When enabled, community ratings from Discogs are used to seed initial star ratings. When disabled (default), only personal ratings from Lidarr and your own play/skip behavior are used. Ratings are always personal unless you enable this."
+        },
+        "librefmUrl": {
+          "type": "string",
+          "title": "Libre.fm URL",
+          "default": "https://libre.fm",
+          "description": "Libre.fm scrobble server URL. Free, open-source alternative to Last.fm. Get an API key at https://libre.fm/api-keys.php"
+        },
+        "librefmUser": {
+          "type": "string",
+          "title": "Libre.fm username",
+          "default": "",
+          "description": "Your Libre.fm username for scrobbling."
+        },
+        "librefmSessionKey": {
+          "type": "string",
+          "title": "Libre.fm session key",
+          "default": "",
+          "options": {
+            "format": "password"
+          },
+          "description": "Session key for Libre.fm scrobbling. Obtain from https://libre.fm/api-keys.php"
+        },
+        "librefmScrobble": {
+          "type": "boolean",
+          "title": "Scrobble to Libre.fm",
+          "default": false,
+          "description": "Scrobble full listens to Libre.fm. Free, open-source alternative to Last.fm. Keep OFF if you also scrobble to Last.fm (double-counting)."
         }
       },
       "required": [
@@ -1602,6 +1629,32 @@
             {
               "type": "Control",
               "scope": "#/properties/useCommunityRatings"
+            }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Libre.fm (open-source scrobbling)",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Scrobble to Libre.fm, a free open-source alternative to Last.fm. Uses the same Subsonic protocol. Get an API key at https://libre.fm/api-keys.php"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmUrl"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmUser"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmSessionKey"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmScrobble"
             }
           ]
         },

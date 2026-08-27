@@ -247,6 +247,24 @@ def sidecar_logs_html():
     octo = _octo_fiesta_card()
     if octo:
         out.append(octo)
+    # Webhook's own card with recent log entries
+    try:
+        log_lines = read_tail(LOGFILE, 20)
+        if log_lines:
+            logs_html = "<div class='fhist'>"
+            for line in log_lines[-15:]:
+                logs_html += "<div class='fh'><span class='dim'>%s</span></div>" % esc(line.rstrip()[:120])
+            logs_html += "</div>"
+        else:
+            logs_html = "<div class='note'>No log entries yet.</div>"
+        out.append(("<div class='sc'><div class='sc-top'><b>nd-organizer-webhook</b>"
+                     "<span class='tag ok'>OK</span></div>"
+                     "<div class='sc-stats'><span>events <b>%d</b></span>"
+                     "<span>log <b>%s</b></span></div>"
+                     "<details><summary>recent logs</summary>%s</details></div>") % (
+            len(entries), esc(LOGFILE), logs_html))
+    except Exception:
+        pass
     if not out:
         return "<div class='note'>No sidecar is running.</div>"
     return "".join(out)

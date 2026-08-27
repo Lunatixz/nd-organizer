@@ -340,6 +340,12 @@ pub struct Config {
     /// ratings from Lidarr and the plugin's own play/skip behavior are used.
     pub use_community_ratings: bool,
 
+    // Libre.fm (free open-source Last.fm alternative)
+    pub librefm_url: String,
+    pub librefm_user: String,
+    pub librefm_session_key: String,
+    pub librefm_scrobble: bool,
+
     // Scanning
     pub scan_user: String,
     pub trigger_scan_after_run: bool,
@@ -471,6 +477,10 @@ impl Default for Config {
             genius_token: String::new(),
             genius_lyrics: false,
             listenbrainz_user: String::new(),
+            librefm_url: "https://libre.fm".into(),
+            librefm_user: String::new(),
+            librefm_session_key: String::new(),
+            librefm_scrobble: false,
             use_community_ratings: false,
             scan_user: String::new(),
             trigger_scan_after_run: true,
@@ -617,6 +627,11 @@ impl Config {
             "theAudioDbFanart",
             "geniusToken",
             "geniusLyrics",
+            // Libre.fm
+            "librefmUrl",
+            "librefmUser",
+            "librefmSessionKey",
+            "librefmScrobble",
             // Rating sync
             "favoritesSyncBidirectional",
             "ratingSyncWriteToLidarr",
@@ -944,6 +959,16 @@ impl Config {
             c.listenbrainz_user = v.clone();
         }
         c.use_community_ratings = bool(map, "useCommunityRatings", c.use_community_ratings);
+        if let Some(v) = map.get("librefmUrl") {
+            c.librefm_url = v.trim().to_string();
+        }
+        if let Some(v) = map.get("librefmUser") {
+            c.librefm_user = v.clone();
+        }
+        if let Some(v) = map.get("librefmSessionKey") {
+            c.librefm_session_key = v.clone();
+        }
+        c.librefm_scrobble = bool(map, "librefmScrobble", c.librefm_scrobble);
         if let Some(v) = map.get("scanUser") {
             c.scan_user = v.clone();
         }

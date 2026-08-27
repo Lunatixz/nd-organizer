@@ -528,6 +528,15 @@ pub mod host_stats {
                 crate::state::now_ts(),
             );
         }
+        if band == StarBand::Full && cfg.librefm_scrobble {
+            crate::librefm::host_librefm::scrobble(
+                cfg,
+                &prev.artist,
+                &prev.title,
+                &prev.album,
+                crate::state::now_ts(),
+            );
+        }
         let before = star_rating(&t);
         t = apply_band(t, band);
         let after = star_rating(&t);
