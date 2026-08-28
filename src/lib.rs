@@ -537,6 +537,10 @@ pub(crate) mod wasm {
     /// MusicBrainz (classification / genres / primary source), Lidarr (tracked
     /// artists). Artwork/lyrics/acoustic are enrichment - they stay fail-soft.
     /// Returns the provider name so the run can skip and retry later.
+    /// Only AcoustID and Lidarr are hard gates — the scan cannot proceed without
+    /// identification (AcoustID) or tracked-artist metadata (Lidarr). MusicBrainz
+    /// is metadata enrichment (genres, classification) — the scan CAN proceed
+    /// without it; MB-dependent features are skipped for that pass.
     fn required_meta_unreachable(cfg: &Config) -> Option<&'static str> {
         use crate::config::{AcoustIdMode, LidarrMode};
         let empty = HashMap::new();
@@ -549,9 +553,6 @@ pub(crate) mod wasm {
                 return Some("AcoustID");
             }
         }
-        // MusicBrainz is metadata enrichment (genres, classification), NOT
-        // identification. The plugin can scan and organize without it.
-        // Do NOT gate scans on MB availability.
         if cfg.lidarr_mode != LidarrMode::Disabled && !cfg.lidarr_url.trim().is_empty() {
             let mut h = HashMap::new();
             if !cfg.lidarr_api_key.trim().is_empty() {
@@ -1192,10 +1193,10 @@ pub(crate) mod wasm {
             let _ = host::scheduler::schedule_one_time(120, "idle-retry", "");
             return Ok(());
         }
-        // A required external metadata provider (MusicBrainz / Lidarr /
-        // AcoustID, per this config) being unreachable means we can't build
-        // proper identities or album/track metadata. Skip the run and retry
-        // later instead of organizing on degraded data. Gated by metaGateEnabled.
+        // A required external metadata provider (AcoustID / Lidarr)
+        // being unreachable means we can't build proper identities or
+        // album/track metadata. Skip the run and retry later.
+        // MusicBrainz is metadata enrichment — scan continues without it.
         if cfg.meta_gate_enabled {
             if let Some(provider) = required_meta_unreachable(cfg) {
                 log_info(&format!(
@@ -1223,6 +1224,16 @@ pub(crate) mod wasm {
             let _ = host::scheduler::schedule_one_time(300, "meta-retry", "");
             return Ok(());
             }
+        }
+        // MusicBrainz is metadata enrichment (genres, classification) — scan
+        // proceeds without it but MB-dependent features are skipped.
+        if !crate::net::circuit_check(
+            "musicbrainz",
+            "https://musicbrainz.org/ws/2/",
+            &HashMap::new(),
+            15_000,
+        ) {
+            log_warn("MusicBrainz unreachable — genres/classification/tracklist will be skipped this pass");
         }
         store::write_status(&status_json(cfg, true, &[], None, None));
         if cfg.favorites_sync_lastfm {
