@@ -164,6 +164,10 @@ pub struct Config {
     /// OFF if Navidrome already scrobbles via ListenBrainz. Uses the same
     /// token as musicbrainzToken (MusicBrainz ecosystem, same account).
     pub listenbrainz_scrobble: bool,
+    /// Which scrobble provider to use: "none", "lastfm", or "librefm".
+    /// When "lastfm", uses lastfmApiKey/lastfmUser. When "librefm", uses
+    /// librefmUrl/librefmUser/librefmSessionKey. Both use the same protocol.
+    pub scrobble_provider: String,
     /// Seed a track's playcount baseline from Last.fm on first observation.
     pub lastfm_import_playcount: bool,
     /// When set, the next run pass rolls back that run's changes instead of
@@ -387,6 +391,7 @@ impl Default for Config {
             rating_sync_pull_from_navidrome: false,
             lastfm_scrobble: false,
             listenbrainz_scrobble: false,
+            scrobble_provider: "none".into(),
             lastfm_import_playcount: false,
     rollback_run_id: String::new(),
             log_webhook_url: "http://nd-organizer-webhook:8099".into(),
@@ -528,6 +533,7 @@ impl Config {
             "lovedThresholdStars",
             "lastfmScrobble",
             "listenbrainzScrobble",
+            "scrobbleProvider",
             "lastfmImportPlaycount",
             "rollbackRunId",
             "logWebhookUrl",
@@ -769,6 +775,9 @@ impl Config {
         c.rating_sync_write_to_lidarr = bool(map, "ratingSyncWriteToLidarr", c.rating_sync_write_to_lidarr);
         c.rating_sync_pull_from_navidrome = bool(map, "ratingSyncPullFromNavidrome", c.rating_sync_pull_from_navidrome);
         c.listenbrainz_scrobble = bool(map, "listenbrainzScrobble", c.listenbrainz_scrobble);
+        if let Some(v) = map.get("scrobbleProvider") {
+            c.scrobble_provider = v.trim().to_string();
+        }
         c.lastfm_import_playcount = bool(map, "lastfmImportPlaycount", c.lastfm_import_playcount);
         if let Some(v) = map.get("soundtrackFolder") {
             c.soundtrack_folder = v.clone();

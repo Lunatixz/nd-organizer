@@ -896,6 +896,17 @@
           "default": false,
           "description": "Scrobble full listens (>= starFullPlayPercent) to ListenBrainz and push track/album/artist ratings. DUPLICATE WARNING: if Navidrome's own ListenBrainz scrobbler is also running, plays will be double-counted. Disable it before enabling this. RECOMMENDATION: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage across both platforms. Uses the same token as musicbrainzToken (MusicBrainz ecosystem, same account). For deduplication across multiple sources, use multi-scrobbler (github.com/foxxmd/multi-scrobbler) instead."
         },
+        "scrobbleProvider": {
+          "type": "string",
+          "title": "Scrobble provider",
+          "default": "none",
+          "oneOf": [
+            { "const": "none", "title": "None" },
+            { "const": "lastfm", "title": "Last.fm" },
+            { "const": "librefm", "title": "Libre.fm (open-source)" }
+          ],
+          "description": "Which scrobble service to use. Last.fm is the most popular; Libre.fm is a free open-source alternative with the same API. Uses lastfmApiKey/lastfmUser for Last.fm, librefmUrl/librefmUser for Libre.fm."
+        },
         "essentiaUrl": {
           "type": "string",
           "title": "Essentia analysis URL",
@@ -1343,6 +1354,10 @@
             {
               "type": "Control",
               "scope": "#/properties/lastfmUser"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/scrobbleProvider"
             },
             {
               "type": "Control",

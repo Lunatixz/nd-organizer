@@ -510,14 +510,29 @@ pub mod host_stats {
             cfg.star_full_play_percent,
             cfg.star_ignore_percent,
         );
-        if band == StarBand::Full && cfg.lastfm_scrobble {
-            crate::favorites::host_favorites::scrobble(
-                cfg,
-                &prev.artist,
-                &prev.title,
-                &prev.album,
-                crate::state::now_ts(),
-            );
+        // Scrobble to Last.fm/Libre.fm based on scrobbleProvider dropdown
+        // or individual toggle overrides.
+        if band == StarBand::Full {
+            let use_lastfm = cfg.scrobble_provider == "lastfm" || cfg.lastfm_scrobble;
+            let use_librefm = cfg.scrobble_provider == "librefm" || cfg.librefm_scrobble;
+            if use_lastfm {
+                crate::favorites::host_favorites::scrobble(
+                    cfg,
+                    &prev.artist,
+                    &prev.title,
+                    &prev.album,
+                    crate::state::now_ts(),
+                );
+            }
+            if use_librefm {
+                crate::librefm::host_librefm::scrobble(
+                    cfg,
+                    &prev.artist,
+                    &prev.title,
+                    &prev.album,
+                    crate::state::now_ts(),
+                );
+            }
         }
         if band == StarBand::Full && cfg.listenbrainz_scrobble {
             crate::favorites::host_favorites::listenbrainz_scrobble(
