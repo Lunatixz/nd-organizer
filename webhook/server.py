@@ -1928,6 +1928,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nd-organizer</title>
 <link rel="icon" href="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png">
 <style>
@@ -2074,23 +2075,49 @@ a:hover{text-decoration:underline}
 .footer-art{text-align:center;margin-top:24px}
 .footer-art img{width:100%;max-width:700px;height:auto;border-radius:8px}
 footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;letter-spacing:.3px}
+/* Mobile: single column, larger tap targets, stacked layout */
+.mobile-bar{display:none}
+@media (max-width: 640px){
+  .wrap{padding:16px 12px 40px}
+  h1{font-size:18px}
+  .sub{font-size:11px}
+  .card{padding:14px 14px}
+  details.collapse{padding:10px 12px}
+  .integrations{grid-template-columns:1fr}
+  .sc-stats{gap:4px 10px}
+  table{display:block;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .radio-search{flex-direction:column}
+  .radio-search input,.radio-search select,.radio-search button{width:100%}
+  .now-top{flex-direction:column;align-items:flex-start;gap:8px}
+  .now-line{min-width:0;font-size:13px}
+  .pipe{gap:2px}
+  .step{font-size:10px;padding:2px 4px}
+  .step:not(:last-child)::after{width:12px;margin:0 4px}
+  .actlist,.ralist{max-height:300px}
+  button{padding:8px 14px;min-height:36px}
+  .footer-art img{max-width:100%}
+  .mobile-bar{display:flex;position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--border);gap:6px;padding:8px 0 10px;margin:0 -12px 12px;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .mobile-bar a{flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:6px 12px;font-size:12px;color:var(--text);text-decoration:none}
+  .mobile-bar a:active{background:var(--surface2)}
+}
 </style></head><body><div class="wrap">
 <header>
 <div style="text-align:center;margin-bottom:16px"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/banner.png" alt="nd-organizer" style="max-width:100%;height:auto;border-radius:8px;opacity:.9"></div>
 <h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px">nd-organizer</h1>
 <div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; mode: <b>__MODE__</b> &middot; checked __UPDATED__ &middot; auto-refresh 30s &middot; log: __LOG__</div>
 </header>
+<nav class="mobile-bar" id="mobileBar"><a href="#health">Health</a><a href="#activity">Activity</a><a href="#playback">Playback</a><a href="#radio">Radio</a><a href="#playlists">Playlists</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a></nav>
 __BANNER__
-<details class="collapse" open><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
-<details class="collapse" open><summary>Current activity</summary><div class="collapse-body">__NOW__</div></details>
-<details class="collapse" open><summary>Playback</summary><div class="collapse-body">__PLAYBACK__</div></details>
-<details class="collapse" open><summary>Internet radio</summary><div class="collapse-body">__RADIO__</div></details>
-<details class="collapse" open><summary>Smart playlists</summary><div class="collapse-body">__PLAYLISTS__</div></details>
-<details class="collapse" open><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
-<details class="collapse"><summary>Task queue</summary><div class="collapse-body">__TASKS__</div></details>
-<details class="collapse"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
-<details class="collapse"><summary>Recent actions</summary><div class="collapse-body">__RECENT__</div></details>
-<details class="collapse"><summary>Activity &amp; reports</summary><div class="collapse-body">__ROWS__</div></details>
+<details class="collapse" open id="health"><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
+<details class="collapse" open id="activity"><summary>Current activity</summary><div class="collapse-body">__NOW__</div></details>
+<details class="collapse" open id="playback"><summary>Playback</summary><div class="collapse-body">__PLAYBACK__</div></details>
+<details class="collapse" open id="radio"><summary>Internet radio</summary><div class="collapse-body">__RADIO__</div></details>
+<details class="collapse" open id="playlists"><summary>Smart playlists</summary><div class="collapse-body">__PLAYLISTS__</div></details>
+<details class="collapse" open id="actions"><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
+<details class="collapse" id="tasks"><summary>Task queue</summary><div class="collapse-body">__TASKS__</div></details>
+<details class="collapse" id="sidecars"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
+<details class="collapse" id="recent"><summary>Recent actions</summary><div class="collapse-body">__RECENT__</div></details>
+<details class="collapse" id="reports"><summary>Activity &amp; reports</summary><div class="collapse-body">__ROWS__</div></details>
 <div class="footer-art"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/footer.png" alt="" style="width:100%;max-width:700px;height:auto;border-radius:8px"></div>
 <footer>nd-organizer webhook dashboard</footer>
 </div>
