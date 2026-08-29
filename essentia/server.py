@@ -239,11 +239,12 @@ def start_heartbeat():
 
 
 if __name__ == "__main__":
+    load_models()
     start_heartbeat()
     log.info("=" * 60)
     log.info("%s starting", SERVICE)
     log.info("listening on 0.0.0.0:%d", PORT)
     log.info("Essentia available: %s", ESSENTIA_AVAILABLE)
-    load_models()
+    log.info("Genre model: %s, Mood model: %s", GENRE_MODEL is not None, MOOD_MODEL is not None)
     log.info("=" * 60)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

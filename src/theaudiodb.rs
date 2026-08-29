@@ -4,7 +4,6 @@
 // and textual metadata (biographies, album descriptions).
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TheAudioDbArtist {

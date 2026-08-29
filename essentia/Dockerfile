@@ -8,12 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt /app/requirements.txt
 
-# Try installing essentia-tensorflow; if it fails, install essentia separately
-# The server.py gracefully handles missing essentia (returns empty predictions)
-RUN pip install --no-cache-dir --break-system-packages numpy && \
-    (pip install --no-cache-dir --break-system-packages essentia-tensorflow 2>/dev/null || \
-     pip install --no-cache-dir --break-system-packages essentia 2>/dev/null || \
-     echo "WARN: essentia not installed, will return empty predictions")
+RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
 
 COPY server.py /app/server.py
 WORKDIR /app

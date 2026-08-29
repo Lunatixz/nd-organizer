@@ -1,2 +1,3 @@
-essentia-tensorflow
-numpy
+--pre
+essentia-tensorflow==2.1b6.dev1110
+numpy==1.26.4

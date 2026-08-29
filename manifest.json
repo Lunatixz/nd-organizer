@@ -955,12 +955,6 @@
           "default": false,
           "description": "When enabled, community ratings from Discogs are used to seed initial star ratings. When disabled (default), only personal ratings from Lidarr and your own play/skip behavior are used. Ratings are always personal unless you enable this."
         },
-        "librefmUrl": {
-          "type": "string",
-          "title": "Libre.fm URL",
-          "default": "https://libre.fm",
-          "description": "Libre.fm scrobble server URL. Free, open-source alternative to Last.fm. Get an API key at https://libre.fm/api-keys.php"
-        },
         "librefmUser": {
           "type": "string",
           "title": "Libre.fm username",
@@ -1327,37 +1321,41 @@
         },
         {
           "type": "Group",
-          "label": "Last.fm",
+          "label": "Scrobble & Favorites",
           "elements": [
             {
               "type": "Label",
-              "text": "Genres, playcounts, star-rating scrobbles and favorites sync - all from your Last.fm account. TIP: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage. If you use Navidrome's built-in scrobbler, disable it here to avoid double-counting. For dedup across multiple sources, use multi-scrobbler (github.com/foxxmd/multi-scrobbler)."
+              "text": "Scrobble, playcounts, star-ratings and favorites sync. Choose your scrobble provider below — the username/password/secret fields apply to whichever provider is selected (Last.fm or Libre.fm). TIP: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage. For dedup across multiple sources, use multi-scrobbler (github.com/foxxmd/multi-scrobbler)."
             },
             {
               "type": "Control",
-              "scope": "#/properties/lastfmApiKey"
+              "scope": "#/properties/scrobbleProvider"
             },
             {
               "type": "Control",
-              "scope": "#/properties/lastfmApiSecret",
-              "options": {
-                "format": "password"
-              }
+              "scope": "#/properties/lastfmApiKey",
+              "description": "API key for Last.fm (or Libre.fm API key if scrobble provider is Libre.fm)"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/lastfmUser",
+              "description": "Username for Last.fm (or Libre.fm username if scrobble provider is Libre.fm)"
             },
             {
               "type": "Control",
               "scope": "#/properties/lastfmPassword",
               "options": {
                 "format": "password"
-              }
+              },
+              "description": "Password for Last.fm (or Libre.fm session key if scrobble provider is Libre.fm)"
             },
             {
               "type": "Control",
-              "scope": "#/properties/lastfmUser"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/scrobbleProvider"
+              "scope": "#/properties/lastfmApiSecret",
+              "options": {
+                "format": "password"
+              },
+              "description": "API secret for Last.fm (optional for Libre.fm)"
             },
             {
               "type": "Control",
@@ -1382,6 +1380,22 @@
             {
               "type": "Control",
               "scope": "#/properties/favoritesSyncBidirectional"
+            },
+            {
+              "type": "Label",
+              "text": "Libre.fm override — leave empty to reuse Last.fm username/session above. Only set if your Libre.fm account differs."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmUser"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmSessionKey"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmScrobble"
             }
           ]
         },
@@ -1644,32 +1658,6 @@
             {
               "type": "Control",
               "scope": "#/properties/useCommunityRatings"
-            }
-          ]
-        },
-        {
-          "type": "Group",
-          "label": "Libre.fm (open-source scrobbling)",
-          "elements": [
-            {
-              "type": "Label",
-              "text": "Scrobble to Libre.fm, a free open-source alternative to Last.fm. Uses the same Subsonic protocol. Get an API key at https://libre.fm/api-keys.php"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/librefmUrl"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/librefmUser"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/librefmSessionKey"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/librefmScrobble"
             }
           ]
         },

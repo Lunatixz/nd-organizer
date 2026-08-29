@@ -334,16 +334,20 @@ def radio_html():
             "      results.slice(0,20).forEach(function(s){"
             "        var nn=JSON.stringify(s.name);var u=JSON.stringify(s.url);var hp=JSON.stringify(s.homepage||'');"
             "        h+='<div class=\"fh\"><b>'+esc(s.name||'')+'</b> <span class=\"dim\">'+esc((s.tags||'').substring(0,35))+'</span>'"
-            "          +'<button class=\"radio-add\" onclick=\\'radioAdd('+nn+','+u+','+hp+')\\'>Add</button></div>';"
+            "          +'<button class=\"radio-add\" onclick=\"radioAdd(this,'+nn+','+u+','+hp+')\">Add</button></div>';"
             "      });"
             "      el.innerHTML=h;"
             "    }).catch(function(){el.innerHTML='<div class=\"note\">Search failed.</div>'});"
             "  return false;"
             "}"
-            "function radioAdd(name,url,hp){"
+            "function radioAdd(btn,name,url,hp){"
+            "  var orig=btn.textContent;btn.disabled=true;btn.innerHTML='<span class=\"spin\"></span> Adding...';"
             "  fetch('/radio-add',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({stations:[{name:name,url:url,homepage:hp||''}]})"
-            "  }).then(function(){radioRefreshList()});"
+            "  }).then(function(r){return r.json()}).then(function(d){"
+            "    if(!d.ok && d.error) alert(d.error);"
+            "    radioRefreshList();"
+            "  }).catch(function(e){alert('Add failed: '+e);btn.disabled=false;btn.textContent=orig;});"
             "}"
             "function radioRemove(name,url){"
             "  if(!confirm('Remove '+name+'?'))return;"
@@ -1935,6 +1939,8 @@ header{margin-bottom:24px}
 h1{font-size:20px;margin:0;color:var(--accent);display:flex;align-items:center;gap:10px;font-weight:600}
 h1 .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.spin{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;display:inline-block;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
 .sub{color:var(--text2);font-size:12px;margin-top:6px;letter-spacing:.2px}
 .badges{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
 .badge{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:4px 12px;font-size:12px;color:var(--text)}

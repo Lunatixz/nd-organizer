@@ -4,7 +4,6 @@
 // engineers) and to seed star ratings from community ratings.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscogsRelease {

@@ -2,15 +2,14 @@
 // Uses the same Subsonic-compatible scrobble protocol. API key required from
 // https://libre.fm/api-keys.php
 
-use std::collections::HashMap;
+
 
 #[cfg(target_arch = "wasm32")]
 pub mod host_librefm {
     use crate::config::Config;
     use crate::net;
     use nd_pdk::host;
-
-    use super::*;
+    use std::collections::HashMap;
 
     /// Scrobble a listen to Libre.fm using the Subsonic scrobble protocol.
     /// Libre.fm accepts the same POST format as Last.fm's track.scrobble.
@@ -21,8 +20,12 @@ pub mod host_librefm {
         album: &str,
         ts: i64,
     ) {
-        let base = cfg.librefm_url.trim().trim_end_matches('/');
-        if base.is_empty() || cfg.librefm_user.is_empty() {
+        const BASE: &str = "https://libre.fm";
+        let base = BASE;
+        // Share Last.fm credentials when Libre.fm user not set
+        let user = if cfg.librefm_user.trim().is_empty() { cfg.lastfm_user.trim() } else { cfg.librefm_user.trim() };
+        let sk = if cfg.librefm_session_key.trim().is_empty() { String::new() } else { cfg.librefm_session_key.trim().to_string() };
+        if user.is_empty() {
             return;
         }
         if !net::circuit_probe(
@@ -38,11 +41,11 @@ pub mod host_librefm {
         let params = format!(
             "s={}&u={}&v=1.13.0&c=nd-organizer&t={}&a={}&ar={}&sk={}&fmt=json",
             crate::favorites::host_favorites::urlencode(title),
-            crate::favorites::host_favorites::urlencode(&cfg.librefm_user),
+            crate::favorites::host_favorites::urlencode(user),
             ts,
             crate::favorites::host_favorites::urlencode(album),
             crate::favorites::host_favorites::urlencode(artist),
-            crate::favorites::host_favorites::urlencode(&cfg.librefm_session_key),
+            crate::favorites::host_favorites::urlencode(&sk),
         );
         let url = format!("{base}/rest/scrobble?{params}");
         let req = host::http::HTTPRequest {

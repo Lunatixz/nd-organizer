@@ -3,7 +3,6 @@
 // context when other sources don't have it.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeniusSong {

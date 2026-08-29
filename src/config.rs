@@ -344,8 +344,8 @@ pub struct Config {
     /// ratings from Lidarr and the plugin's own play/skip behavior are used.
     pub use_community_ratings: bool,
 
-    // Libre.fm (free open-source Last.fm alternative)
-    pub librefm_url: String,
+    // Libre.fm (free open-source Last.fm alternative) — shares Last.fm credentials
+    // Unique field: scrobble toggle + optional override user/sk; URL is hardcoded to https://libre.fm
     pub librefm_user: String,
     pub librefm_session_key: String,
     pub librefm_scrobble: bool,
@@ -391,7 +391,7 @@ impl Default for Config {
             rating_sync_pull_from_navidrome: false,
             lastfm_scrobble: false,
             listenbrainz_scrobble: false,
-            scrobble_provider: "none".into(),
+            scrobble_provider: "lastfm".into(),
             lastfm_import_playcount: false,
     rollback_run_id: String::new(),
             log_webhook_url: "http://nd-organizer-webhook:8099".into(),
@@ -482,7 +482,6 @@ impl Default for Config {
             genius_token: String::new(),
             genius_lyrics: false,
             listenbrainz_user: String::new(),
-            librefm_url: "https://libre.fm".into(),
             librefm_user: String::new(),
             librefm_session_key: String::new(),
             librefm_scrobble: false,
@@ -634,7 +633,6 @@ impl Config {
             "geniusToken",
             "geniusLyrics",
             // Libre.fm
-            "librefmUrl",
             "librefmUser",
             "librefmSessionKey",
             "librefmScrobble",
@@ -968,9 +966,6 @@ impl Config {
             c.listenbrainz_user = v.clone();
         }
         c.use_community_ratings = bool(map, "useCommunityRatings", c.use_community_ratings);
-        if let Some(v) = map.get("librefmUrl") {
-            c.librefm_url = v.trim().to_string();
-        }
         if let Some(v) = map.get("librefmUser") {
             c.librefm_user = v.clone();
         }
