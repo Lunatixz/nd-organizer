@@ -1338,6 +1338,14 @@
             },
             {
               "type": "Control",
+              "scope": "#/properties/lastfmApiSecret",
+              "options": {
+                "format": "password"
+              },
+              "description": "API secret for Last.fm (optional for Libre.fm)"
+            },
+            {
+              "type": "Control",
               "scope": "#/properties/lastfmUser",
               "description": "Username for Last.fm (or Libre.fm username if scrobble provider is Libre.fm)"
             },
@@ -1348,14 +1356,6 @@
                 "format": "password"
               },
               "description": "Password for Last.fm (or Libre.fm session key if scrobble provider is Libre.fm)"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/lastfmApiSecret",
-              "options": {
-                "format": "password"
-              },
-              "description": "API secret for Last.fm (optional for Libre.fm)"
             },
             {
               "type": "Control",
