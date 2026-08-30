@@ -110,8 +110,15 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
         .unwrap_or(0);
     let cap = cfg.max_scan_entries;
     let mut processed = 0usize;
+    let mut skipped = 0usize;
     let mut hit_limit = false;
     let mut last_rel: String = String::new();
+    let initial_stack = stack.len();
+
+    crate::wasm::log_info(&format!(
+        "scan_step: starting chunk, stack={} files, pass_count={}",
+        stack.len(), pass_count
+    ));
 
     while let Some(dir_rel) = stack.pop() {
         if crate::organizer::is_excluded(&dir_rel, &cfg.exclude_paths) {
@@ -165,6 +172,10 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
         (pass_count + processed).to_string().into_bytes(),
     );
     let capped = cap > 0 && pass_count + processed >= cap && hit_limit;
+    crate::wasm::log_info(&format!(
+        "scan_step: chunk done, processed={}, skipped={}, stack_now={}, hit_limit={}",
+        processed, skipped, stack.len(), hit_limit
+    ));
 
     if capped {
         crate::store::kv().set(&key, serde_json::to_vec(&stack).unwrap_or_default())
@@ -486,6 +497,10 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let prefix = format!("scan.filev2.{library_id}:");
     let keys = crate::store::kv().list(&prefix).map_err(|e| e.to_string())?;
     let values = crate::store::kv().get_many(keys).map_err(|e| e.to_string())?;
+    crate::wasm::log_info(&format!(
+        "group_step: loaded {} indexed files from KVStore",
+        values.len()
+    ));
 
     let mut entries: Vec<(String, TrackTags)> = Vec::new();
     for (_k, v) in values {
@@ -586,6 +601,10 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         }
     }
     let enqueued = crate::wasm::enqueue_plan_tasks(cfg, library_id, groups)?;
+    crate::wasm::log_info(&format!(
+        "group_step: grouped {} files into {} plan tasks (enqueued)",
+        total_files, enqueued
+    ));
     // After the plan/apply work runs, sweep for folders left with no audio
     // (images/nfo/lyrics/misc only) - gated by cleanupNoAudioFolders.
     if cfg.cleanup_no_audio_folders {

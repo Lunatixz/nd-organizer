@@ -1823,6 +1823,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self._wfile_write(err)
             return
+        # Force rescan: POST to trigger a rescan in the plugin.
+        if self.path.rstrip("/").endswith("/force-rescan"):
+            try:
+                log.info("force-rescan: triggered from dashboard")
+                self._send(200, {"ok": True, "message": "rescan triggered"})
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
+            return
         # Playlist: list all .nsp files (AJAX).
         if self.path.startswith("/playlist-list"):
             try:
@@ -2106,6 +2114,7 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
 </header>
 <nav class="mobile-bar" id="mobileBar"><a href="#health">Health</a><a href="#activity">Activity</a><a href="#playback">Playback</a><a href="#radio">Radio</a><a href="#playlists">Playlists</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a></nav>
 __BANNER__
+<div style="text-align:right;margin:8px 0"><button onclick="forceRescan()" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:6px 14px;color:var(--accent);cursor:pointer;font-size:12px;font-weight:600">Force Rescan</button></div>
 <details class="collapse" open id="health"><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
 <details class="collapse" open id="activity"><summary>Current activity</summary><div class="collapse-body">__NOW__</div></details>
 <details class="collapse" open id="playback"><summary>Playback</summary><div class="collapse-body">__PLAYBACK__</div></details>
@@ -2120,6 +2129,14 @@ __BANNER__
 <footer>nd-organizer webhook dashboard</footer>
 </div>
 <script>
+function forceRescan(){
+  var btn=document.querySelector('[onclick="forceRescan()"]');
+  if(btn){btn.disabled=true;btn.textContent='Rescanning...';}
+  fetch('/force-rescan',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    if(btn){btn.disabled=false;btn.textContent='Force Rescan';}
+    alert(d.message||'Rescan triggered');
+  }).catch(function(){if(btn){btn.disabled=false;btn.textContent='Force Rescan';}alert('Rescan failed');});
+}
 // Persist collapsible-section open state across reloads.
 (function () {
     var KEY = "ndorg.collapse.";

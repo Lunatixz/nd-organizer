@@ -276,6 +276,10 @@ pub(crate) mod wasm {
                 .map_err(|e| nd_pdk::taskworker::Error::new(format!("bad payload: {e}")))?;
             let cfg = Config::load().map_err(|e| nd_pdk::taskworker::Error::new(e))?;
             let kind = payload.kind.as_str();
+            crate::wasm::log_info(&format!(
+                "task execute: kind={}, library={}",
+                kind, payload.library_id
+            ));
             record_task(kind, payload.library_id, "running", "");
             let r: Result<String, String> = match kind {
                 "scan" => match super::scan::scan_step(&cfg, payload.library_id) {
