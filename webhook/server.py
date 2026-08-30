@@ -1657,9 +1657,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self._send(200, {"ok": True})
             return
-            self.send_response(302)
-            self.send_header("Location", "/")
-            self.end_headers()
+        # Force rescan: post a signal to the log so next scheduled run re-scans.
+        if self.path.rstrip("/").endswith("/force-rescan"):
+            log.info("force-rescan: handler entered, body=%d bytes", len(body))
+            try:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                signal = json.dumps({
+                    "ts": int(time.time()),
+                    "mode": current_mode(),
+                    "inProgress": False,
+                    "feedback": "Force rescan requested - next scheduled run will re-scan from scratch.",
+                    "integrations": [],
+                })
+                entries.append((ts, "/force-rescan", signal))
+                self._send(200, {"ok": True, "message": "rescan signal posted"})
+            except Exception as e:
+                log.warning("force-rescan failed: %s", e)
+                self._send(500, {"ok": False, "error": str(e)})
             return
         # Playlist: save / delete / list / deploy preset
         if self.path.rstrip("/").endswith("/playlist-save"):
@@ -1824,25 +1838,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(err)))
                 self.end_headers()
                 self._wfile_write(err)
-            return
-        # Force rescan: clear scan state so next scheduled run starts fresh.
-        if self.path.rstrip("/").endswith("/force-rescan"):
-            log.info("force-rescan: handler entered, body=%d bytes", len(body))
-            try:
-                log.info("force-rescan: clearing scan state for next run")
-                # Post a signal to the log so the user sees it
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                signal = json.dumps({
-                    "ts": int(time.time()),
-                    "mode": current_mode(),
-                    "inProgress": False,
-                    "feedback": "Force rescan requested — scan state cleared. The next scheduled run (or runOnStartup) will re-scan from scratch.",
-                    "integrations": [],
-                })
-                entries.append((ts, "/force-rescan", signal))
-                self._send(200, {"ok": True, "message": "rescan signal posted — next scheduled run will re-scan from scratch"})
-            except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
             return
         # Playlist: list all .nsp files (AJAX).
         if self.path.startswith("/playlist-list"):
