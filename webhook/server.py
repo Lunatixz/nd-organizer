@@ -154,12 +154,7 @@ def _sidecar_card(name, status, logs):
     stats = ""
     if status:
         s = status.get("stats") or {}
-        if name == "nd-organizer-radio":  # radio
-            stats = ("<div class='sc-stats'><span>stations <b>%s</b></span>"
-                     "<span>db <b>%s</b></span><span>uptime <b>%s</b></span></div>") % (
-                s.get("stations", "?"), esc(status.get("stats", {}).get("db", "")),
-                _uptime(status.get("uptime")))
-        elif "stats" in status:  # acoustid
+        if "stats" in status:  # acoustid
             stats = ("<div class='sc-stats'><span>lookups <b>%s</b></span>"
                      "<span>matches <b>%s</b></span><span>errors <b>%s</b></span>"
                      "<span>last match <b>%s</b></span><span>uptime <b>%s</b></span></div>") % (
@@ -273,7 +268,7 @@ def sidecar_logs_html():
 
 # ---------------------------------------------------------------- internet radio
 #
-# Radio panel driven by the nd-organizer-radio sidecar (WB2024/Add-Navidrome-
+# Radio panel driven by the radio management (built into webhook) (WB2024/Add-Navidrome-
 # Radios): search/add internet radio stations straight into Navidrome's `radio`
 # table. Hidden when the sidecar is unreachable.
 
@@ -1672,7 +1667,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self._read_body()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Internet radio: add a station via the radio sidecar (form-encoded).
+        # Internet radio: add a station directly to Navidrome radio table.
         if self.path.rstrip("/").endswith("/radio-add"):
             log.info("radio-add: handler entered, body=%d bytes", len(body))
             try:
@@ -1881,7 +1876,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._wfile_write(data)
             return
         if self.path.startswith("/radio-list"):
-            # AJAX: fetch station list from the radio sidecar.
+            # AJAX: fetch station list from Radio-Browser API.
             try:
                 req = urllib.request.Request(
                     "http://nd-organizer-radio:8100/list",

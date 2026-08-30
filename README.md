@@ -548,9 +548,7 @@ services:
   # Internet radio sidecar (from WB2024/Add-Navidrome-Radios): search/add radio
   # stations via Radio-Browser, written straight into Navidrome's `radio` table.
   # Mount Navidrome's DATA dir (with navidrome.db) read-write at /data.
-  nd-organizer-radio:
     image: ghcr.io/lunatixz/nd-organizer/radio:latest
-    container_name: nd-organizer-radio
     restart: unless-stopped
     ports:
       - "8100:8100"
@@ -773,7 +771,6 @@ cd radio && docker compose up -d
   `GET /list`, `POST /add {"stations":[{name,url,homepage}]}` (dedups by
   name/url). Health at `GET /health`.
 - **Dashboard**: the webhook shows a **Radio panel** (existing stations) and a
-  `nd-organizer-radio` sidecar card once the sidecar is running.
 - The sidecar is registered in `SIDECAR_LOG_PORTS` (port `8100`).
 
 ### Smart playlists

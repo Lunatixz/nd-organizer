@@ -880,9 +880,9 @@ pub(crate) mod wasm {
         // 10. Sidecars (local Docker containers — the plugin's own infrastructure)
         // Webhook is excluded — if you can see this dashboard, it's running.
         // MySQL is excluded — hidden when persistenceBackend != mysql.
+        // Radio is merged into webhook — no separate sidecar.
         let sidecars = [
             ("nd-organizer-proxy", "Filter Proxy", 4534),
-            ("nd-organizer-radio", "Radio", 8100),
             ("nd-organizer-essentia", "Essentia", 8101),
         ];
         for (container, name, port) in sidecars {
