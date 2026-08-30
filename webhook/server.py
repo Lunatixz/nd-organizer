@@ -1619,17 +1619,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log.info("radio-add: response %s", resp.decode("utf-8", "replace")[:200])
             except Exception as e:
                 log.warning("radio-add failed: %s", e)
-            except Exception as e:
-                log.warning("radio-add failed: %s", e)
-            self.send_response(302)
-            self.send_header("Location", "/")
-            self.end_headers()
+                self._send(502, {"ok": False, "error": str(e)})
+                return
+            self._send(200, {"ok": True})
             return
         if self.path.rstrip("/").endswith("/radio-remove"):
             try:
-                n = int(self.headers.get("Content-Length", 0))
-                raw = self.rfile.read(n) if n > 0 else b"{}"
-                req = json.loads(raw or "{}")
+                req = json.loads(body) if body else {}
                 name = req.get("name", "")
                 url = req.get("url", "")
                 import urllib.request as _ur
@@ -1640,15 +1636,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             timeout=10).read()
             except Exception as e:
                 log.warning("radio-remove failed: %s", e)
-            self.send_response(302)
-            self.send_header("Location", "/")
-            self.end_headers()
+                self._send(502, {"ok": False, "error": str(e)})
+                return
+            self._send(200, {"ok": True})
             return
         if self.path.rstrip("/").endswith("/radio-rename"):
             try:
-                n = int(self.headers.get("Content-Length", 0))
-                raw = self.rfile.read(n) if n > 0 else b"{}"
-                req = json.loads(raw or "{}")
+                req = json.loads(body) if body else {}
                 import urllib.request as _ur
                 payload = json.dumps(req).encode()
                 _ur.urlopen(_ur.Request("http://nd-organizer-radio:8100/rename",
@@ -1657,6 +1651,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             timeout=10).read()
             except Exception as e:
                 log.warning("radio-rename failed: %s", e)
+                self._send(502, {"ok": False, "error": str(e)})
+                return
+            self._send(200, {"ok": True})
+            return
             self.send_response(302)
             self.send_header("Location", "/")
             self.end_headers()
