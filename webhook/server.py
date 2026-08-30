@@ -1876,19 +1876,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._wfile_write(data)
             return
         if self.path.startswith("/radio-list"):
-            # AJAX: fetch station list from Radio-Browser API.
             try:
-                req = urllib.request.Request(
-                    "http://nd-organizer-radio:8100/list",
-                    headers={"Accept": "application/json"},
-                )
-                data = urllib.request.urlopen(req, timeout=5).read()
+                stations = radio_list_stations()
+                data = json.dumps({"ok": True, "stations": stations}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self._wfile_write(data)
             except Exception as e:
+                log.warning("radio-list failed: %s", e)
                 err = json.dumps({"ok": False, "error": str(e), "stations": []}).encode()
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json")
