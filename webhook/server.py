@@ -37,6 +37,8 @@ STARTED = time.time()
 # stay in webhook.log; the dashboard shows the most recent MAX_ENTRIES.
 MAX_ENTRIES = 2000
 PLAYLIST_DIR = os.environ.get("PLAYLIST_DIR", "/data/playlists")
+RADIO_DB_PATH = os.environ.get("NAVIDROME_DB", "/data/navidrome.db")
+RADIO_BROWSER_API = os.environ.get("RADIO_BROWSER_API", "https://de1.api.radio-browser.info/json")
 
 entries = []  # list of (ts, path, body)
 services = {}  # sidecar name -> last heartbeat unix ts
@@ -49,7 +51,6 @@ SIDECAR_LOG_PORTS = {
     "nd-organizer-acoustid": 8097,
     "nd-organizer-proxy": 4534,
     "nd-organizer-mysql": 8098,
-    "nd-organizer-radio": 8100,
     "nd-organizer-essentia": 8101,
 }
 _sidecar_logs = {}  # name -> (fetched_ts, text|None); refreshed every 30s
@@ -278,22 +279,17 @@ def sidecar_logs_html():
 
 def radio_html():
     """Internet radio panel: existing stations + AJAX search/add/remove/rename.
-    All operations use fetch() so the page never reloads."""
-    health = _fetch_json("nd-organizer-radio", 8100, "/health", _sidecar_status, timeout=3)
-    if health is None:
-        return ""
-    if not health.get("ok"):
+    All operations use local functions (radio sidecar merged into webhook)."""
+    if not radio_table_exists():
         return ("<div class='card now'><h2>Internet radio</h2>"
-                "<div class='note'>Radio sidecar not reachable.</div></div>")
+                "<div class='note'>Navidrome radio table not found — mount navidrome.db at %s.</div></div>") % RADIO_DB_PATH
     out = "<div class='card now'><h2>Internet radio</h2>"
     # --- Station list with Remove + Rename ---
-    st = _fetch_json("nd-organizer-radio", 8100, "/list", _sidecar_status, timeout=5) or {}
-    stations = st.get("stations") or []
+    stations = radio_list_stations()
     rows = ""
     for s in stations[:50]:
         n = esc(s.get("name", "?"))
         u = esc(s.get("url", ""))
-        # Use JSON encoding for safe onclick args (handles quotes, special chars)
         name_json = json.dumps(s.get("name", "")).replace('"', '&quot;')
         url_json = json.dumps(s.get("url", "")).replace('"', '&quot;')
         rows += ("<div class='fh'><b>%s</b> <span class='dim'>%s</span>"
@@ -578,6 +574,89 @@ def playlist_html():
             "</script>")
     out += "</div>"
     return out
+
+
+# ---------------------------------------------------------------- internet radio
+#
+# Internet radio management built into the webhook (no separate sidecar needed).
+# Uses Navidrome's SQLite radio table directly. Search via Radio-Browser API.
+
+def radio_db_connect():
+    import sqlite3
+    conn = sqlite3.connect(RADIO_DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def radio_table_exists():
+    try:
+        conn = radio_db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='radio'")
+        ok = cur.fetchone() is not None
+        conn.close()
+        return ok
+    except Exception:
+        return False
+
+def radio_rb_get(path):
+    import urllib.request as _ur
+    url = RADIO_BROWSER_API.rstrip("/") + path
+    req = _ur.Request(url, headers={"User-Agent": "nd-organizer-webhook/1.0", "Accept": "application/json"})
+    with _ur.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+def radio_search(query, search_type="byname", limit=30):
+    if search_type == "top":
+        return radio_rb_get(f"/stations/topvote/{max(1, limit)}")
+    q = urllib.parse.quote(query)
+    return radio_rb_get(f"/stations/{search_type}/{q}?limit={max(1, limit)}&hidebroken=true")
+
+def radio_station_exists(cur, name, url):
+    cur.execute("SELECT id FROM radio WHERE name = ? OR stream_url = ?", (name, url))
+    return cur.fetchone() is not None
+
+def radio_add_stations(stations):
+    import base64, hashlib, datetime
+    added = 0
+    skipped = 0
+    errors = []
+    try:
+        conn = radio_db_connect()
+        cur = conn.cursor()
+        for st in stations:
+            name = (st.get("name") or "").strip()
+            url = (st.get("url") or st.get("stream_url") or "").strip()
+            if not name or not url:
+                continue
+            if radio_station_exists(cur, name, url):
+                skipped += 1
+                continue
+            unique = f"{name}{datetime.datetime.utcnow().isoformat()}"
+            station_id = base64.b64encode(hashlib.md5(unique.encode()).digest()).decode().rstrip("=").replace("+", "-").replace("/", "_")[:22]
+            ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+            homepage = (st.get("homepage") or "").strip()
+            cur.execute(
+                "INSERT INTO radio (id, name, stream_url, home_page_url, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (station_id, name, url, homepage, ts, ts),
+            )
+            added += 1
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        errors.append(str(e))
+    return added, skipped, errors
+
+def radio_list_stations():
+    try:
+        conn = radio_db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT name, stream_url FROM radio ORDER BY name")
+        rows = [{"name": r["name"], "url": r["stream_url"]} for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------- octo-fiesta
@@ -1611,51 +1690,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     log.warning("radio-add: missing name or url")
                     self.send_response(400); self.send_header("Content-Length", "0"); self.end_headers()
                     return
-                import urllib.request as _ur
-                payload = json.dumps({"stations": [{"name": name, "url": url, "homepage": homepage}]}).encode()
-                target = "http://nd-organizer-radio:8100/add"
-                log.info("radio-add: forwarding %s to %s", name, target)
-                req = _ur.Request(target, data=payload,
-                                  headers={"Content-Type": "application/json"})
-                resp = _ur.urlopen(req, timeout=10).read()
-                log.info("radio-add: response %s", resp.decode("utf-8", "replace")[:200])
+                log.info("radio-add: adding %s", name)
+                added, skipped, errors = radio_add_stations([{"name": name, "url": url, "homepage": homepage}])
+                log.info("radio-add: added=%d skipped=%d errors=%s", added, skipped, errors)
             except Exception as e:
                 log.warning("radio-add failed: %s", e)
                 self._send(502, {"ok": False, "error": str(e)})
                 return
-            self._send(200, {"ok": True})
+            self._send(200, {"ok": True, "added": added, "skipped": skipped, "errors": errors})
             return
         if self.path.rstrip("/").endswith("/radio-remove"):
             try:
                 req = json.loads(body) if body else {}
                 name = req.get("name", "")
                 url = req.get("url", "")
-                import urllib.request as _ur
-                payload = json.dumps({"name": name, "url": url}).encode()
-                _ur.urlopen(_ur.Request("http://nd-organizer-radio:8100/remove",
-                                        data=payload,
-                                        headers={"Content-Type": "application/json"}),
-                            timeout=10).read()
+                if not name and not url:
+                    self._send(400, {"ok": False, "error": "name or url required"})
+                    return
+                conn = radio_db_connect()
+                cur = conn.cursor()
+                cur.execute("DELETE FROM radio WHERE name = ? OR stream_url = ?", (name, url))
+                deleted = cur.rowcount
+                conn.commit()
+                conn.close()
+                log.info("radio-remove: deleted %d station(s) name='%s'", deleted, name)
+                self._send(200, {"ok": True, "deleted": deleted})
             except Exception as e:
                 log.warning("radio-remove failed: %s", e)
                 self._send(502, {"ok": False, "error": str(e)})
-                return
-            self._send(200, {"ok": True})
             return
         if self.path.rstrip("/").endswith("/radio-rename"):
             try:
                 req = json.loads(body) if body else {}
-                import urllib.request as _ur
-                payload = json.dumps(req).encode()
-                _ur.urlopen(_ur.Request("http://nd-organizer-radio:8100/rename",
-                                        data=payload,
-                                        headers={"Content-Type": "application/json"}),
-                            timeout=10).read()
+                old_name = req.get("old_name", "")
+                new_name = req.get("new_name", "")
+                url = req.get("url", "")
+                if not old_name or not new_name:
+                    self._send(400, {"ok": False, "error": "old_name and new_name required"})
+                    return
+                conn = radio_db_connect()
+                cur = conn.cursor()
+                ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+                if url:
+                    cur.execute("UPDATE radio SET name = ?, updated_at = ? WHERE name = ? OR stream_url = ?",
+                                (new_name, ts, old_name, url))
+                else:
+                    cur.execute("UPDATE radio SET name = ?, updated_at = ? WHERE name = ?",
+                                (new_name, ts, old_name))
+                updated = cur.rowcount
+                conn.commit()
+                conn.close()
+                log.info("radio-rename: %d station(s) '%s' -> '%s'", updated, old_name, new_name)
+                self._send(200, {"ok": True, "updated": updated})
             except Exception as e:
                 log.warning("radio-rename failed: %s", e)
                 self._send(502, {"ok": False, "error": str(e)})
-                return
-            self._send(200, {"ok": True})
             return
         # Force rescan: post a signal to the log so next scheduled run re-scans.
         if self.path.rstrip("/").endswith("/force-rescan"):
@@ -1813,25 +1902,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._wfile_write(err)
             return
         if self.path.startswith("/radio-lookup"):
-            # AJAX: proxy a radio search to the sidecar and return JSON directly.
-            # No redirect — the JavaScript in the panel renders the results inline.
+            # AJAX: search Radio-Browser API locally and return JSON directly.
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             q = (qs.get("q") or [""])[0]
             stype = (qs.get("type") or ["byname"])[0]
-            limit = (qs.get("limit") or ["20"])[0]
+            limit = int((qs.get("limit") or ["20"])[0])
             try:
-                payload = urllib.parse.urlencode({"q": q, "type": stype, "limit": limit})
-                req = urllib.request.Request(
-                    "http://nd-organizer-radio:8100/search?%s" % payload,
-                    headers={"Accept": "application/json"},
-                )
-                data = urllib.request.urlopen(req, timeout=10).read()
+                results = radio_search(q, stype, limit)
+                data = json.dumps({"ok": True, "results": results}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self._wfile_write(data)
             except Exception as e:
+                log.warning("radio-search failed: %s", e)
                 err = json.dumps({"ok": False, "error": str(e)}).encode()
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json")
