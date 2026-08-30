@@ -267,7 +267,6 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/webhook:latest` | A web dashboard showing status + reports (auto-refreshing). |
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
-| `ghcr.io/lunatixz/nd-organizer/radio:latest` | Internet radio sidecar (based on WB2024/Add-Navidrome-Radios) — search the Radio-Browser community DB and add stations straight into Navidrome's `radio` table (no restart). The webhook dashboard has a Radio panel. |
 | `ghcr.io/lunatixz/nd-organizer/essentia:latest` | Genre/mood ML analysis using Essentia (Discogs-400 + MTG-Jamendo models). Fallback when AudioMuse-AI is down, or primary genre source when `genreFrom=essentia`. |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
@@ -275,22 +274,21 @@ The compose files reference the published GHCR images — `docker compose up`
 pulls them (no local build, no build context needed). Tags: `:latest`, `:main`,
 and `vX.Y.Z` semver tags per release.
 
-Here is the **complete `docker-compose.yml`** — Navidrome plus all seven sidecars
+Here is the **complete `docker-compose.yml`** — Navidrome plus all six sidecars
 (octo-fiesta, acoustid, webhook, filter proxy, mysql, radio, essentia) on one shared network.
 Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
 
 ```yaml
-# nd-organizer full stack - Navidrome plus all seven sidecars, one command:
+# nd-organizer full stack - Navidrome plus all six sidecars, one command:
 #   docker compose up -d
 #
 # Services:
 #   navidrome                  (4533)  the music server (plugins enabled)
 #   octo-fiesta                (4535)  missing-track proxy (multi-provider)
 #   nd-organizer-acoustid (8097)  fingerprint + ReplayGain sidecar (fpcalc + ffmpeg)
-#   nd-organizer-webhook  (8099)  dashboard + log/status receiver
+#   nd-organizer-webhook  (8099)  dashboard + log/status + radio management
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
 #   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
-#   nd-organizer-radio    (8100)  internet radio sidecar (Radio-Browser -> Navidrome)
 #   nd-organizer-essentia (8101)  genre/mood ML analysis (Essentia + Discogs-400)
 #
 # Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
@@ -755,7 +753,6 @@ docker build -t nd-organizer-acoustid acoustid/
 docker build -t nd-organizer-webhook webhook/
 docker build -t nd-organizer-proxy proxy/
 docker build -t nd-organizer-mysql mysql/
-docker build -t nd-organizer-radio radio/
 ```
 
 ### Internet radio (optional)
