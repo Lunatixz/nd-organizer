@@ -255,6 +255,8 @@ services:
       # (octoFiestaUrl / octoFiestaProvider), reported in status POSTs. Only the
       # docker-log container name stays here (it's infrastructure, not a URL).
       - OCTO_FIESTA_CONTAINER=octo-fiesta
+    networks:
+      - stack_network
       - PLAYLIST_DIR=/data/playlists
     networks:
       - stack_network

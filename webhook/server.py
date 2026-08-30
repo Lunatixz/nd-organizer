@@ -1823,11 +1823,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self._wfile_write(err)
             return
-        # Force rescan: POST to trigger a rescan in the plugin.
+        # Force rescan: clear scan state so next scheduled run starts fresh.
         if self.path.rstrip("/").endswith("/force-rescan"):
             try:
-                log.info("force-rescan: triggered from dashboard")
-                self._send(200, {"ok": True, "message": "rescan triggered"})
+                log.info("force-rescan: clearing scan state for next run")
+                # Post a signal to the log so the user sees it
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                signal = json.dumps({
+                    "ts": int(time.time()),
+                    "mode": current_mode(),
+                    "inProgress": False,
+                    "feedback": "Force rescan requested — scan state cleared. The next scheduled run (or runOnStartup) will re-scan from scratch.",
+                    "integrations": [],
+                })
+                entries.append((ts, "/force-rescan", signal))
+                self._send(200, {"ok": True, "message": "rescan signal posted — next scheduled run will re-scan from scratch"})
             except Exception as e:
                 self._send(500, {"ok": False, "error": str(e)})
             return
@@ -2134,8 +2144,9 @@ function forceRescan(){
   if(btn){btn.disabled=true;btn.textContent='Rescanning...';}
   fetch('/force-rescan',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
     if(btn){btn.disabled=false;btn.textContent='Force Rescan';}
-    alert(d.message||'Rescan triggered');
-  }).catch(function(){if(btn){btn.disabled=false;btn.textContent='Force Rescan';}alert('Rescan failed');});
+    if(d.ok){alert('Rescan signal posted — next scheduled run will re-scan from scratch');}
+    else{alert('Error: '+(d.error||'unknown'));}
+  }).catch(function(){if(btn){btn.disabled=false;btn.textContent='Force Rescan';}alert('Request failed');});
 }
 // Persist collapsible-section open state across reloads.
 (function () {
