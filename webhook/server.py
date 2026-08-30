@@ -1595,6 +1595,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Internet radio: add a station via the radio sidecar (form-encoded).
         if self.path.rstrip("/").endswith("/radio-add"):
+            log.info("radio-add: handler entered, body=%d bytes", len(body))
             try:
                 data = json.loads(body) if body else {}
                 stations = data.get("stations") or []
@@ -1612,8 +1613,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 import urllib.request as _ur
                 payload = json.dumps({"stations": [{"name": name, "url": url, "homepage": homepage}]}).encode()
-                log.info("radio-add: forwarding %s to nd-organizer-radio:8100/add", name)
-                req = _ur.Request("http://nd-organizer-radio:8100/add", data=payload,
+                target = "http://nd-organizer-radio:8100/add"
+                log.info("radio-add: forwarding %s to %s", name, target)
+                req = _ur.Request(target, data=payload,
                                   headers={"Content-Type": "application/json"})
                 resp = _ur.urlopen(req, timeout=10).read()
                 log.info("radio-add: response %s", resp.decode("utf-8", "replace")[:200])
@@ -1825,6 +1827,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         # Force rescan: clear scan state so next scheduled run starts fresh.
         if self.path.rstrip("/").endswith("/force-rescan"):
+            log.info("force-rescan: handler entered, body=%d bytes", len(body))
             try:
                 log.info("force-rescan: clearing scan state for next run")
                 # Post a signal to the log so the user sees it
