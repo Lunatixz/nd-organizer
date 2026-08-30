@@ -275,7 +275,7 @@ pulls them (no local build, no build context needed). Tags: `:latest`, `:main`,
 and `vX.Y.Z` semver tags per release.
 
 Here is the **complete `docker-compose.yml`** — Navidrome plus all six sidecars
-(octo-fiesta, acoustid, webhook, filter proxy, mysql, radio, essentia) on one shared network.
+(octo-fiesta, acoustid, webhook, filter proxy, mysql, essentia) on one shared network.
 Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
 
 ```yaml
@@ -508,14 +508,11 @@ services:
       - "8099:8099"
     volumes:
       - ./data:/data          # webhook.log persists here
-      # Read-only Docker socket: lets the dashboard read octo-fiesta's logs
-      # (octo exposes only the Subsonic API, no /logs endpoint).
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /path/to/navidrome/data:/data/nd:ro    # navidrome.db for radio management
     environment:
-      # octo-fiesta's URL + provider come from the plugin's Navidrome config
-      # (octoFiestaUrl / octoFiestaProvider), reported in status POSTs. Only the
-      # docker-log container name stays here (it's infrastructure, not a URL).
       - OCTO_FIESTA_CONTAINER=octo-fiesta
+      - NAVIDROME_DB=/data/nd/navidrome.db
     networks:
       - stack_network
     # The dashboard pulls each sidecar's /logs by container name (same
@@ -542,21 +539,6 @@ services:
       - "8098:8098"
     environment:
       - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
-    networks:
-      - stack_network
-
-  # Internet radio sidecar (from WB2024/Add-Navidrome-Radios): search/add radio
-  # stations via Radio-Browser, written straight into Navidrome's `radio` table.
-  # Mount Navidrome's DATA dir (with navidrome.db) read-write at /data.
-    image: ghcr.io/lunatixz/nd-organizer/radio:latest
-    restart: unless-stopped
-    ports:
-      - "8100:8100"
-    environment:
-      - NAVIDROME_DB=/data/navidrome.db
-      - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
-    volumes:
-      - /path/to/navidrome/data:/data:rw    # MUST contain navidrome.db
     networks:
       - stack_network
 
@@ -753,23 +735,19 @@ docker build -t nd-organizer-proxy proxy/
 docker build -t nd-organizer-mysql mysql/
 ```
 
-### Internet radio (optional)
+### Internet radio (built into webhook)
 
-Based on [WB2024/Add-Navidrome-Radios](https://github.com/WB2024/Add-Navidrome-Radios)
-(CLI) as an always-on sidecar: search the **Radio-Browser** community database
-and add stations directly into Navidrome's `radio` table — the same way the web
-UI does — so they appear without a restart.
+Radio management is built directly into the webhook dashboard. Search the
+**Radio-Browser** community database and add stations into Navidrome's `radio`
+table — the same way the web UI does — so they appear without a restart.
 
-```bash
-cd radio && docker compose up -d
-```
-
-- **It needs Navidrome's data dir** (the one with `navidrome.db`) mounted
-  read-write at `/data`. Point `NAVIDROME_DB` at the `.db` inside it (default
-  `/data/navidrome.db`).
-- **Endpoints**: `GET /search?q=...&type=byname|bytag|bycountry`, `GET /top`,
-  `GET /list`, `POST /add {"stations":[{name,url,homepage}]}` (dedups by
-  name/url). Health at `GET /health`.
+- **Prerequisite**: mount Navidrome's data dir (the one with `navidrome.db`) at
+  `/data/nd/navidrome.db` in the webhook container.
+- **Webhook environment**: `NAVIDROME_DB=/data/nd/navidrome.db`
+- **Dashboard**: the **Radio panel** shows existing stations with search, add,
+  remove, and rename — all via AJAX (no page reload).
+- **Endpoints**: `GET /radio-list`, `GET /radio-lookup?q=...&type=byname|bytag|bycountry`,
+  `POST /radio-add`, `POST /radio-remove`, `POST /radio-rename`.
 - **Dashboard**: the webhook shows a **Radio panel** (existing stations) and a
 - The sidecar is registered in `SIDECAR_LOG_PORTS` (port `8100`).
 
