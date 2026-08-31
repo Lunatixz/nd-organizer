@@ -12,6 +12,8 @@ mod config;
 #[cfg(target_arch = "wasm32")]
 mod artwork;
 #[cfg(target_arch = "wasm32")]
+mod apple_music;
+#[cfg(target_arch = "wasm32")]
 mod audiomuse;
 mod discogs;
 mod theaudiodb;
@@ -967,8 +969,8 @@ pub(crate) mod wasm {
                 w.push("favorites sync needs a Navidrome user (grant one in User Access, or set scanUser)".into());
             }
         }
-        if cfg.genre_from == "lastfm" && cfg.lastfm_api_key.trim().is_empty() {
-            w.push("genreFrom is lastfm but lastfmApiKey is empty".into());
+        if cfg.genre_source == "lastfm" && cfg.lastfm_api_key.trim().is_empty() {
+            w.push("genreSource is lastfm but lastfmApiKey is empty".into());
         }
         if cfg.use_lidarr_naming_schema
             && (cfg.lidarr_url.trim().is_empty() || cfg.lidarr_api_key.trim().is_empty())

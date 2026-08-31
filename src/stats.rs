@@ -1202,7 +1202,7 @@ pub mod host_stats {
     }
 
     /// Fetch genre/mood predictions from the Essentia sidecar and write them
-    /// to each track's GENRE and MOOD tags. Called when genreFrom == "essentia".
+    /// to each track's GENRE and MOOD tags. Called when genreSource == "essentia".
     /// Also writes mood as a fallback when AudioMuse didn't provide it.
     /// Returns the count of files whose tags were actually modified.
     pub fn write_essentia_genres(

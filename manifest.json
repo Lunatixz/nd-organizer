@@ -478,19 +478,23 @@
           "default": "musicbrainz",
           "oneOf": [
             {
-              "const": "lidarr",
-              "title": "Lidarr (tracked artists)"
-            },
-            {
               "const": "musicbrainz",
               "title": "MusicBrainz"
             },
             {
-              "const": "itunes",
-              "title": "iTunes Search API"
+              "const": "applemusic",
+              "title": "Apple Music / iTunes"
+            },
+            {
+              "const": "lidarr",
+              "title": "Lidarr (tracked artists)"
+            },
+            {
+              "const": "nfo",
+              "title": "NFO files (offline)"
             }
           ],
-          "description": "Which source wins when sources disagree: 'musicbrainz' (default), 'lidarr', or 'itunes'."
+          "description": "Which source wins when sources disagree. MusicBrainz is default (free, no key needed). Fallback chains fill gaps automatically."
         },
         "musicbrainzToken": {
           "type": "string",
@@ -539,7 +543,7 @@
           "default": false,
           "description": "When on, unstar in Navidrome propagates to unlove on Last.fm and vice versa. When off, sync is additive-only (never removes). Enable if you want both sources to stay perfectly in sync."
         },
-        "genreFrom": {
+        "genreSource": {
           "type": "string",
           "title": "Genre source",
           "default": "musicbrainz",
@@ -549,15 +553,19 @@
               "title": "MusicBrainz"
             },
             {
-              "const": "lastfm",
-              "title": "Last.fm"
+              "const": "discogs",
+              "title": "Discogs"
             },
             {
               "const": "essentia",
               "title": "Essentia (ML audio analysis)"
+            },
+            {
+              "const": "nfo",
+              "title": "NFO files (offline)"
             }
           ],
-          "description": "Where genres come from: 'musicbrainz', 'lastfm', or 'essentia' (ML audio analysis, requires essentiaUrl)."
+          "description": "Primary genre source. MusicBrainz is default (free, no key). Fallback chains fill gaps automatically."
         },
         "overwriteExistingTags": {
           "type": "boolean",
@@ -589,25 +597,29 @@
           "default": false,
           "description": "When false, existing embedded/sidecar art is kept if present."
         },
-        "artworkPriority": {
+        "artworkSource": {
           "type": "string",
-          "title": "Artwork priority",
+          "title": "Artwork source",
           "default": "coverartarchive",
           "oneOf": [
-            {
-              "const": "embedded",
-              "title": "Existing embedded art"
-            },
             {
               "const": "coverartarchive",
               "title": "Cover Art Archive"
             },
             {
-              "const": "itunes",
-              "title": "iTunes"
+              "const": "applemusic",
+              "title": "Apple Music / iTunes"
+            },
+            {
+              "const": "theaudiodb",
+              "title": "TheAudioDB"
+            },
+            {
+              "const": "embedded",
+              "title": "Existing embedded art"
             }
           ],
-          "description": "Which artwork to prefer when several exist, in priority order, e.g. 'coverartarchive', 'embedded', 'folder'."
+          "description": "Primary artwork source. Fallback chain tries other configured sources automatically if primary fails."
         },
         "artworkFront": {
           "type": "boolean",
@@ -633,11 +645,21 @@
           "default": false,
           "description": "Download booklet / medium art when available."
         },
-        "downloadLyrics": {
-          "type": "boolean",
-          "title": "Download lyrics files",
-          "default": false,
-          "description": "Fetch synchronized lyrics from LRCLIB (lrclib.net) and save them next to each track."
+        "lyricsSource": {
+          "type": "string",
+          "title": "Lyrics source",
+          "default": "lrclib",
+          "oneOf": [
+            {
+              "const": "lrclib",
+              "title": "LRCLIB (synced + plain)"
+            },
+            {
+              "const": "genius",
+              "title": "Genius (plain + annotations)"
+            }
+          ],
+          "description": "Primary lyrics source. LRCLIB is default (free, no key). Fallback tries other configured sources automatically."
         },
         "lyricsFormat": {
           "type": "string",
@@ -948,6 +970,48 @@
           "title": "Fetch lyrics from Genius",
           "default": false,
           "description": "When enabled, fetches song lyrics from Genius as a fallback when LRCLIB doesn't have them. Requires geniusToken."
+        },
+        "appleMusicCountries": {
+          "type": "string",
+          "title": "Countries",
+          "default": "",
+          "description": "Comma-separated country codes for Apple Music storefronts (e.g. 'us,gb,de'). Leave empty to auto-detect from Navidrome locale."
+        },
+        "appleMusicCacheTtl": {
+          "type": "integer",
+          "title": "Cache TTL (days)",
+          "default": 7,
+          "description": "How long to cache Apple Music metadata before re-fetching."
+        },
+        "appleMusicArtistImages": {
+          "type": "boolean",
+          "title": "Artist images",
+          "default": true,
+          "description": "Fetch artist images from Apple Music."
+        },
+        "appleMusicArtistBios": {
+          "type": "boolean",
+          "title": "Artist biographies",
+          "default": true,
+          "description": "Fetch artist biographies from Apple Music."
+        },
+        "appleMusicSimilarArtists": {
+          "type": "boolean",
+          "title": "Similar artists",
+          "default": true,
+          "description": "Fetch similar artists from Apple Music."
+        },
+        "appleMusicAlbumArt": {
+          "type": "boolean",
+          "title": "Album artwork",
+          "default": true,
+          "description": "Fetch album artwork from iTunes."
+        },
+        "appleMusicAlbumInfo": {
+          "type": "boolean",
+          "title": "Album info",
+          "default": true,
+          "description": "Fetch album editorial notes from Apple Music."
         },
         "useCommunityRatings": {
           "type": "boolean",
@@ -1530,6 +1594,64 @@
             {
               "type": "Control",
               "scope": "#/properties/geniusLyrics"
+            }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Apple Music / iTunes",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Free metadata from iTunes APIs + Apple Music web scraping. Provides album artwork, artist images, biographies, and similar artists. No API key needed."
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/appleMusicCountries"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/appleMusicCacheTtl"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/appleMusicAlbumArt"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/appleMusicAlbumInfo"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/appleMusicArtistImages"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/appleMusicArtistBios"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/appleMusicSimilarArtists"
+                }
+              ]
             }
           ]
         },

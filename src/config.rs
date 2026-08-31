@@ -74,7 +74,8 @@ impl SkipContentMode {
 pub enum PrimarySource {
     Lidarr,
     MusicBrainz,
-    Itunes,
+    AppleMusic,
+    Nfo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,7 +288,7 @@ pub struct Config {
     pub lastfm_api_secret: String,
     /// Last.fm account password (used once to obtain a session key).
     pub lastfm_password: String,
-    pub genre_from: String,
+    pub genre_source: String,
     pub overwrite_existing_tags: bool,
     pub write_playcount: bool,
 
@@ -295,14 +296,14 @@ pub struct Config {
     pub embed_artwork: bool,
     pub write_cover_jpg: bool,
     pub overwrite_art: bool,
-    pub artwork_priority: String,
+    pub artwork_source: String,
     pub artwork_front: bool,
     pub artwork_back: bool,
     pub artwork_cd: bool,
     pub artwork_booklet: bool,
 
     // Lyrics
-    pub download_lyrics: bool,
+    pub lyrics_source: String,
     pub lyrics_format: String,
 
     // Lidarr
@@ -334,6 +335,15 @@ pub struct Config {
     // Genius (lyrics, annotations, artist backgrounds)
     pub genius_token: String,
     pub genius_lyrics: bool,
+
+    // Apple Music (iTunes APIs + Apple Music web scraping)
+    pub apple_music_countries: String,
+    pub apple_music_cache_ttl: i32,
+    pub apple_music_artist_images: bool,
+    pub apple_music_artist_bios: bool,
+    pub apple_music_similar_artists: bool,
+    pub apple_music_album_art: bool,
+    pub apple_music_album_info: bool,
 
     // ListenBrainz username (defaults to lastfmUser if empty)
     pub listenbrainz_user: String,
@@ -451,18 +461,18 @@ impl Default for Config {
             lastfm_user: String::new(),
             lastfm_api_secret: String::new(),
             lastfm_password: String::new(),
-            genre_from: "musicbrainz".into(),
+            genre_source: "musicbrainz".into(),
             overwrite_existing_tags: false,
             write_playcount: false,
             embed_artwork: true,
             write_cover_jpg: false,
             overwrite_art: false,
-            artwork_priority: "coverartarchive".into(),
+            artwork_source: "coverartarchive".into(),
             artwork_front: true,
             artwork_back: false,
             artwork_cd: false,
             artwork_booklet: false,
-            download_lyrics: false,
+            lyrics_source: "lrclib".into(),
             lyrics_format: "lrc".into(),
             lidarr_url: "http://lidarr:8686".into(),
             lidarr_api_key: String::new(),
@@ -481,6 +491,13 @@ impl Default for Config {
             theaudiodb_fanart: false,
             genius_token: String::new(),
             genius_lyrics: false,
+            apple_music_countries: String::new(),
+            apple_music_cache_ttl: 7,
+            apple_music_artist_images: true,
+            apple_music_artist_bios: true,
+            apple_music_similar_artists: true,
+            apple_music_album_art: true,
+            apple_music_album_info: true,
             listenbrainz_user: String::new(),
             librefm_user: String::new(),
             librefm_session_key: String::new(),
@@ -596,18 +613,18 @@ impl Config {
             "lastfmUser",
             "lastfmApiSecret",
             "lastfmPassword",
-            "genreFrom",
+            "genreSource",
             "overwriteExistingTags",
             "writePlaycount",
             "embedArtwork",
             "writeCoverJpg",
             "overwriteArt",
-            "artworkPriority",
+            "artworkSource",
             "artworkFront",
             "artworkBack",
             "artworkCd",
             "artworkBooklet",
-            "downloadLyrics",
+            "lyricsSource",
             "lyricsFormat",
             "lidarrUrl",
             "lidarrApiKey",
@@ -632,6 +649,14 @@ impl Config {
             "theAudioDbFanart",
             "geniusToken",
             "geniusLyrics",
+            // Apple Music
+            "appleMusicCountries",
+            "appleMusicCacheTtl",
+            "appleMusicArtistImages",
+            "appleMusicArtistBios",
+            "appleMusicSimilarArtists",
+            "appleMusicAlbumArt",
+            "appleMusicAlbumInfo",
             // Libre.fm
             "librefmUser",
             "librefmSessionKey",
@@ -880,7 +905,8 @@ impl Config {
         if let Some(v) = map.get("primarySource") {
             c.primary_source = match v.as_str() {
                 "lidarr" => PrimarySource::Lidarr,
-                "itunes" => PrimarySource::Itunes,
+                "applemusic" | "itunes" => PrimarySource::AppleMusic,
+                "nfo" => PrimarySource::Nfo,
                 _ => PrimarySource::MusicBrainz,
             };
         }
@@ -899,22 +925,24 @@ impl Config {
         if let Some(v) = map.get("lastfmPassword") {
             c.lastfm_password = v.clone();
         }
-        if let Some(v) = map.get("genreFrom") {
-            c.genre_from = v.clone();
+        if let Some(v) = map.get("genreSource") {
+            c.genre_source = v.clone();
         }
         c.overwrite_existing_tags = bool(map, "overwriteExistingTags", c.overwrite_existing_tags);
         c.write_playcount = bool(map, "writePlaycount", c.write_playcount);
         c.embed_artwork = bool(map, "embedArtwork", c.embed_artwork);
         c.write_cover_jpg = bool(map, "writeCoverJpg", c.write_cover_jpg);
         c.overwrite_art = bool(map, "overwriteArt", c.overwrite_art);
-        if let Some(v) = map.get("artworkPriority") {
-            c.artwork_priority = v.clone();
+        if let Some(v) = map.get("artworkSource") {
+            c.artwork_source = v.clone();
         }
         c.artwork_front = bool(map, "artworkFront", c.artwork_front);
         c.artwork_back = bool(map, "artworkBack", c.artwork_back);
         c.artwork_cd = bool(map, "artworkCd", c.artwork_cd);
         c.artwork_booklet = bool(map, "artworkBooklet", c.artwork_booklet);
-        c.download_lyrics = bool(map, "downloadLyrics", c.download_lyrics);
+        if let Some(v) = map.get("lyricsSource") {
+            c.lyrics_source = v.clone();
+        }
         if let Some(v) = map.get("lyricsFormat") {
             c.lyrics_format = v.clone();
         }
@@ -962,6 +990,17 @@ impl Config {
             c.genius_token = v.clone();
         }
         c.genius_lyrics = bool(map, "geniusLyrics", c.genius_lyrics);
+        if let Some(v) = map.get("appleMusicCountries") {
+            c.apple_music_countries = v.clone();
+        }
+        if let Some(v) = map.get("appleMusicCacheTtl") {
+            c.apple_music_cache_ttl = v.trim().parse().unwrap_or(c.apple_music_cache_ttl);
+        }
+        c.apple_music_artist_images = bool(map, "appleMusicArtistImages", c.apple_music_artist_images);
+        c.apple_music_artist_bios = bool(map, "appleMusicArtistBios", c.apple_music_artist_bios);
+        c.apple_music_similar_artists = bool(map, "appleMusicSimilarArtists", c.apple_music_similar_artists);
+        c.apple_music_album_art = bool(map, "appleMusicAlbumArt", c.apple_music_album_art);
+        c.apple_music_album_info = bool(map, "appleMusicAlbumInfo", c.apple_music_album_info);
         if let Some(v) = map.get("listenbrainzUser") {
             c.listenbrainz_user = v.clone();
         }
@@ -1104,7 +1143,7 @@ mod tests {
             ("writeNfo", "true"),
             ("artworkBack", "true"),
             ("artworkFront", "false"),
-            ("downloadLyrics", "true"),
+            ("lyricsSource", "lrclib"),
             ("lyricsFormat", "lrc"),
             ("starTallyEnabled", "false"),
             ("starHalfPlayPercent", "60"),
@@ -1128,7 +1167,7 @@ mod tests {
         assert!(!c.nest_buckets_under_various);
         assert!(c.read_nfo && c.write_nfo);
         assert!(c.artwork_back && !c.artwork_front);
-        assert!(c.download_lyrics);
+        assert!(c.lyrics_source == "lrclib");
         assert_eq!(c.lyrics_format, "lrc");
         assert!(!c.star_tally_enabled);
         assert_eq!(c.star_half_play_percent, 60);

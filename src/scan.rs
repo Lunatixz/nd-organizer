@@ -1040,7 +1040,7 @@ let mut total_to_move = 0usize;
                 }
             }
             // Fetch + write lyrics sidecars (.lrc / .txt) next to the moved files.
-            if cfg.download_lyrics {
+            if cfg.lyrics_source == "lrclib" || cfg.lyrics_source == "genius" {
                 let n = download_lyrics_for(&root, &plan, &files, cfg.lyrics_format.as_str());
                 if n > 0 {
                     actions.push(serde_json::json!({
@@ -1060,9 +1060,9 @@ let mut total_to_move = 0usize;
                 }
             }
             // Essentia genre/mood: fetch from the Essentia sidecar and write
-            // genres (when genreFrom=essentia) and mood (fallback when AudioMuse
+            // genres (when genreSource=essentia) and mood (fallback when AudioMuse
             // didn't provide it). Requires essentiaUrl to be set.
-            if cfg.genre_from == "essentia" && !cfg.essentia_url.trim().is_empty() {
+            if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() {
                 let n = crate::stats::host_stats::write_essentia_genres(cfg, &root, &plan, &files);
                 if n > 0 {
                     actions.push(serde_json::json!({
@@ -1591,13 +1591,12 @@ fn apply_artwork(
         ));
         return None;
     };
-    // artworkPriority picks the external source. Only 'coverartarchive' is
-    // implemented as a download source; 'embedded'/'itunes' keep whatever art
-    // the files/folder already have, so no external fetch happens.
-    if cfg.artwork_priority != "coverartarchive" {
+    // artworkSource picks the external source. 'coverartarchive', 'applemusic',
+    // and 'theaudiodb' trigger downloads; 'embedded' keeps existing art.
+    if cfg.artwork_source != "coverartarchive" && cfg.artwork_source != "applemusic" && cfg.artwork_source != "theaudiodb" {
         crate::wasm::log_info(&format!(
-            "artwork: priority '{}' keeps existing art (only 'coverartarchive' downloads new)",
-            cfg.artwork_priority
+            "artwork: source '{}' — trying fallback chain",
+            cfg.artwork_source
         ));
         return None;
     }
