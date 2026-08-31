@@ -240,9 +240,6 @@ def sidecar_logs_html():
         card = _sidecar_card(name, _fetch_json(name, port, "/health", _sidecar_status), _fetch_logs(name, port))
         if card:
             out.append(card)
-    octo = _octo_fiesta_card()
-    if octo:
-        out.append(octo)
     # Webhook's own card with recent log entries
     try:
         log_lines = read_tail(LOGFILE, 20)
@@ -654,60 +651,7 @@ def radio_list_stations():
         return []
 
 
-# ---------------------------------------------------------------- octo-fiesta
-#
-# Octo-Fiesta is a third-party Subsonic proxy - it exposes only the Subsonic
-# API (no /status, no /logs). Its URL + provider come from the plugin's status
-# POST (Navidrome plugin config, like the other sidecar URLs); health is a
-# Subsonic ping; activity ("intercept") is its Docker logs, read through the
-# mounted (read-only) Docker socket.
-
-OCTO_FIESTA_CONTAINER = os.environ.get("OCTO_FIESTA_CONTAINER", "octo-fiesta")
 DOCKER_SOCK = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
-_octo_health = {}  # -> (ts, ok, detail)
-_octo_logs = {}    # -> (ts, text|None)
-
-
-def _octo_fiesta_config():
-    """Latest octoFiestaUrl / octoFiestaProvider from the plugin status POST."""
-    url, provider = "", "SquidWTF"
-    for _, _, body in reversed(entries):
-        try:
-            j = json.loads(body)
-        except Exception:
-            continue
-        if isinstance(j, dict):
-            if j.get("octoFiestaUrl"):
-                url = str(j["octoFiestaUrl"]).strip()
-            if j.get("octoFiestaProvider"):
-                provider = str(j["octoFiestaProvider"]).strip()
-            if url:
-                break
-    return url.rstrip("/"), provider or "SquidWTF"
-
-
-def _octo_fiesta_health():
-    now = time.time()
-    c = _octo_health.get("v")
-    if c and now - c[0] < 30:
-        return c[1], c[2]
-    url, _ = _octo_fiesta_config()
-    if not url:
-        _octo_health["v"] = (time.time(), False, "not configured")
-        return False, "not configured"
-    if not _within_budget():
-        return c[1], c[2]
-    try:
-        req = urllib.request.Request(
-            url + "/rest/ping", headers={"Accept": "text/xml"})
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
-            body = resp.read().decode("utf-8", "replace")
-            ok = resp.status == 200 and 'status="ok"' in body
-            _octo_health["v"] = (time.time(), ok, "HTTP %d" % resp.status)
-            return ok, "HTTP %d" % resp.status
-    except Exception as e:
-        _octo_health["v"] = (time.time(), False, str(e)[:80])
-        return False, str(e)[:80]
 
 
 def _docker_logs(container, tail=300):
@@ -743,53 +687,6 @@ def _docker_logs(container, tail=300):
         return "".join(out).rstrip("\n")
     except Exception:
         return None
-
-
-def _octo_fiesta_logs():
-    now = time.time()
-    c = _octo_logs.get("v")
-    if c and now - c[0] < 30:
-        return c[1]
-    text = _docker_logs(OCTO_FIESTA_CONTAINER)
-    _octo_logs["v"] = (time.time(), text)
-    return text
-
-
-def _octo_fiesta_card():
-    """Health + recent activity card for octo-fiesta. Shown whenever the plugin
-    reports an octoFiestaUrl: ONLINE with stats+logs when reachable, an
-    UNREACHABLE health pill (with the failure detail) when it can't be pinged.
-    Hidden only when octo isn't configured."""
-    url, provider = _octo_fiesta_config()
-    if not url:
-        return ""  # not configured
-    ok, detail = _octo_fiesta_health()
-    state, state_cls = ("ONLINE", "ok") if ok else ("UNREACHABLE", "bad")
-    rows = ""
-    logs = _octo_fiesta_logs()
-    if logs:
-        keep = []
-        for line in logs.splitlines():
-            low = line.lower()
-            if any(k in low for k in ("download", "fetched", "provider", "squid",
-                                      "deezer", "qobuz", "yandex", "error",
-                                      "stream", "external", "missing", "fail")):
-                keep.append(line)
-        rows = "".join("<div class='fh'><span class='dim'>%s</span></div>" % esc(l)
-                       for l in keep[-25:])
-        if not keep:
-            rows = "<div class='note'>octo-fiesta is online; no provider activity logged recently.</div>"
-    else:
-        rows = "<div class='note'>Logs unavailable (Docker socket not mounted).</div>"
-    return ("<div class='card'><h2>Octo-Fiesta <span class='tag mode'>missing-track proxy</span></h2>"
-            "<div class='now-top'><span class='pill %s'>%s</span>"
-            "<span class='now-line'>ping %s &middot; <a href='%s'>open</a></span></div>"
-            "<div class='sc-stats'><span>health <b>%s</b></span>"
-            "<span>provider <b>%s</b></span><span>container <b>%s</b></span></div>"
-            "%s</div>") % (
-        state_cls, state, esc(detail), esc(url),
-        esc(detail), esc(provider),
-        esc(OCTO_FIESTA_CONTAINER), rows)
 
 
 def load_log():
@@ -1657,6 +1554,14 @@ def activity_entry(ts, path, body, fallback_mode):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, data):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        body = json.dumps(data).encode()
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self._wfile_write(body)
+
     def _read_body(self):
         try:
             n = int(self.headers.get("Content-Length", 0))

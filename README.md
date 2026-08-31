@@ -413,77 +413,25 @@ services:
   #   networks:
   #     - stack_network
 
-  octo-fiesta:
-    image: ghcr.io/v1ck3s/octo-fiesta
-    container_name: octo-fiesta
-    restart: unless-stopped
-    ports:
-      - "4535:8080"
-    environment:
-      - ASPNETCORE_ENVIRONMENT=Production
-      - ASPNETCORE_URLS=http://+:8080
-      - Library__DownloadPath=/app/downloads
-      # Upstream = our filter proxy (keeps keyword/skip filtering), which
-      # forwards to Navidrome. Point directly at http://navidrome:4533 to skip
-      # the filter layer for this path.
-      - Subsonic__Url=http://nd-organizer-proxy:4534
-      # Music service: SquidWTF (no creds) | Deezer | Qobuz | Yandex
-      - Subsonic__MusicService=${MUSIC_SERVICE:-SquidWTF}
-      # Cache = stream missing tracks without writing to the library.
-      # Set to Permanent + mount DOWNLOAD_PATH to save them into the library.
-      - Subsonic__StorageMode=${STORAGE_MODE:-Cache}
-      - Subsonic__CacheDurationHours=${CACHE_DURATION_HOURS:-1}
-      - Subsonic__EnableExternalPlaylists=${ENABLE_EXTERNAL_PLAYLISTS:-true}
-      - Subsonic__PlaylistsDirectory=${PLAYLISTS_DIRECTORY:-playlists}
-      - Subsonic__ExplicitFilter=${EXPLICIT_FILTER:-All}
-      - Subsonic__DownloadMode=${DOWNLOAD_MODE:-Track}
-      - Subsonic__AutoUpgradeQuality=${AUTO_UPGRADE_QUALITY:-false}
-      - Subsonic__DisableLibraryScan=${DISABLE_LIBRARY_SCAN:-false}
-      # NOTE: the folder template default ({artist}/{album}/{track} - {title})
-      # lives in .env.example - braces inside a ${VAR:-default} break compose's
-      # interpolation, so FOLDER_TEMPLATE must come from the .env file.
-      - Subsonic__FolderTemplate=${FOLDER_TEMPLATE}
-      # Admin creds only needed for Permanent-mode library registration.
-      - Subsonic__AdminUsername=${SUBSONIC_ADMIN_USERNAME:-}
-      - Subsonic__AdminPassword=${SUBSONIC_ADMIN_PASSWORD:-}
-
-      # ===== SQUIDWTF (free, no credentials) =====
-      # Backend: Qobuz | Tidal | AmazonMusic | Deemix
-      - SquidWTF__Source=${SQUIDWTF_SOURCE:-Qobuz}
-      # Quality: Qobuz 27/7/6/5, Tidal HI_RES_LOSSLESS/LOSSLESS/HIGH/LOW,
-      #          AmazonMusic FLAC_24/FLAC_16/AAC/OPUS/ATMOS, Deemix FLAC/MP3_320/MP3_128
-      - SquidWTF__Quality=${SQUIDWTF_QUALITY:-6}
-      - SquidWTF__InstanceTimeoutSeconds=${SQUIDWTF_INSTANCE_TIMEOUT:-5}
-      # Force a specific Tidal API instance (e.g. a self-hosted hifi-api). When
-      # set, the remote instances.json is NOT fetched - only this URL is used.
-      - SquidWTF__Instances__0=${SQUIDWTF_INSTANCE:-}
-      # Override URL of the remote instances.json (ignored if SQUIDWTF_INSTANCE
-      # is set). Defaults to https://tidal-uptime.geeked.wtf/ if empty.
-      - SquidWTF__InstancesUrl=${SQUIDWTF_INSTANCES_URL:-}
-
-      # ===== DEEZER (requires DEEZER_ARL) =====
-      - Deezer__Arl=${DEEZER_ARL:-}
-      - Deezer__ArlFallback=${DEEZER_ARL_FALLBACK:-}
-      - Deezer__Quality=${DEEZER_QUALITY:-}
-
-      # ===== QOBUZ (requires QOBUZ_USER_AUTH_TOKEN + QOBUZ_USER_ID) =====
-      - Qobuz__UserAuthToken=${QOBUZ_USER_AUTH_TOKEN:-}
-      - Qobuz__UserId=${QOBUZ_USER_ID:-}
-      - Qobuz__Quality=${QOBUZ_QUALITY:-}
-
-      # ===== YANDEX (requires YANDEX_OAUTH_TOKEN) =====
-      - Yandex__OAuthToken=${YANDEX_OAUTH_TOKEN:-}
-      - Yandex__Quality=${YANDEX_QUALITY:-}
-      - Yandex__Language=${YANDEX_LANGUAGE:-en}
-      - Yandex__IncludeUnavailable=${YANDEX_INCLUDE_UNAVAILABLE_TRACKS:-false}
-    networks:
-      - stack_network
-    # OPTIONAL - Permanent mode saves fetched tracks into a Navidrome-scanned
-    # library folder (host path must match a Navidrome library mount):
-    #   volumes:
-    #     - ${DOWNLOAD_PATH:-/path/to/music/Octo-Fiesta}:/app/downloads
-    #   environment:
-    #     - Subsonic__StorageMode=Permanent
+  # ===== Octo-Fiesta (OPTIONAL - missing-track proxy) =====
+  # Third-party Subsonic proxy that streams songs your library doesn't have.
+  # Supports SquidWTF (free), Deezer, Qobuz, Yandex.
+  # Uncomment below to deploy, then set octoFiestaUrl in plugin settings.
+  # octo-fiesta:
+  #   image: ghcr.io/v1ck3s/octo-fiesta
+  #   container_name: octo-fiesta
+  #   restart: unless-stopped
+  #   ports:
+  #     - "4535:8080"
+  #   environment:
+  #     - ASPNETCORE_ENVIRONMENT=Production
+  #     - ASPNETCORE_URLS=http://+:8080
+  #     - Subsonic__Url=http://nd-organizer-proxy:4534
+  #     - Subsonic__MusicService=${MUSIC_SERVICE:-SquidWTF}
+  #     - Subsonic__StorageMode=${STORAGE_MODE:-Cache}
+  #     - Subsonic__CacheDurationHours=${CACHE_DURATION_HOURS:-1}
+  #   networks:
+  #     - stack_network
 
   nd-organizer-acoustid:
     image: ghcr.io/lunatixz/nd-organizer/acoustid:latest
@@ -578,7 +526,7 @@ docker compose up -d                                # deploy everything
 ```
 
 To deploy just one service, `docker compose up -d <name>` (the per-service files
-in `acoustid/`, `webhook/`, `proxy/`, `mysql/`, `radio/` still work independently).
+in `acoustid/`, `webhook/`, `proxy/`, `mysql/` still work independently).
 The `.env` file next to this compose supplies the `${VAR}` values — start from
 the bundled **`.env.example`** (`copy .env.example .env`), which documents every
 octo-fiesta option and pre-fills `FOLDER_TEMPLATE` (it must live in `.env`, not
