@@ -204,8 +204,14 @@ class Handler(BaseHTTPRequestHandler):
             self._wfile_write(body)
             return
         if self.path.startswith("/status"):
+            ver = ""
+            try:
+                ver = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
+            except Exception:
+                pass
             info = {
                 "service": "nd-organizer-mysql",
+                "version": ver,
                 "uptime": int(time.time() - STARTED),
                 "ops": OPS,
                 "lastOp": LAST_OP,

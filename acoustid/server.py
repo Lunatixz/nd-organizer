@@ -236,8 +236,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/health"):
             mounts = [m for m in COMMON_MOUNTS if os.path.isdir(m)]
+            ver = ""
+            try:
+                ver = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
+            except Exception:
+                pass
             log.info("health check from %s (mounts=%s)", self.client_address[0], mounts)
-            self._send(200, {"ok": True, "service": SERVICE, "port": PORT, "libraryMounts": mounts})
+            self._send(200, {"ok": True, "service": SERVICE, "port": PORT, "libraryMounts": mounts, "version": ver})
         else:
             self._send(404, {"error": "not found"})
 

@@ -192,9 +192,12 @@ def _sidecar_card(name, status, logs):
         lines = logs.splitlines()
         logs_html = ("<details><summary>logs <span class='dim'>%d lines</span></summary><pre>%s</pre></details>"
                      % (len(lines), esc(logs)))
-    return ("<div class='sc'><div class='sc-top'><b>%s</b>"
+    ver = ""
+    if status and status.get("version"):
+        ver = " <span class='dim'>v%s</span>" % esc(status["version"])
+    return ("<div class='sc'><div class='sc-top'><b>%s</b>%s"
             "<span class='tag %s'>%s</span></div>%s%s%s</div>") % (
-        esc(name), state_cls, state, stats, extra, logs_html)
+        esc(name), ver, state_cls, state, stats, extra, logs_html)
 
 
 def _uptime(secs):
@@ -1745,9 +1748,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _render(self):
         if self.path.startswith("/health"):
+            ver = ""
+            try:
+                ver = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
+            except Exception:
+                pass
             data = json.dumps({
                 "ok": True, "service": "nd-organizer-webhook", "port": PORT,
-                "events": len(entries), "log": LOGFILE,
+                "events": len(entries), "log": LOGFILE, "version": ver,
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

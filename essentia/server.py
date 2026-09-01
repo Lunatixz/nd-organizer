@@ -162,8 +162,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.rstrip("/")
         if path == "/health":
+            ver = ""
+            try:
+                ver = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
+            except Exception:
+                pass
             self._send(200, {
                 "ok": True, "service": SERVICE, "port": PORT,
+                "version": ver,
                 "essentia": ESSENTIA_AVAILABLE,
                 "genre_model": GENRE_MODEL is not None,
                 "mood_model": MOOD_MODEL is not None,

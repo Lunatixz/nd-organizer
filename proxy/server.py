@@ -256,8 +256,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Rich status for the webhook dashboard (never forwarded).
         if method == "GET" and path.rstrip("/").endswith("/status"):
+            ver = ""
+            try:
+                ver = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
+            except Exception:
+                pass
             info = {
                 "service": "nd-organizer-proxy",
+                "version": ver,
                 "uptime": int(time.time() - STARTED),
                 "requests": REQUESTS,
                 "lastRequest": int(LAST_REQUEST_TS) if LAST_REQUEST_TS else 0,
