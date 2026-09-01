@@ -298,3 +298,68 @@ pub fn release_group_for_release(release_mbid: &str) -> Option<String> {
     }
     None
 }
+
+/// Fetch genre tags from a MusicBrainz release. Uses the release's tags
+/// endpoint to get user-contributed genre tags.
+pub fn fetch_genres(release_mbid: &str, token: &str) -> Option<Vec<String>> {
+    if release_mbid.trim().is_empty() {
+        return None;
+    }
+    let cache_key = format!("mb:genres:{release_mbid}");
+    if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+        if let Ok(genres) = serde_json::from_slice::<Vec<String>>(&v) {
+            return if genres.is_empty() { None } else { Some(genres) };
+        }
+    }
+    if !crate::net::circuit_probe(
+        "musicbrainz",
+        "https://musicbrainz.org/ws/2/",
+        &HashMap::new(),
+        15_000,
+    ) {
+        return None;
+    }
+    if !crate::net::throttle("musicbrainz", if token.trim().is_empty() { 1200 } else { 30 }) {
+        return None;
+    }
+    let url = format!(
+        "https://musicbrainz.org/ws/2/release/{}?inc=tags&fmt=json",
+        urlenc(release_mbid)
+    );
+    let mut headers = HashMap::from([(
+        "User-Agent".to_string(),
+        "nd-organizer/0.1 (https://github.com/lunatixz/nd-organizer)".to_string(),
+    )]);
+    if !token.trim().is_empty() {
+        headers.insert("Authorization".to_string(), format!("Bearer {}", token.trim()));
+    }
+    let req = host::http::HTTPRequest {
+        method: "GET".into(),
+        url,
+        headers,
+        no_follow_redirects: false,
+        body: vec![],
+        timeout_ms: 15_000,
+    };
+    match host::http::send(req) {
+        Ok(Some(resp)) if resp.status_code == 200 => {
+            crate::net::circuit_clear("musicbrainz");
+            let val: serde_json::Value = serde_json::from_slice(&resp.body).ok()?;
+            let tags = val.get("tags")?.as_array()?;
+            let genres: Vec<String> = tags
+                .iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect();
+            let _ = crate::store::kv().set_with_ttl(
+                &cache_key,
+                serde_json::to_vec(&genres).unwrap_or_default(),
+                7 * 24 * 3600,
+            );
+            if genres.is_empty() { None } else { Some(genres) }
+        }
+        _ => {
+            crate::net::circuit_mark_failed("musicbrainz");
+            None
+        }
+    }
+}

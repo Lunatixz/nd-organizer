@@ -1,6 +1,6 @@
-// Album artwork via the Cover Art Archive (MusicBrainz). Fetches front/back/
-// cd/booklet art for a release MBID (cached 7 days, throttled ~1 req/s), embeds
-// it into audio tags and/or writes a cover.jpg sidecar.
+// Album artwork via Cover Art Archive, Apple Music, and TheAudioDB. Fetches
+// front/back/cd/booklet art (cached 7 days, throttled ~1 req/s), embeds it
+// into audio tags and/or writes a cover.jpg sidecar.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -101,6 +101,55 @@ pub fn has_embedded(path: &Path) -> bool {
         .ok()
         .and_then(|t| t.primary_tag().map(|t| !t.pictures().is_empty()))
         .unwrap_or(false)
+}
+
+/// Fetch artwork with automatic fallback chain. Tries the selected source first,
+/// then other configured sources in order of robustness. Returns (bytes, source_name).
+pub fn fetch_with_fallback(
+    cfg: &crate::config::Config,
+    mbid: Option<&str>,
+    artist: &str,
+    album: &str,
+) -> Option<(Vec<u8>, String)> {
+    let countries = crate::apple_music::host_apple_music::parse_countries(&cfg.apple_music_countries);
+    let sources = match cfg.artwork_source.as_str() {
+        "coverartarchive" => vec!["coverartarchive", "applemusic", "theaudiodb"],
+        "applemusic" => vec!["applemusic", "coverartarchive", "theaudiodb"],
+        "theaudiodb" => vec!["theaudiodb", "coverartarchive", "applemusic"],
+        "embedded" => vec![],
+        _ => vec!["coverartarchive", "applemusic", "theaudiodb"],
+    };
+    for source in sources {
+        match source {
+            "coverartarchive" => {
+                if let Some(m) = mbid {
+                    if let Some(bytes) = fetch(m, ArtKind::Front) {
+                        return Some((bytes, "coverartarchive".into()));
+                    }
+                }
+            }
+            "applemusic" => {
+                if cfg.apple_music_album_art {
+                    if let Some(bytes) = crate::apple_music::host_apple_music::fetch_album_artwork(
+                        cfg, artist, album, &countries,
+                    ) {
+                        return Some((bytes, "applemusic".into()));
+                    }
+                }
+            }
+            "theaudiodb" => {
+                if !cfg.theaudiodb_key.is_empty() {
+                    if let Some(bytes) = crate::theaudiodb::host_theaudiodb::fetch_album_artwork(
+                        cfg, artist, album,
+                    ) {
+                        return Some((bytes, "theaudiodb".into()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Embed artwork into the file's tags (replaces the cover picture).

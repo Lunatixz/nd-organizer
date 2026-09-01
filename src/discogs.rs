@@ -151,4 +151,19 @@ pub mod host_discogs {
             }
         }
     }
+
+    /// Fetch genre + style tags for an album from Discogs.
+    pub fn fetch_genres(cfg: &Config, artist: &str, album: &str) -> Option<Vec<String>> {
+        if cfg.discogs_token.is_empty() {
+            return None;
+        }
+        let release = search_release(cfg, artist, album)?;
+        let mut genres = release.genres;
+        genres.extend(release.styles);
+        if genres.is_empty() {
+            None
+        } else {
+            Some(genres)
+        }
+    }
 }

@@ -1,7 +1,5 @@
-// TheAudioDB metadata layer: fanart, artist bios, and album descriptions.
-//
-// Used to enrich the library with visual assets (artist backgrounds, banners)
-// and textual metadata (biographies, album descriptions).
+// TheAudioDB metadata layer: fanart, artist bios, album descriptions,
+// album artwork, and genre tags.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +11,7 @@ pub struct TheAudioDbArtist {
     pub banner: String,
     pub fanart: String,
     pub thumb: String,
+    pub genre: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +20,7 @@ pub struct TheAudioDbAlbum {
     pub name: String,
     pub description: String,
     pub str_artwork: String,
+    pub genre: String,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -71,6 +71,7 @@ pub mod host_theaudiodb {
                     banner: a.get("strArtistBanner")?.as_str()?.to_string(),
                     fanart: a.get("strArtistFanart")?.as_str()?.to_string(),
                     thumb: a.get("strArtistThumb")?.as_str()?.to_string(),
+                    genre: a.get("strGenre")?.as_str()?.to_string(),
                 })
             }
             Ok(Some(_)) | Ok(None) | Err(_) => {
@@ -117,6 +118,7 @@ pub mod host_theaudiodb {
                     name: a.get("strAlbum")?.as_str()?.to_string(),
                     description: a.get("strDescriptionEN")?.as_str()?.to_string(),
                     str_artwork: a.get("strAlbumThumb")?.as_str()?.to_string(),
+                    genre: a.get("strGenre")?.as_str()?.to_string(),
                 })
             }
             Ok(Some(_)) | Ok(None) | Err(_) => {
@@ -124,5 +126,62 @@ pub mod host_theaudiodb {
                 None
             }
         }
+    }
+
+    /// Download album artwork bytes from TheAudioDB.
+    pub fn fetch_album_artwork(cfg: &Config, artist: &str, album: &str) -> Option<Vec<u8>> {
+        if cfg.theaudiodb_key.is_empty() {
+            return None;
+        }
+        let album_data = search_album(cfg, artist, album)?;
+        let artwork_url = album_data.str_artwork;
+        if artwork_url.is_empty() {
+            return None;
+        }
+        let cache_key = format!("tdb:art:{}", album_data.id);
+        if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+        if !net::circuit_probe("theaudiodb", "https://theaudiodb.com", &HashMap::new(), 10_000) {
+            return None;
+        }
+        if !net::throttle("theaudiodb", 1000) {
+            return None;
+        }
+        let req = host::http::HTTPRequest {
+            method: "GET".into(),
+            url: artwork_url,
+            headers: HashMap::new(),
+            no_follow_redirects: false,
+            body: vec![],
+            timeout_ms: 15_000,
+        };
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 && !resp.body.is_empty() => {
+                net::circuit_clear("theaudiodb");
+                let bytes = resp.body;
+                let _ = crate::store::kv().set_with_ttl(&cache_key, bytes.clone(), 7 * 24 * 3600);
+                Some(bytes)
+            }
+            _ => {
+                net::circuit_mark_failed("theaudiodb");
+                None
+            }
+        }
+    }
+
+    /// Fetch genre tags for an album from TheAudioDB.
+    pub fn fetch_genres(cfg: &Config, artist: &str, album: &str) -> Option<Vec<String>> {
+        if cfg.theaudiodb_key.is_empty() {
+            return None;
+        }
+        let album_data = search_album(cfg, artist, album)?;
+        let genre = album_data.genre;
+        if genre.is_empty() {
+            return None;
+        }
+        Some(genre.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
     }
 }

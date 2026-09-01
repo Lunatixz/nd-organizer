@@ -226,27 +226,54 @@ The plugin pulls metadata from multiple sources to enrich your library:
 
 | Source | What it provides | API Key | Config |
 |--------|------------------|---------|--------|
-| **MusicBrainz** | Release IDs, tracklists, classification | No (User-Agent only) | `musicbrainzToken` (optional, raises rate limit) |
-| **Cover Art Archive** | Front/back covers, liner notes, booklets | No | `artworkPriority = coverartarchive` |
-| **Last.fm** | Loved tracks, playcount, genres | Yes | `lastfmApiKey` + `lastfmUser` |
+| **MusicBrainz** | Release IDs, tracklists, classification, genre tags | No (User-Agent only) | `musicbrainzToken` (optional, raises rate limit) |
+| **Cover Art Archive** | Front/back covers, liner notes, booklets | No | `artworkSource = coverartarchive` |
+| **Apple Music / iTunes** | Album artwork, artist images, biographies | No | `appleMusicCountries`, `appleMusicAlbumArt`, etc. |
+| **Last.fm** | Loved tracks, playcount | Yes | `lastfmApiKey` + `lastfmUser` |
 | **ListenBrainz** | Listening metrics, scrobbles, ratings | Yes (MusicBrainz token) | `listenbrainzScrobble` |
 | **Lidarr** | Track/album ratings, monitored status | Yes | `lidarrUrl` + `lidarrApiKey` |
-| **Discogs** | Release credits, community ratings | Yes (personal token) | `discogsToken` + `discogsCredits` |
-| **TheAudioDB** | Artist fanart, bios, album descriptions | Yes (public key) | `theAudioDbKey` + `theAudioDbFanart` |
-| **Genius** | Lyrics, annotations, artist backgrounds | Yes (client token) | `geniusToken` + `geniusLyrics` |
+| **Discogs** | Release credits, community ratings, genre/style tags | Yes (personal token) | `discogsToken` + `discogsCredits` |
+| **TheAudioDB** | Artist fanart, bios, album descriptions, artwork, genres | Yes (public key) | `theAudioDbKey` + `theAudioDbFanart` |
+| **Genius** | Lyrics, annotations, artist backgrounds | Yes (client token) | `geniusToken` + `lyricsSource = genius` |
 | **AcoustID** | Fingerprinting, identity verification | Yes | `acoustidUrl` + `acoustidApiKey` |
 | **AudioMuse-AI** | BPM/key/mood acoustic tags | No | `audiomuseUrl` |
 | **Essentia** | Genre/mood ML analysis | No | `essentiaUrl` |
-| **LRCLIB** | Synchronized lyrics | No | `downloadLyrics` |
+| **LRCLIB** | Synchronized + plain lyrics | No | `lyricsSource = lrclib` |
+
+### Metadata Source Matrix
+
+| Type | MusicBrainz | CAA | Apple Music | TheAudioDB | Discogs | Genius | LRCLIB | Essentia | AudioMuse | AcoustID |
+|------|:-----------:|:---:|:-----------:|:----------:|:-------:|:------:|:------:|:--------:|:---------:|:--------:|
+| Album Title | X | | X | X | X | X | | | | |
+| Track Title | X | | | | | X | | | | |
+| Artist | X | | X | X | | X | | | | |
+| Year | X | | X | | X | | | | | |
+| Release Type | X | | | | | | | | | |
+| **Genre** | **X** | | | **X** | **X** | | | **X** | | |
+| **Styles** | | | | | **X** | | | | | |
+| **Mood** | | | | | | | | **X** | **X** | |
+| **BPM** | | | | | | | | | **X** | |
+| **Key** | | | | | | | | | **X** | |
+| **Energy** | | | | | | | | | **X** | |
+| **Album Art** | | **X** | **X** | **X** | | | | | | |
+| Artist Bio | | | **X** | **X** | | | | | | |
+| Artist Image | | | **X** | **X** | | | | | | |
+| **Lyrics (plain)** | | | | | | **X** | **X** | | | |
+| **Lyrics (synced)** | | | | | | | **X** | | | |
+| **Credits** | | | | | **X** | | | | | |
+| **Community Rating** | | | | | **X** | | | | | |
+| **ReplayGain** | | | | | | | | | | **X** |
+| Recording MBID | X | | | | | | | | | X |
+| Release MBID | X | | | | | | | | | |
 
 ### Filling missing tags on AcoustID match
 
 When a file is identified via AcoustID, the plugin automatically fills in missing
-metadata from the available sources:
-- **MusicBrainz** fills missing title, artist, and MBID tags
-- **Discogs** fills missing credits and release info (if `discogsCredits` enabled)
-- **TheAudioDB** fills missing artist bios and album descriptions (if `theAudioDbFanart` enabled)
-- **Genius** fills missing lyrics (if `geniusLyrics` enabled)
+metadata from the available sources with automatic fallback chains:
+- **Artwork**: tries `artworkSource` first, then other configured sources (CoverArtArchive → Apple Music → TheAudioDB → embedded)
+- **Genre**: tries `genreSource` first, then other configured sources (MusicBrainz → Discogs → TheAudioDB → Essentia → NFO)
+- **Lyrics**: tries `lyricsSource` first, then other configured sources (LRCLIB → Genius)
+- **BPM/Key/Mood**: AudioMuse-AI (primary), Essentia (mood fallback)
 
 ### Community vs personal ratings
 

@@ -376,3 +376,16 @@ pub fn write_replaygain_album(path: &Path, gain: f64, peak: Option<f64>, overwri
     save_tagged_atomic(&tagged, path)?;
     Ok(true)
 }
+
+/// Write genre tags to a file. Genres are semicolon-separated.
+pub fn write_genre(path: &Path, genres: &[String]) -> Result<(), String> {
+    if genres.is_empty() {
+        return Ok(());
+    }
+    let genre_str = genres.join("; ");
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    tag.insert_text(ItemKey::Genre, genre_str);
+    let _ = tagged.insert_tag(tag);
+    save_tagged_atomic(&tagged, path)
+}

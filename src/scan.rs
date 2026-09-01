@@ -1030,13 +1030,49 @@ let mut total_to_move = 0usize;
                     "text": "wrote album.nfo".to_string(),
                 }));
             }
-            // Download + embed/save album artwork (Cover Art Archive).
+            // Download + embed/save album artwork via fallback chain.
             if cfg.embed_artwork || cfg.write_cover_jpg {
-                if let Some(summary) = apply_artwork(cfg, &root, &plan, &files) {
-                    actions.push(serde_json::json!({
-                        "ts": crate::state::now_ts(),
-                        "text": summary,
-                    }));
+                let mbid = files.iter().find_map(|(_, t)| {
+                    if !t.mbid_album.trim().is_empty() {
+                        Some(t.mbid_album.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some((bytes, source)) = crate::artwork::fetch_with_fallback(
+                    cfg,
+                    mbid.as_deref(),
+                    &info.album_artist,
+                    &info.album,
+                ) {
+                    let dir = root.join(&plan.target_dir);
+                    let mut embedded = 0usize;
+                    let mut sidecar = false;
+                    if cfg.embed_artwork {
+                        let first = files.first().map(|(r, _)| root.join(r)).unwrap_or_default();
+                        if cfg.overwrite_art || !crate::artwork::has_embedded(&first) {
+                            for (rel, _) in files.iter() {
+                                let path = root.join(rel);
+                                if crate::artwork::embed(&path, bytes.clone(), crate::artwork::ArtKind::Front).is_ok() {
+                                    embedded += 1;
+                                }
+                            }
+                        }
+                    }
+                    if cfg.write_cover_jpg {
+                        if cfg.overwrite_art || !dir.join("cover.jpg").exists() {
+                            if crate::artwork::write_sidecar(&dir, bytes.clone()).is_ok() {
+                                sidecar = true;
+                            }
+                        }
+                    }
+                    if embedded > 0 || sidecar {
+                        actions.push(serde_json::json!({
+                            "ts": crate::state::now_ts(),
+                            "text": format!("artwork: {source} → {embedded} image(s){}",
+                                if sidecar { " + cover.jpg" } else { "" }),
+                        }));
+                    }
                 }
             }
             // Fetch + write lyrics sidecars (.lrc / .txt) next to the moved files.
@@ -1046,6 +1082,40 @@ let mut total_to_move = 0usize;
                     actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
                         "text": format!("lyrics: fetched {n} sidecar(s)"),
+                    }));
+                }
+            }
+            // Genre fallback chain: try selected source, then others in order.
+            if !cfg.genre_source.is_empty() {
+                let mbid = files.iter().find_map(|(_, t)| {
+                    if !t.mbid_album.trim().is_empty() {
+                        Some(t.mbid_album.clone())
+                    } else {
+                        None
+                    }
+                });
+                let nfo_genres = if cfg.read_nfo {
+                    crate::nfo::read_album_nfo(&root.join(&plan.target_dir))
+                        .map(|n| n.genres)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                if let Some((genres, source)) = fetch_genre_with_fallback(
+                    cfg,
+                    mbid.as_deref(),
+                    &info.album_artist,
+                    &info.album,
+                    &nfo_genres,
+                ) {
+                    // Write genre to all tracks in the album
+                    for (rel, _tags) in files.iter() {
+                        let path = root.join(rel);
+                        let _ = crate::tags::write_genre(&path, &genres);
+                    }
+                    actions.push(serde_json::json!({
+                        "ts": crate::state::now_ts(),
+                        "text": format!("genre: {source} → {} tag(s)", genres.len()),
                     }));
                 }
             }
@@ -1569,6 +1639,63 @@ fn download_lyrics_for(
         ));
     }
     written
+}
+
+/// Genre fallback chain: try selected source, then others in order.
+/// Returns (genres, source_name) on success.
+fn fetch_genre_with_fallback(
+    cfg: &crate::config::Config,
+    mbid: Option<&str>,
+    artist: &str,
+    album: &str,
+    nfo_genres: &[String],
+) -> Option<(Vec<String>, String)> {
+    let sources = match cfg.genre_source.as_str() {
+        "musicbrainz" => vec!["musicbrainz", "discogs", "theaudiodb", "essentia", "nfo"],
+        "discogs" => vec!["discogs", "musicbrainz", "theaudiodb", "essentia", "nfo"],
+        "theaudiodb" => vec!["theaudiodb", "musicbrainz", "discogs", "essentia", "nfo"],
+        "essentia" => vec!["essentia", "musicbrainz", "discogs", "theaudiodb", "nfo"],
+        "nfo" => vec!["nfo", "musicbrainz", "discogs", "theaudiodb", "essentia"],
+        _ => vec!["musicbrainz", "discogs", "theaudiodb", "essentia", "nfo"],
+    };
+    for source in sources {
+        match source {
+            "musicbrainz" => {
+                if let Some(m) = mbid {
+                    if let Some(genres) = crate::musicbrainz::fetch_genres(m, &cfg.musicbrainz_token) {
+                        return Some((genres, "musicbrainz".into()));
+                    }
+                }
+            }
+            "discogs" => {
+                if !cfg.discogs_token.is_empty() {
+                    if let Some(genres) = crate::discogs::host_discogs::fetch_genres(cfg, artist, album) {
+                        return Some((genres, "discogs".into()));
+                    }
+                }
+            }
+            "theaudiodb" => {
+                if !cfg.theaudiodb_key.is_empty() {
+                    if let Some(genres) = crate::theaudiodb::host_theaudiodb::fetch_genres(cfg, artist, album) {
+                        return Some((genres, "theaudiodb".into()));
+                    }
+                }
+            }
+            "essentia" => {
+                if !cfg.essentia_url.trim().is_empty() {
+                    // Essentia genres are written by the write_essentia_genres function
+                    // which is called separately in the pipeline
+                }
+            }
+            "nfo" => {
+                if !nfo_genres.is_empty() {
+                    return Some((nfo_genres.to_vec(), "nfo".into()));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Download + embed/save album artwork for a group (Cover Art Archive). Uses the
