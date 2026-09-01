@@ -223,6 +223,9 @@ services:
       # container to navidrome.db.  If your Navidrome data dir is mounted at
       # /data/nd, then the db is at /data/nd/navidrome.db.
       - NAVIDROME_DB=/data/nd/navidrome.db
+      # Smart playlists (.nsp) must be written to Navidrome's data/playlists
+      # directory so Navidrome discovers them on next scan/restart.
+      - PLAYLIST_DIR=/data/nd/playlists
     networks:
       - stack_network
     # The dashboard pulls each sidecar's /logs by container name (same
