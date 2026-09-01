@@ -929,6 +929,25 @@ pub(crate) mod wasm {
                     ));
                 }
             }
+            // Validate moveDestinationLibrary
+            if cfg.move_destination_library > 0 {
+                let dest_ok = host::library::get_library(cfg.move_destination_library)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !dest_ok {
+                    let libs: Vec<String> = host::library::get_all_libraries()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|l| format!("{} \"{}\"", l.id, l.name))
+                        .collect();
+                    w.push(format!(
+                        "moveDestinationLibrary={} is not accessible. Available libraries: {}",
+                        cfg.move_destination_library,
+                        if libs.is_empty() { "none".into() } else { libs.join(", ") }
+                    ));
+                }
+            }
         }
         if cfg.acoustid_mode != crate::config::AcoustIdMode::Disabled
             && cfg.acoustid_api_key.trim().is_empty()

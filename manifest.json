@@ -792,7 +792,7 @@
           "type": "integer",
           "title": "Destination library ID",
           "default": 0,
-          "description": "Library ID to move processed albums into. 0 = disabled (keep in place). Set to a library ID to enable cross-library moves. Run a dry-run first to see which library IDs are available in the warnings panel."
+          "description": "Library ID to move processed albums into. 0 = disabled (keep in place). Run a dry-run first to see available library IDs in the warnings panel (e.g. '1 \"Music\"')."
         },
         "octoFiestaUrl": {
           "type": "string",
