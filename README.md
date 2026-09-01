@@ -508,7 +508,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /path/to/navidrome/data:/data/nd:ro    # navidrome.db for radio management
     environment:
-      - OCTO_FIESTA_CONTAINER=octo-fiesta
       - NAVIDROME_DB=/data/nd/navidrome.db
     networks:
       - stack_network

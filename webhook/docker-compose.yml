@@ -22,7 +22,3 @@ services:
       # (octo exposes only the Subsonic API, no /logs endpoint).
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      # octo-fiesta's URL + provider come from the plugin's Navidrome config
-      # (octoFiestaUrl / octoFiestaProvider), reported in status POSTs. Only the
-      # docker-log container name stays here (it's infrastructure, not a URL).
-      - OCTO_FIESTA_CONTAINER=octo-fiesta
