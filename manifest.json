@@ -794,18 +794,6 @@
           "default": 0,
           "description": "Library ID to move processed albums into. 0 = disabled (keep in place). Run a dry-run first to see available library IDs in the warnings panel (e.g. '1 \"Music\"')."
         },
-        "octoFiestaUrl": {
-          "type": "string",
-          "title": "Octo-Fiesta proxy URL",
-          "default": "http://octo-fiesta:8080",
-          "description": "Octo-Fiesta missing-track proxy URL. Default is http://octo-fiesta:8080 (Docker container name). The webhook dashboard reads this to probe health. Leave empty to hide the octo-fiesta card."
-        },
-        "octoFiestaProvider": {
-          "type": "string",
-          "title": "Octo-Fiesta provider",
-          "default": "SquidWTF",
-          "description": "Display label for the provider octo-fiesta is configured with (SquidWTF, Deezer, Qobuz, Yandex). Shown on the dashboard card."
-        },
         "maxScanEntries": {
           "type": "integer",
           "title": "Max files scanned per pass",
@@ -1843,24 +1831,6 @@
               "options": {
                 "format": "password"
               }
-            }
-          ]
-        },
-        {
-          "type": "Group",
-          "label": "Octo-Fiesta (missing-track proxy)",
-          "elements": [
-            {
-              "type": "Label",
-              "text": "Octo-Fiesta (github.com/V1ck3s/octo-fiesta) is a third-party Subsonic proxy that serves songs your library doesn't have from a streaming provider. The webhook dashboard uses these to probe its health and show its activity."
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/octoFiestaUrl"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/octoFiestaProvider"
             }
           ]
         },
