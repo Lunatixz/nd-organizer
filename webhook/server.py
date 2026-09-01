@@ -49,7 +49,6 @@ _playback_state = {}  # accumulated playback data across status posts
 # /logs by container name (they must share a Docker network with this webhook).
 SIDECAR_LOG_PORTS = {
     "nd-organizer-acoustid": 8097,
-    "nd-organizer-proxy": 4534,
     "nd-organizer-mysql": 8098,
     "nd-organizer-essentia": 8101,
 }
@@ -240,24 +239,6 @@ def sidecar_logs_html():
         card = _sidecar_card(name, _fetch_json(name, port, "/health", _sidecar_status), _fetch_logs(name, port))
         if card:
             out.append(card)
-    # Webhook's own card with recent log entries
-    try:
-        log_lines = read_tail(LOGFILE, 20)
-        if log_lines:
-            logs_html = "<div class='fhist'>"
-            for line in log_lines[-15:]:
-                logs_html += "<div class='fh'><span class='dim'>%s</span></div>" % esc(line.rstrip()[:120])
-            logs_html += "</div>"
-        else:
-            logs_html = "<div class='note'>No log entries yet.</div>"
-        out.append(("<div class='sc'><div class='sc-top'><b>nd-organizer-webhook</b>"
-                     "<span class='tag ok'>OK</span></div>"
-                     "<div class='sc-stats'><span>events <b>%d</b></span>"
-                     "<span>log <b>%s</b></span></div>"
-                     "<details><summary>recent logs</summary>%s</details></div>") % (
-            len(entries), esc(LOGFILE), logs_html))
-    except Exception:
-        pass
     if not out:
         return "<div class='note'>No sidecar is running.</div>"
     return "".join(out)
@@ -1657,10 +1638,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 signal = json.dumps({
                     "ts": int(time.time()),
-                    "mode": current_mode(),
-                    "inProgress": False,
-                    "feedback": "Force rescan requested - next scheduled run will re-scan from scratch.",
-                    "integrations": [],
+                    "forceRescan": True,
                 })
                 entries.append((ts, "/force-rescan", signal))
                 self._send(200, {"ok": True, "message": "rescan signal posted"})
@@ -1759,6 +1737,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "ok": True, "service": "nd-organizer-webhook", "port": PORT,
                 "events": len(entries), "log": LOGFILE,
             }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self._wfile_write(data)
+            return
+        # Plugin polls this to check for force-rescan signal. Returns and clears
+        # the signal so the plugin does a clean scan on its next pass.
+        if self.path.startswith("/force-rescan-check"):
+            signal = False
+            for i, (ts, path, body) in enumerate(reversed(entries)):
+                if path == "/force-rescan":
+                    try:
+                        sig = json.loads(body)
+                        if sig.get("forceRescan"):
+                            signal = True
+                            # Remove the signal entry
+                            idx = len(entries) - 1 - i
+                            entries.pop(idx)
+                            break
+                    except Exception:
+                        pass
+            data = json.dumps({"forceRescan": signal}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))

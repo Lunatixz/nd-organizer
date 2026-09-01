@@ -113,6 +113,7 @@
         "logWebhookToken": {
           "type": "string",
           "title": "Log webhook token",
+          "options": { "format": "password" },
           "description": "Optional token sent as X-Token and Authorization: Bearer headers."
         },
         "persistenceBackend": {
@@ -464,6 +465,7 @@
         "acoustidApiKey": {
           "type": "string",
           "title": "AcoustID API key",
+          "options": { "format": "password" },
           "description": "Required for AcoustID lookup/fingerprinting. https://acoustid.org/new-application"
         },
         "acoustidUrl": {
@@ -499,16 +501,19 @@
         "musicbrainzToken": {
           "type": "string",
           "title": "MusicBrainz API token",
+          "options": { "format": "password" },
           "description": "Optional. Raises the rate limit from ~1 to ~50 requests/sec."
         },
         "lastfmApiKey": {
           "type": "string",
           "title": "Last.fm API key",
+          "options": { "format": "password" },
           "description": "Optional. Used for genres and user playcounts."
         },
         "lastfmApiSecret": {
           "type": "string",
           "title": "Last.fm API secret",
+          "options": { "format": "password" },
           "description": "Required for favorites sync (write methods need an API signature)."
         },
         "lastfmPassword": {
@@ -686,6 +691,7 @@
         "lidarrApiKey": {
           "type": "string",
           "title": "Lidarr API key",
+          "options": { "format": "password" },
           "description": "API key for the Lidarr instance above (Lidarr: Settings > General)."
         },
         "lidarrMode": {
@@ -945,6 +951,7 @@
           "type": "string",
           "title": "Discogs personal access token",
           "default": "",
+          "options": { "format": "password" },
           "description": "Discogs API token for fetching release credits (performers, producers, engineers) and community ratings. Get one at https://www.discogs.com/settings/developers"
         },
         "discogsCredits": {
@@ -957,6 +964,7 @@
           "type": "string",
           "title": "TheAudioDB API key",
           "default": "",
+          "options": { "format": "password" },
           "description": "TheAudioDB public API key for fetching fanart, artist bios, and album descriptions. Get a free key at https://www.theaudiodb.com/api"
         },
         "theAudioDbFanart": {
@@ -969,6 +977,7 @@
           "type": "string",
           "title": "Genius API access token",
           "default": "",
+          "options": { "format": "password" },
           "description": "Genius client access token for fetching lyrics, annotations, and artist backgrounds. Register at https://genius.com/api-clients"
         },
         "appleMusicCountries": {
@@ -1018,12 +1027,6 @@
           "title": "Use community ratings for seeding",
           "default": false,
           "description": "When enabled, community ratings from Discogs are used to seed initial star ratings. When disabled (default), only personal ratings from Lidarr and your own play/skip behavior are used. Ratings are always personal unless you enable this."
-        },
-        "librefmScrobble": {
-          "type": "boolean",
-          "title": "Scrobble to Libre.fm",
-          "default": false,
-          "description": "When scrobbleProvider is set to Libre.fm, this enables scrobbling to Libre.fm using your Last.fm credentials. Free, open-source alternative to Last.fm."
         }
       },
       "required": [

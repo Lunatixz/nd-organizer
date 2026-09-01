@@ -179,8 +179,6 @@ pub(crate) mod wasm {
                     "mode": mode_label(&cfg),
                     "inProgress": false,
                     "integrations": integration_health(&cfg),
-            "octoFiestaUrl": cfg.octo_fiesta_url,
-            "octoFiestaProvider": cfg.octo_fiesta_provider,
                     "warnings": collect_warnings(&cfg),
                 })
                 .to_string();
@@ -388,8 +386,6 @@ pub(crate) mod wasm {
                             "topRated": top_rated,
                             "warnings": collect_warnings(&cfg),
                             "integrations": integration_health(&cfg),
-            "octoFiestaUrl": cfg.octo_fiesta_url,
-            "octoFiestaProvider": cfg.octo_fiesta_provider,
                             "tasks": task_log(),
                         })
                         .to_string();
@@ -620,8 +616,6 @@ pub(crate) mod wasm {
             "totalFileMoves": total_moves,
             "warnings": collect_warnings(cfg),
             "integrations": integration_health(cfg),
-            "octoFiestaUrl": cfg.octo_fiesta_url,
-            "octoFiestaProvider": cfg.octo_fiesta_provider,
             "persistenceBackend": cfg.persistence_backend,
             "tasks": task_log(),
         })
@@ -1012,6 +1006,46 @@ pub(crate) mod wasm {
         w
     }
 
+    /// Check the webhook for a force-rescan signal. If present, clear the scan
+    /// cache so the next pass does a fresh scan from scratch.
+    fn check_force_rescan(cfg: &Config) {
+        let url = cfg.log_webhook_url.trim();
+        if url.is_empty() {
+            return;
+        }
+        let check_url = format!("{}/force-rescan-check", url.trim_end_matches('/'));
+        let mut headers = HashMap::new();
+        if !cfg.log_webhook_token.is_empty() {
+            headers.insert("X-Token".to_string(), cfg.log_webhook_token.clone());
+        }
+        let req = nd_pdk::host::http::HTTPRequest {
+            method: "GET".into(),
+            url: check_url,
+            headers,
+            no_follow_redirects: false,
+            body: vec![],
+            timeout_ms: 5_000,
+        };
+        match nd_pdk::host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                    if val.get("forceRescan").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        log_info("force-rescan: signal detected, clearing scan cache for fresh pass");
+                        // Clear the scan stack so every library is re-scanned
+                        if let Ok(keys) = crate::store::kv().list("scan.stackv2.") {
+                            for k in keys {
+                                let _ = crate::store::kv().delete(&k);
+                            }
+                        }
+                        // Clear the DB change fingerprint so detect_db_change resets
+                        let _ = crate::store::kv().delete("scan.last_db_hash");
+                    }
+                }
+            }
+            _ => {} // Webhook offline or error — skip silently
+        }
+    }
+
     /// POST a log/report body to the configured webhook (a hosted log).
     pub(crate) fn post_webhook(cfg: &Config, body: &str) {
         let url = cfg.log_webhook_url.trim();
@@ -1116,6 +1150,10 @@ pub(crate) mod wasm {
     /// player is idle, kicks off a full-library scan -> group -> plan chain for
     /// each target library.
     fn run_pass(cfg: &Config) -> Result<(), String> {
+        // Check webhook for force-rescan signal (button press from dashboard).
+        if !cfg.log_webhook_url.is_empty() {
+            check_force_rescan(cfg);
+        }
         if !cfg.rollback_run_id.is_empty() {
             log_info(&format!(
                 "rollback requested for run {}",
@@ -1164,8 +1202,6 @@ pub(crate) mod wasm {
                 "deferredUntilIdle": true,
                 "warnings": collect_warnings(cfg),
                 "integrations": integration_health(cfg),
-            "octoFiestaUrl": cfg.octo_fiesta_url,
-            "octoFiestaProvider": cfg.octo_fiesta_provider,
                 "tasks": task_log(),
             })
             .to_string();
@@ -1193,8 +1229,6 @@ pub(crate) mod wasm {
                 "metaSkipped": provider,
                 "warnings": collect_warnings(cfg),
                 "integrations": integration_health(cfg),
-                "octoFiestaUrl": cfg.octo_fiesta_url,
-                "octoFiestaProvider": cfg.octo_fiesta_provider,
                 "tasks": task_log(),
             })
             .to_string();

@@ -179,11 +179,6 @@ pub struct Config {
     pub log_webhook_url: String,
     /// Optional token sent as X-Token (and Authorization: Bearer) header.
     pub log_webhook_token: String,
-    /// URL of the octo-fiesta Subsonic proxy, echoed in status POSTs so the
-    /// webhook dashboard can probe its health. Empty = hide the octo card.
-    pub octo_fiesta_url: String,
-    /// Display label for octo-fiesta's provider (SquidWTF/Deezer/Qobuz/Yandex).
-    pub octo_fiesta_provider: String,
 
     // Persistence backend. "host" = Navidrome-managed SQLite KVStore (default).
     // "mysql" = the plugin's KVStore state lives in the user's MySQL/MariaDB via
@@ -408,8 +403,6 @@ impl Default for Config {
     rollback_run_id: String::new(),
             log_webhook_url: "http://nd-organizer-webhook:8099".into(),
             log_webhook_token: String::new(),
-            octo_fiesta_url: "http://octo-fiesta:8080".into(),
-            octo_fiesta_provider: "SquidWTF".into(),
             persistence_backend: "host".into(),
             persistence_url: "http://nd-organizer-mysql:8098".into(),
             mysql_host: String::new(),
@@ -554,8 +547,6 @@ impl Config {
             "rollbackRunId",
             "logWebhookUrl",
             "logWebhookToken",
-            "octoFiestaUrl",
-            "octoFiestaProvider",
             "persistenceBackend",
             "persistenceUrl",
             "mysqlHost",
@@ -703,15 +694,6 @@ impl Config {
         }
         if let Some(v) = map.get("logWebhookToken") {
             c.log_webhook_token = v.clone();
-        }
-        if let Some(v) = map.get("octoFiestaUrl") {
-            c.octo_fiesta_url = v.trim().to_string();
-        }
-        if let Some(v) = map.get("octoFiestaProvider") {
-            let p = v.trim();
-            if !p.is_empty() {
-                c.octo_fiesta_provider = p.to_string();
-            }
         }
         if let Some(v) = map.get("persistenceBackend") {
             c.persistence_backend = v.trim().to_string();
@@ -1251,19 +1233,6 @@ mod tests {
         let d = Config::from_map(&HashMap::new());
         assert!(d.playback_stats_enabled); // defaults to true (stats system must be online)
         assert_eq!(d.skip_threshold_percent, 30);
-    }
-
-    #[test]
-    fn parses_octo_fiesta_fields() {
-        let c = Config::from_map(&map(&[
-            ("octoFiestaUrl", "http://octo-fiesta:8080"),
-            ("octoFiestaProvider", "Deezer"),
-        ]));
-        assert_eq!(c.octo_fiesta_url, "http://octo-fiesta:8080");
-        assert_eq!(c.octo_fiesta_provider, "Deezer");
-        let d = Config::from_map(&HashMap::new());
-        assert_eq!(d.octo_fiesta_url, "http://octo-fiesta:8080");
-        assert_eq!(d.octo_fiesta_provider, "SquidWTF");
     }
 
     #[test]
