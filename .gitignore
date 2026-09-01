@@ -2,8 +2,9 @@
 /dist
 webhook/__pycache__/server.cpython-314.pyc
 *.pyc
-*.pyc
 test_radio.db
 AGENTS.md
 DESIGN.md
 graphify-out/
+plain-*.md
+plan-*.md
