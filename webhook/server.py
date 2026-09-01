@@ -559,6 +559,9 @@ def radio_db_connect():
     import sqlite3
     conn = sqlite3.connect(RADIO_DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    # Enable WAL mode and set busy timeout to handle concurrent access
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 def radio_table_exists():
@@ -595,8 +598,17 @@ def radio_add_stations(stations):
     skipped = 0
     errors = []
     try:
+        if not os.path.exists(RADIO_DB_PATH):
+            errors.append(f"database not found: {RADIO_DB_PATH}")
+            return added, skipped, errors
         conn = radio_db_connect()
         cur = conn.cursor()
+        # Verify radio table exists
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='radio'")
+        if cur.fetchone() is None:
+            errors.append("radio table does not exist in navidrome.db")
+            conn.close()
+            return added, skipped, errors
         for st in stations:
             name = (st.get("name") or "").strip()
             url = (st.get("url") or st.get("stream_url") or "").strip()
