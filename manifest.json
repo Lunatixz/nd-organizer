@@ -1208,7 +1208,7 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/genreFrom"
+              "scope": "#/properties/genreSource"
             },
             {
               "type": "HorizontalLayout",
@@ -1277,7 +1277,7 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/artworkPriority"
+              "scope": "#/properties/artworkSource"
             },
             {
               "type": "HorizontalLayout",
@@ -1308,7 +1308,7 @@
           "elements": [
             {
               "type": "Control",
-              "scope": "#/properties/downloadLyrics"
+              "scope": "#/properties/lyricsSource"
             },
             {
               "type": "Control",

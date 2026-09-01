@@ -333,7 +333,8 @@ def radio_html():
             "  fetch('/radio-add',{method:'POST',headers:{'Content-Type':'application/json'},"
             "    body:JSON.stringify({stations:[{name:name,url:url,homepage:hp||''}]})"
             "  }).then(function(r){return r.json()}).then(function(d){"
-            "    if(!d.ok && d.error) alert(d.error);"
+            "    if(d.errors&&d.errors.length) alert('Error: '+d.errors.join('; '));"
+            "    else if(!d.ok&&d.error) alert(d.error);"
             "    radioRefreshList();"
             "  }).catch(function(e){alert('Add failed: '+e);btn.disabled=false;btn.textContent=orig;});"
             "}"
@@ -625,7 +626,8 @@ def radio_add_stations(stations):
                 continue
             unique = f"{name}{datetime.datetime.utcnow().isoformat()}"
             station_id = base64.b64encode(hashlib.md5(unique.encode()).digest()).decode().rstrip("=").replace("+", "-").replace("/", "_")[:22]
-            ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+            # RFC3339 format for Navidrome's Go time.Time parser
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             homepage = (st.get("homepage") or "").strip()
             cur.execute(
                 "INSERT INTO radio (id, name, stream_url, home_page_url, created_at, updated_at) "
@@ -1597,7 +1599,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log.warning("radio-add failed: %s", e)
                 self._send(502, {"ok": False, "error": str(e)})
                 return
-            self._send(200, {"ok": True, "added": added, "skipped": skipped, "errors": errors})
+            # Return ok:false when errors occurred so JS can show them
+            ok = added > 0 and not errors
+            self._send(200, {"ok": ok, "added": added, "skipped": skipped, "errors": errors})
             return
         if self.path.rstrip("/").endswith("/radio-remove"):
             try:
@@ -1630,7 +1634,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 conn = radio_db_connect()
                 cur = conn.cursor()
-                ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+                ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                 if url:
                     cur.execute("UPDATE radio SET name = ?, updated_at = ? WHERE name = ? OR stream_url = ?",
                                 (new_name, ts, old_name, url))

@@ -207,17 +207,17 @@ services:
     volumes:
       - ./data:/data          # webhook.log persists here
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Mount Navidrome's DATA dir read-only so the webhook can manage radio
+      # Mount Navidrome's DATA dir read-write so the webhook can manage radio
       # stations directly in navidrome.db.  The path inside the container MUST
       # end with /navidrome.db and the NAVIDROME_DB env var must point to it.
       #
       # Common NAS layouts — uncomment ONE that matches your setup:
-      #   Synology:    /volume1/docker/navidrome/data:/data/nd:ro
-      #   QNAP:        /share/Docker/navidrome/data:/data/nd:ro
-      #   Unraid:      /mnt/user/appdata/navidrome:/data/nd:ro
-      #   Docker host: /opt/navidrome/data:/data/nd:ro
-      #   Compose:     ${NAVIDROME_DATA_DIR:-/path/to/navidrome/data}:/data/nd:ro
-      - ${NAVIDROME_DATA_DIR:-/path/to/navidrome/data}:/data/nd:ro
+      #   Synology:    /volume1/docker/navidrome/data:/data/nd
+      #   QNAP:        /share/Docker/navidrome/data:/data/nd
+      #   Unraid:      /mnt/user/appdata/navidrome:/data/nd
+      #   Docker host: /opt/navidrome/data:/data/nd
+      #   Compose:     ${NAVIDROME_DATA_DIR:-/path/to/navidrome/data}:/data/nd
+      - ${NAVIDROME_DATA_DIR:-/path/to/navidrome/data}:/data/nd
     environment:
       # Must match the volume mount above — this is the full path inside the
       # container to navidrome.db.  If your Navidrome data dir is mounted at
