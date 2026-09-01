@@ -122,7 +122,7 @@ pub mod host_apple_music {
     /// Fetch album artwork via iTunes Lookup API. Returns high-res URL
     /// (rewritten from 100x100 to 1500x1500).
     pub fn fetch_album_artwork(
-        _cfg: &Config,
+        cfg: &Config,
         artist: &str,
         album: &str,
         countries: &[String],
@@ -180,7 +180,8 @@ pub mod host_apple_music {
                 match host::http::send(img_req) {
                     Ok(Some(img_resp)) if img_resp.status_code == 200 && !img_resp.body.is_empty() => {
                         let bytes = img_resp.body;
-                        let _ = crate::store::kv().set_with_ttl(&cache_key, bytes.clone(), 7 * 24 * 3600);
+                        let ttl = cfg.apple_music_cache_ttl as i64 * 24 * 3600;
+                        let _ = crate::store::kv().set_with_ttl(&cache_key, bytes.clone(), ttl);
                         Some(bytes)
                     }
                     _ => {
@@ -252,10 +253,11 @@ pub mod host_apple_music {
             Ok(Some(resp)) if resp.status_code == 200 => {
                 let html = String::from_utf8_lossy(&resp.body);
                 let image = extract_image_from_html(&html);
+                let ttl = cfg.apple_music_cache_ttl as i64 * 24 * 3600;
                 let _ = crate::store::kv().set_with_ttl(
                     &cache_key,
                     serde_json::to_vec(&image.clone().unwrap_or_default()).unwrap_or_default(),
-                    7 * 24 * 3600,
+                    ttl,
                 );
                 image
             }
@@ -308,10 +310,11 @@ pub mod host_apple_music {
             Ok(Some(resp)) if resp.status_code == 200 => {
                 let html = String::from_utf8_lossy(&resp.body);
                 let bio = extract_bio_from_html(&html);
+                let ttl = cfg.apple_music_cache_ttl as i64 * 24 * 3600;
                 let _ = crate::store::kv().set_with_ttl(
                     &cache_key,
                     serde_json::to_vec(&bio.clone().unwrap_or_default()).unwrap_or_default(),
-                    7 * 24 * 3600,
+                    ttl,
                 );
                 bio
             }

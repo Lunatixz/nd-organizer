@@ -32,9 +32,9 @@ pub mod host_theaudiodb {
 
     use super::*;
 
-    /// Search for an artist by name.
+    /// Search for an artist by name. Gated by `theaudiodbFanart` config.
     pub fn search_artist(cfg: &Config, name: &str) -> Option<TheAudioDbArtist> {
-        if cfg.theaudiodb_key.is_empty() {
+        if cfg.theaudiodb_key.is_empty() || !cfg.theaudiodb_fanart {
             return None;
         }
         if !net::circuit_probe(

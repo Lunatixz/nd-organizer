@@ -965,12 +965,6 @@
           "default": "",
           "description": "Genius client access token for fetching lyrics, annotations, and artist backgrounds. Register at https://genius.com/api-clients"
         },
-        "geniusLyrics": {
-          "type": "boolean",
-          "title": "Fetch lyrics from Genius",
-          "default": false,
-          "description": "When enabled, fetches song lyrics from Genius as a fallback when LRCLIB doesn't have them. Requires geniusToken."
-        },
         "appleMusicCountries": {
           "type": "string",
           "title": "Countries",
@@ -1563,10 +1557,6 @@
             {
               "type": "Control",
               "scope": "#/properties/geniusToken"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/geniusLyrics"
             }
           ]
         },

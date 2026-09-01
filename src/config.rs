@@ -334,7 +334,6 @@ pub struct Config {
 
     // Genius (lyrics, annotations, artist backgrounds)
     pub genius_token: String,
-    pub genius_lyrics: bool,
 
     // Apple Music (iTunes APIs + Apple Music web scraping)
     pub apple_music_countries: String,
@@ -382,7 +381,7 @@ impl Default for Config {
             favorites_sync_lastfm: false,
             favorites_sync_max: 500,
             favorites_sync_bidirectional: false,
-            playback_stats_enabled: false,
+            playback_stats_enabled: true,
             stats_poll_minutes: 5,
             top_picks_count: 50,
             skip_threshold_percent: 30,
@@ -489,7 +488,6 @@ impl Default for Config {
             theaudiodb_key: String::new(),
             theaudiodb_fanart: false,
             genius_token: String::new(),
-            genius_lyrics: false,
             apple_music_countries: String::new(),
             apple_music_cache_ttl: 7,
             apple_music_artist_images: true,
@@ -645,7 +643,6 @@ impl Config {
             "theAudioDbKey",
             "theAudioDbFanart",
             "geniusToken",
-            "geniusLyrics",
             // Apple Music
             "appleMusicCountries",
             "appleMusicCacheTtl",
@@ -984,7 +981,6 @@ impl Config {
         if let Some(v) = map.get("geniusToken") {
             c.genius_token = v.clone();
         }
-        c.genius_lyrics = bool(map, "geniusLyrics", c.genius_lyrics);
         if let Some(v) = map.get("appleMusicCountries") {
             c.apple_music_countries = v.clone();
         }
@@ -1244,7 +1240,7 @@ mod tests {
         assert_eq!(c.top_picks_count, 80);
         // Defaults are opt-in (off).
         let d = Config::from_map(&HashMap::new());
-        assert!(!d.playback_stats_enabled);
+        assert!(d.playback_stats_enabled); // defaults to true (stats system must be online)
         assert_eq!(d.skip_threshold_percent, 30);
     }
 

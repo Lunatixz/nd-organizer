@@ -493,6 +493,19 @@ pub mod host_stats {
                         )
                     });
                 }
+                // Community ratings from Discogs (when enabled and no higher
+                // priority rating found yet).
+                if ext_rating.is_none() && cfg.use_community_ratings && !cfg.discogs_token.is_empty() {
+                    if let Some(release) = crate::discogs::host_discogs::search_release(
+                        cfg,
+                        &prev.artist,
+                        &prev.album,
+                    ) {
+                        if let Some(rating) = release.community_rating {
+                            ext_rating = Some(rating);
+                        }
+                    }
+                }
             }
             if baseline > t.full {
                 t.full = baseline;
@@ -758,8 +771,10 @@ pub mod host_stats {
         }
         // Push ratings to ListenBrainz (track, album, artist) when enabled.
         // Reads MBIDs from the file's tags to submit accurate rankings.
+        // Artist ratings use the average across all tracks by that artist.
         if cfg.listenbrainz_scrobble && !cfg.musicbrainz_token.trim().is_empty() {
             let mut lb_ops = 0usize;
+            let mut artist_ratings: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
             if let Ok(keys) = crate::store::kv().list("star.tally.") {
                 for k in keys {
                     if lb_ops >= 250 {
@@ -800,17 +815,27 @@ pub mod host_stats {
                                     lb_ops += 1;
                                 }
                             }
-                            // Artist rating (artist MBID)
+                            // Collect artist ratings for averaging.
                             if let Some(artist_mbid) = tag.get_string(&ItemKey::MusicBrainzArtistId) {
                                 if !artist_mbid.is_empty() {
-                                    crate::favorites::host_favorites::listenbrainz_rate_artist(
-                                        cfg, artist_mbid, stars,
-                                    );
-                                    lb_ops += 1;
+                                    artist_ratings.entry(artist_mbid.to_string())
+                                        .or_default()
+                                        .push(stars);
                                 }
                             }
                         }
                     }
+                }
+            }
+            // Submit average artist ratings to ListenBrainz.
+            for (mbid, ratings) in &artist_ratings {
+                if !ratings.is_empty() {
+                    let avg = ratings.iter().sum::<f64>() / ratings.len() as f64;
+                    let avg_rounded = (avg * 2.0).round() / 2.0; // half-star steps
+                    crate::favorites::host_favorites::listenbrainz_rate_artist(
+                        cfg, mbid, avg_rounded,
+                    );
+                    lb_ops += 1;
                 }
             }
             if lb_ops > 0 {
