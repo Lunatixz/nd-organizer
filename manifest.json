@@ -927,7 +927,7 @@
             { "const": "lastfm", "title": "Last.fm" },
             { "const": "librefm", "title": "Libre.fm (open-source)" }
           ],
-          "description": "Which scrobble service to use. Last.fm is the most popular; Libre.fm is a free open-source alternative with the same API. Uses lastfmApiKey/lastfmUser for Last.fm, librefmUrl/librefmUser for Libre.fm."
+          "description": "Which scrobble service to use. Last.fm is the most popular; Libre.fm is a free open-source alternative with the same API. Both use the same credentials (lastfmApiKey/lastfmUser/lastfmApiSecret). Selecting Libre.fm just changes the API backend."
         },
         "essentiaUrl": {
           "type": "string",
@@ -1019,26 +1019,11 @@
           "default": false,
           "description": "When enabled, community ratings from Discogs are used to seed initial star ratings. When disabled (default), only personal ratings from Lidarr and your own play/skip behavior are used. Ratings are always personal unless you enable this."
         },
-        "librefmUser": {
-          "type": "string",
-          "title": "Libre.fm username",
-          "default": "",
-          "description": "Your Libre.fm username for scrobbling."
-        },
-        "librefmSessionKey": {
-          "type": "string",
-          "title": "Libre.fm session key",
-          "default": "",
-          "options": {
-            "format": "password"
-          },
-          "description": "Session key for Libre.fm scrobbling. Obtain from https://libre.fm/api-keys.php"
-        },
         "librefmScrobble": {
           "type": "boolean",
           "title": "Scrobble to Libre.fm",
           "default": false,
-          "description": "Scrobble full listens to Libre.fm. Free, open-source alternative to Last.fm. Keep OFF if you also scrobble to Last.fm (double-counting)."
+          "description": "When scrobbleProvider is set to Libre.fm, this enables scrobbling to Libre.fm using your Last.fm credentials. Free, open-source alternative to Last.fm."
         }
       },
       "required": [
@@ -1444,18 +1429,6 @@
             {
               "type": "Control",
               "scope": "#/properties/favoritesSyncBidirectional"
-            },
-            {
-              "type": "Label",
-              "text": "Libre.fm override — leave empty to reuse Last.fm username/session above. Only set if your Libre.fm account differs."
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/librefmUser"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/librefmSessionKey"
             },
             {
               "type": "Control",

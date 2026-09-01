@@ -1,8 +1,7 @@
 // Libre.fm scrobble integration — free, open-source alternative to Last.fm.
-// Uses the same Subsonic-compatible scrobble protocol. API key required from
-// https://libre.fm/api-keys.php
-
-
+// Uses the same Subsonic-compatible scrobble protocol. Shares Last.fm
+// credentials (user + session key) when the scrobble provider is set to
+// "librefm" — no separate config fields needed.
 
 #[cfg(target_arch = "wasm32")]
 pub mod host_librefm {
@@ -12,7 +11,8 @@ pub mod host_librefm {
     use std::collections::HashMap;
 
     /// Scrobble a listen to Libre.fm using the Subsonic scrobble protocol.
-    /// Libre.fm accepts the same POST format as Last.fm's track.scrobble.
+    /// Uses Last.fm credentials (user + session key) — Libre.fm accepts the
+    /// same format.
     pub fn scrobble(
         cfg: &Config,
         artist: &str,
@@ -21,16 +21,14 @@ pub mod host_librefm {
         ts: i64,
     ) {
         const BASE: &str = "https://libre.fm";
-        let base = BASE;
-        // Share Last.fm credentials when Libre.fm user not set
-        let user = if cfg.librefm_user.trim().is_empty() { cfg.lastfm_user.trim() } else { cfg.librefm_user.trim() };
-        let sk = if cfg.librefm_session_key.trim().is_empty() { String::new() } else { cfg.librefm_session_key.trim().to_string() };
+        let user = cfg.lastfm_user.trim();
+        let sk = cfg.lastfm_api_secret.trim(); // session key stored in lastfmApiSecret for Libre.fm
         if user.is_empty() {
             return;
         }
         if !net::circuit_probe(
             "librefm",
-            base,
+            BASE,
             &HashMap::new(),
             10_000,
         ) {
@@ -45,9 +43,9 @@ pub mod host_librefm {
             ts,
             crate::favorites::host_favorites::urlencode(album),
             crate::favorites::host_favorites::urlencode(artist),
-            crate::favorites::host_favorites::urlencode(&sk),
+            crate::favorites::host_favorites::urlencode(sk),
         );
-        let url = format!("{base}/rest/scrobble?{params}");
+        let url = format!("{BASE}/rest/scrobble?{params}");
         let req = host::http::HTTPRequest {
             method: "GET".into(),
             url,

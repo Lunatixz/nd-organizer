@@ -152,20 +152,40 @@ granularity:
 
 ## Rating & Favorites Sync
 
-Bidirectional sync across Navidrome, Last.fm, ListenBrainz, and Lidarr. The
+Bidirectional sync across Navidrome, Last.fm/Libre.fm, ListenBrainz, and Lidarr. The
 Plugin DB is the single source of truth — it accumulates from all sources and
 publishes outward.
 
 ### Full sync matrix
 
-| Source | Track Ratings | Album Ratings | Artist Ratings | Loved/Heart | Playcount | Direction |
-|--------|---------------|---------------|----------------|-------------|-----------|-----------|
-| **Navidrome** | setRating (1-5) | — | — | star/unstar | observed | In + Out |
-| **Last.fm** | — | — | — | love/unlove | scrobble | In + Out |
-| **ListenBrainz** | feedback (0-100) | release_group_mbid | artist_mbid | feedback | scrobble | In + Out |
-| **Lidarr** | track rating (0-5) | album rating (0-5) | — | — | — | In + Out |
-| **MusicBrainz** | — | — | — | — | — | In only (metadata) |
-| **Discogs** | community rating | credits | — | — | — | In only (metadata) |
+| Source | Track Ratings | Album Ratings | Artist Ratings | Loved/Heart | Playcount | Scrobble | Direction |
+|--------|---------------|---------------|----------------|-------------|-----------|----------|-----------|
+| **Navidrome** | setRating (1-5) | — | — | star/unstar | observed | — | In + Out |
+| **Last.fm** | — | — | — | love/unlove | userplaycount | track.scrobble | In + Out |
+| **Libre.fm** | — | — | — | — | — | scrobble | Out only |
+| **ListenBrainz** | feedback (0-100) | release_group_mbid | artist_mbid | feedback | scrobble | submit-listens | In + Out |
+| **Lidarr** | track rating (0-5) | album rating (0-5) | — | — | — | — | In + Out |
+| **MusicBrainz** | — | — | — | — | — | — | In only (metadata) |
+| **Discogs** | community rating | credits | — | — | — | — | In only (metadata) |
+
+### Scrobble providers
+
+The `scrobbleProvider` dropdown selects which service receives your listen
+data. Both Last.fm and Libre.fm share the **same credentials** (lastfmUser,
+lastfmApiKey, lastfmApiSecret) — selecting Libre.fm just changes the API
+backend URL.
+
+| Provider | API Base | Features | Cost |
+|----------|----------|----------|------|
+| **Last.fm** | `ws.audioscrobbler.com` | Scrobble, loved tracks, playcount, artist info | Free (API key required) |
+| **Libre.fm** | `libre.fm` | Scrobble (same protocol as Last.fm) | Free (open-source) |
+
+**When to use Libre.fm**: If you want to scrobble to an open-source alternative
+to Last.fm, or if you want to dual-scrobble to both services. Libre.fm uses the
+same Subsonic-compatible scrobble protocol as Last.fm.
+
+**Note**: Libre.fm is scrobble-only — it does not provide loved tracks,
+playcount import, or artist metadata. Use Last.fm for full feature support.
 
 ### Inbound (pull into plugin DB)
 
@@ -181,28 +201,30 @@ publishes outward.
 - **Navidrome** `setRating` + `star`/`unstar` (every stats pass)
 - **Lidarr** track + album ratings (if `ratingSyncWriteToLidarr`)
 - **ListenBrainz** track/album/artist ratings (if `listenbrainzScrobble`)
-- **Last.fm** scrobble on full plays (if `lastfmScrobble`)
+- **Last.fm** scrobble on full plays (if `scrobbleProvider = lastfm`)
+- **Libre.fm** scrobble on full plays (if `scrobbleProvider = librefm`)
 
-### Favorites sync (Navidrome ↔ Last.fm)
+### Favorites sync (Navidrome ↔ Last.fm/Libre.fm)
 
 - **Bidirectional**: Navidrome stars ↔ Last.fm loved tracks
 - **Unstar/unlove propagation**: when `favoritesSyncBidirectional` is enabled
 - **Additive only** when bidirectional is off (never removes)
+- **Libre.fm**: no favorites API — scrobble only
 
 ### Config options
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `starTallyEnabled` | true | Master switch for the rating system |
+| `scrobbleProvider` | none | Scrobble backend: none/lastfm/librefm |
 | `ratingSyncWriteToLidarr` | false | Push ratings to Lidarr (track + album) |
 | `ratingSyncPullFromNavidrome` | false | Import manual ratings from Navidrome UI |
 | `favoritesSyncLastfm` | false | Bidirectional loved sync with Last.fm |
 | `favoritesSyncBidirectional` | false | Propagate unstar/unlove (not just add) |
 | `favoritesSyncMax` | 500 | Max favorites per sync pass |
-| `lastfmScrobble` | false | Scrobble full plays to Last.fm |
-| `listenbrainzScrobble` | false | Scrobble + push ratings to ListenBrainz |
 | `lastfmImportPlaycount` | false | Seed playcount from Last.fm on first sight |
 | `useCommunityRatings` | false | Seed ratings from Discogs community |
+| `listenbrainzScrobble` | false | Scrobble + push ratings to ListenBrainz |
 | `listenbrainzUser` | (empty) | ListenBrainz username (defaults to lastfmUser) |
 
 ### Conflict resolution

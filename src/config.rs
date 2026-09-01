@@ -355,9 +355,8 @@ pub struct Config {
     pub use_community_ratings: bool,
 
     // Libre.fm (free open-source Last.fm alternative) — shares Last.fm credentials
-    // Unique field: scrobble toggle + optional override user/sk; URL is hardcoded to https://libre.fm
-    pub librefm_user: String,
-    pub librefm_session_key: String,
+    // The scrobbleProvider dropdown selects between Last.fm and Libre.fm backends
+    // using the same lastfmUser/lastfmApiKey/lastfmApiSecret fields.
     pub librefm_scrobble: bool,
 
     // Scanning
@@ -499,8 +498,6 @@ impl Default for Config {
             apple_music_album_art: true,
             apple_music_album_info: true,
             listenbrainz_user: String::new(),
-            librefm_user: String::new(),
-            librefm_session_key: String::new(),
             librefm_scrobble: false,
             use_community_ratings: false,
             scan_user: String::new(),
@@ -658,8 +655,6 @@ impl Config {
             "appleMusicAlbumArt",
             "appleMusicAlbumInfo",
             // Libre.fm
-            "librefmUser",
-            "librefmSessionKey",
             "librefmScrobble",
             // Rating sync
             "favoritesSyncBidirectional",
@@ -1005,12 +1000,6 @@ impl Config {
             c.listenbrainz_user = v.clone();
         }
         c.use_community_ratings = bool(map, "useCommunityRatings", c.use_community_ratings);
-        if let Some(v) = map.get("librefmUser") {
-            c.librefm_user = v.clone();
-        }
-        if let Some(v) = map.get("librefmSessionKey") {
-            c.librefm_session_key = v.clone();
-        }
         c.librefm_scrobble = bool(map, "librefmScrobble", c.librefm_scrobble);
         if let Some(v) = map.get("scanUser") {
             c.scan_user = v.clone();
