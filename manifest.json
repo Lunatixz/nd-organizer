@@ -782,6 +782,12 @@
           "default": 0,
           "description": "Delay Navidrome rescans by this many seconds so a burst of changes coalesces into a single scan. 0 = rescan immediately after each change."
         },
+        "moveDestinationLibrary": {
+          "type": "integer",
+          "title": "Destination library ID",
+          "default": 0,
+          "description": "Library ID to move processed albums into. 0 = disabled (keep in place). Set to a library ID to enable cross-library moves. Run a dry-run first to see which library IDs are available in the warnings panel."
+        },
         "octoFiestaUrl": {
           "type": "string",
           "title": "Octo-Fiesta proxy URL",
@@ -1774,6 +1780,10 @@
             {
               "type": "Control",
               "scope": "#/properties/scanDebounceSeconds"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/moveDestinationLibrary"
             }
           ]
         },

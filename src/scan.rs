@@ -961,6 +961,36 @@ let mut total_to_move = 0usize;
 
         if cfg.mode == Mode::Apply && !plan.moves.is_empty() {
             crate::organizer::apply_group_plan(&root, &plan, cfg.prune_empty_dirs)?;
+            // Cross-library move: if a destination library is configured,
+            // move the entire album folder to the destination library.
+            if cfg.move_destination_library > 0 {
+                let source_album_dir = root.join(&plan.target_dir);
+                if let Ok(dest_root) = lib_root(cfg.move_destination_library) {
+                    let dest_album_dir = dest_root.join(&plan.target_dir);
+                    if source_album_dir != dest_album_dir {
+                        match crate::organizer::move_album_folder(&source_album_dir, &dest_album_dir) {
+                            Ok(n) => {
+                                crate::wasm::log_info(&format!(
+                                    "cross-library move: {} file(s) -> library {}",
+                                    n, cfg.move_destination_library
+                                ));
+                                actions.push(serde_json::json!({
+                                    "ts": crate::state::now_ts(),
+                                    "text": format!("cross-library move: {n} file(s) to library {}", cfg.move_destination_library),
+                                }));
+                            }
+                            Err(e) => {
+                                crate::wasm::log_warn(&format!("cross-library move failed: {e}"));
+                            }
+                        }
+                    }
+                } else {
+                    crate::wasm::log_warn(&format!(
+                        "cross-library move: destination library {} not accessible",
+                        cfg.move_destination_library
+                    ));
+                }
+            }
             // Live action ticker: record each concrete action taken for this album.
             for m in &plan.moves {
                 actions.push(serde_json::json!({

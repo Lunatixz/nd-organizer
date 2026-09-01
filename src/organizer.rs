@@ -1065,6 +1065,47 @@ pub fn build_group_plan(
     plan
 }
 
+/// Move a file, falling back to copy+delete for cross-filesystem moves.
+fn move_file_cross_device(from: &Path, to: &Path) -> Result<(), String> {
+    // Try rename first (fast, same filesystem)
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    // Fallback: copy + delete (cross-filesystem)
+    std::fs::copy(from, to).map_err(|e| format!("copy {}: {e}", from.display()))?;
+    std::fs::remove_file(from).map_err(|e| format!("remove {}: {e}", from.display()))?;
+    Ok(())
+}
+
+/// Move an entire album folder to a destination library. Moves ALL files
+/// in the directory (music, NFO, lyrics, artwork, playlists, etc.).
+/// Returns the number of files moved.
+pub fn move_album_folder(
+    source_dir: &Path,
+    dest_dir: &Path,
+) -> Result<usize, String> {
+    if let Err(e) = std::fs::create_dir_all(dest_dir) {
+        return Err(format!("mkdir {}: {e}", dest_dir.display()));
+    }
+    let mut moved = 0usize;
+    let entries = std::fs::read_dir(source_dir)
+        .map_err(|e| format!("read_dir {}: {e}", source_dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
+        let from = entry.path();
+        if from.is_file() {
+            let to = dest_dir.join(entry.file_name());
+            move_file_cross_device(&from, &to)?;
+            moved += 1;
+        }
+    }
+    // Remove empty source directory
+    if source_dir.read_dir().map(|mut r| r.next().is_none()).unwrap_or(false) {
+        let _ = std::fs::remove_dir(source_dir);
+    }
+    Ok(moved)
+}
+
 /// Apply a group plan: move files + sidecars into the album target dir,
 /// handle duplicates per policy, prune now-empty source dirs.
 pub fn apply_group_plan(root: &Path, plan: &GroupPlan, prune: bool) -> Result<(), String> {

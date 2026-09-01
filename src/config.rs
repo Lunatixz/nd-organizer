@@ -260,6 +260,10 @@ pub struct Config {
     pub filler_keywords: String,
     /// Path prefixes/globs under the library root that must never be touched.
     pub exclude_paths: Vec<String>,
+    /// Destination library ID for cross-library moves. 0 = disabled (keep in
+    /// place). When set, processed albums are moved to this library after
+    /// processing. Supports cross-filesystem moves via copy+delete fallback.
+    pub move_destination_library: i32,
     /// Snapshot previous tags (and original .nfo) to plugin storage before any
     /// tag/nfo write. Metadata-only, never copies audio bytes.
     pub backup_before_write: bool,
@@ -444,6 +448,7 @@ impl Default for Config {
             singles_enabled: true,
             filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke".into(),
             exclude_paths: Vec::new(),
+            move_destination_library: 0, // 0 = disabled
             backup_before_write: true,
             backup_retention_days: 30,
             rollback_retention_days: 30,
@@ -589,6 +594,7 @@ impl Config {
             "singlesEnabled",
             "fillerKeywords",
             "excludePaths",
+            "moveDestinationLibrary",
             "backupBeforeWrite",
             "backupRetentionDays",
             "rollbackRetentionDays",
@@ -868,6 +874,9 @@ impl Config {
             if !parsed.is_empty() {
                 c.exclude_paths = parsed;
             }
+        }
+        if let Some(v) = map.get("moveDestinationLibrary") {
+            c.move_destination_library = v.trim().parse().unwrap_or(0);
         }
         c.backup_before_write = bool(map, "backupBeforeWrite", c.backup_before_write);
         if let Some(v) = map.get("backupRetentionDays") {
