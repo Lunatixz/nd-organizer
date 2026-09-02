@@ -255,7 +255,7 @@ services:
   # scan cache) lives in MySQL instead of Navidrome's SQLite. Set
   # persistenceBackend=mysql in the plugin settings.
   # nd-organizer-mariadb:
-  #   image: mysql:8
+  #   image: docker.io/library/mariadb:11.8
   #   container_name: nd-organizer-mariadb
   #   restart: unless-stopped
   #   ports:
