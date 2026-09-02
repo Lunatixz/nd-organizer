@@ -9,7 +9,7 @@
 #   nd-organizer-essentia (8101)  genre/mood ML analysis (Essentia + Discogs-400)
 #
 # Services (optional, commented out):
-#   nd-organizer-mariadb  (3306)  MySQL/MariaDB for persistent plugin state
+#   nd-organizer-mariadb  (3306)  MySQL for persistent plugin state
 #   nd-organizer-mysql    (8098)  MySQL KV bridge sidecar
 #   octo-fiesta           (4535)  missing-track proxy (third-party, see below)
 #   audiomuse-ai          (8000)  sonic analysis (BPM/key/mood, third-party)
@@ -255,7 +255,7 @@ services:
   # scan cache) lives in MySQL instead of Navidrome's SQLite. Set
   # persistenceBackend=mysql in the plugin settings.
   # nd-organizer-mariadb:
-  #   image: mariadb:11
+  #   image: mysql:8
   #   container_name: nd-organizer-mariadb
   #   restart: unless-stopped
   #   ports:

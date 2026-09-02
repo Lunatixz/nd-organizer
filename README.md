@@ -315,7 +315,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/webhook:latest` | A web dashboard showing status + reports (auto-refreshing). |
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
-| `mariadb:11` | Optional MySQL/MariaDB server for persistent plugin state (ratings, playcounts, scan cache). **Commented out** in the compose. |
+| `mysql:8` | Optional MySQL server for persistent plugin state (ratings, playcounts, scan cache). **Commented out** in the compose. |
 | `ghcr.io/lunatixz/nd-organizer/essentia:latest` | Genre/mood ML analysis using Essentia (Discogs-400 + MTG-Jamendo models). Fallback when AudioMuse-AI is down, or primary genre source when `genreFrom=essentia`. |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
@@ -323,7 +323,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 
 The plugin stores its state (ratings, playcounts, scan cache) in a KVStore.
 By default this is Navidrome's SQLite database. For durable storage across
-plugin resets, you can use MySQL/MariaDB instead.
+plugin resets, you can use MySQL instead.
 
 **Quick start:**
 1. Uncomment `nd-organizer-mariadb` and `nd-organizer-mysql` in docker-compose.yml
@@ -341,7 +341,7 @@ plugin resets, you can use MySQL/MariaDB instead.
    - Set `mysqlPassword` = (your app password)
 4. On first run, the plugin automatically migrates existing data from SQLite to MySQL
 
-The mysql sidecar creates the `kvstore` table automatically. The MariaDB
+The mysql sidecar creates the `kvstore` table automatically. The MySQL
 container creates the database and user on first start via environment variables.
 
 The compose files reference the published GHCR images — `docker compose up`
