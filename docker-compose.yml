@@ -247,36 +247,36 @@ services:
     networks:
       - stack_network
 
-  # ===== MySQL (optional - for persistent KVStore) =====
-  # When enabled, the plugin's state (ratings, playcounts, scan cache) lives
-  # in MySQL instead of Navidrome's SQLite. Set persistenceBackend=mysql in
-  # the plugin settings and configure the connection details below.
-  nd-organizer-mariadb:
-    image: mariadb:11
-    container_name: nd-organizer-mariadb
-    restart: unless-stopped
-    ports:
-      - "3306:3306"
-    environment:
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-ndorganizer}
-      - MYSQL_DATABASE=ndorganizer
-      - MYSQL_USER=ndorganizer
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-ndorganizer}
-    volumes:
-      - mariadb_data:/var/lib/mysql
-    networks:
-      - stack_network
+  # ===== MySQL (OPTIONAL - for persistent KVStore) =====
+  # Uncomment to deploy. When enabled, the plugin's state (ratings, playcounts,
+  # scan cache) lives in MySQL instead of Navidrome's SQLite. Set
+  # persistenceBackend=mysql in the plugin settings.
+  # nd-organizer-mariadb:
+  #   image: mariadb:11
+  #   container_name: nd-organizer-mariadb
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3306:3306"
+  #   environment:
+  #     - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-ndorganizer}
+  #     - MYSQL_DATABASE=ndorganizer
+  #     - MYSQL_USER=ndorganizer
+  #     - MYSQL_PASSWORD=${MYSQL_PASSWORD:-ndorganizer}
+  #   volumes:
+  #     - mariadb_data:/var/lib/mysql
+  #   networks:
+  #     - stack_network
 
-  nd-organizer-mysql:
-    image: ghcr.io/lunatixz/nd-organizer/mysql:latest
-    container_name: nd-organizer-mysql
-    restart: unless-stopped
-    ports:
-      - "8098:8098"
-    environment:
-      - WEBHOOK_URL=http://nd-organizer-webhook:8099
-    networks:
-      - stack_network
+  # nd-organizer-mysql:
+  #   image: ghcr.io/lunatixz/nd-organizer/mysql:latest
+  #   container_name: nd-organizer-mysql
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8098:8098"
+  #   environment:
+  #     - WEBHOOK_URL=http://nd-organizer-webhook:8099
+  #   networks:
+  #     - stack_network
 
   # Radio management is now built into the webhook (no separate sidecar).
   # Mount navidrome.db at /data/nd/navidrome.db in the webhook container.
