@@ -23,6 +23,7 @@ jobs:
     steps:
       - name: Delete untagged versions
         uses: actions/delete-package-versions@v5
+        continue-on-error: true
         with:
           package-name: nd-organizer/${{ matrix.service }}
           package-type: container
@@ -31,6 +32,7 @@ jobs:
 
       - name: Delete old tagged versions
         uses: actions/delete-package-versions@v5
+        continue-on-error: true
         with:
           package-name: nd-organizer/${{ matrix.service }}
           package-type: container
