@@ -49,11 +49,15 @@ jobs:
           echo "Pruning old releases..."
           PRUNED=0
           RELEASES=$(gh release list --limit 100 --json tagName,isDraft \
-            --jq '.[] | select(.isDraft == false) | .tagName' 2>/dev/null)
+            --jq '.[] | select(.isDraft == false) | .tagName' 2>/dev/null || echo "")
+          if [ -z "$RELEASES" ]; then
+            echo "No releases to prune."
+            exit 0
+          fi
           for TAG in $RELEASES; do
             [ "$TAG" = "latest" ] && continue
             echo "$TAG" | grep -qE "^v[0-9]" && continue
             echo "Deleting: $TAG"
-            gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null && PRUNED=$((PRUNED + 1))
+            gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null && PRUNED=$((PRUNED + 1)) || true
           done
           echo "Pruned $PRUNED releases."
