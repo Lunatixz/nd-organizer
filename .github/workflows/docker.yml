@@ -1,13 +1,6 @@
-# Build and publish the sidecar Docker images to GitHub Container Registry.
-#
-# Triggers:
-#   - push to main          -> ghcr.io/.../<service>:main (and :<sha>)
-#   - tag vX.Y.Z            -> ghcr.io/.../<service>:X.Y.Z and :latest
-#   - manual (workflow_dispatch)
-#
-# After publishing, the docker-compose files pull from GHCR so users don't
-# need to build locally. Enable Actions -> Settings -> Actions -> General:
-#   Workflow permissions: "Read and write permissions".
+# Build sidecar Docker images and push to GHCR.
+# Only triggers on code changes (not workflow file changes).
+# Pruning is handled by prune.yml separately.
 
 name: docker
 
@@ -15,6 +8,17 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths:
+      - 'webhook/**'
+      - 'acoustid/**'
+      - 'proxy/**'
+      - 'mysql/**'
+      - 'essentia/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'manifest.json'
+      - 'Dockerfile'
   workflow_dispatch:
 
 permissions:
@@ -29,13 +33,13 @@ jobs:
         service: [acoustid, webhook, proxy, mysql, essentia]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -43,19 +47,16 @@ jobs:
 
       - name: Image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
-            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-          flavor: |
-            latest=true
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./${{ matrix.service }}
           push: true
@@ -64,7 +65,7 @@ jobs:
 
       - name: Retry on failure
         if: failure()
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./${{ matrix.service }}
           push: true

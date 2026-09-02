@@ -1,0 +1,57 @@
+# Prune old container images and releases.
+# Keeps ONLY: "latest" tag and version tags (v*).
+
+name: prune
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  prune-packages:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [webhook, acoustid, proxy, mysql, essentia]
+    steps:
+      - name: Delete untagged versions
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: nd-organizer/${{ matrix.service }}
+          package-type: container
+          delete-only-untagged-versions: true
+          min-versions-to-keep: 0
+
+      - name: Delete old tagged versions
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: nd-organizer/${{ matrix.service }}
+          package-type: container
+          num-old-versions-to-delete: 100
+          ignore-versions: '^(latest|v\d)'
+
+  prune-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Pruning old releases..."
+          PRUNED=0
+          RELEASES=$(gh release list --limit 100 --json tagName,isDraft \
+            --jq '.[] | select(.isDraft == false) | .tagName' 2>/dev/null)
+          for TAG in $RELEASES; do
+            [ "$TAG" = "latest" ] && continue
+            echo "$TAG" | grep -qE "^v[0-9]" && continue
+            echo "Deleting: $TAG"
+            gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null && PRUNED=$((PRUNED + 1))
+          done
+          echo "Pruned $PRUNED releases."

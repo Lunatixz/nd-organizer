@@ -11,6 +11,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
 
 COPY server.py /app/server.py
+COPY VERSION /app/VERSION
 WORKDIR /app
 EXPOSE 8101
 CMD ["python", "server.py", "8101"]

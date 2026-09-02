@@ -1032,9 +1032,4 @@ maintenance happens in my spare time — your support keeps it going.
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsor-ea4aaa.svg)](https://github.com/sponsors/lunatixz)
 
-## Built with the help of AI
-
-This project was developed with the assistance of an AI coding agent. The
-architecture, code, tests, and documentation were produced through a
-collaborative process between human intent and machine execution.
 
