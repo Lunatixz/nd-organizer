@@ -141,8 +141,8 @@
         "mysqlHost": {
           "type": "string",
           "title": "MySQL host",
-          "default": "",
-          "description": "Hostname/IP of your MySQL or MariaDB server."
+          "default": "nd-organizer-mariadb",
+          "description": "Hostname/IP of your MySQL or MariaDB server. Matches docker-compose service name."
         },
         "mysqlPort": {
           "type": "integer",
@@ -155,22 +155,23 @@
         "mysqlName": {
           "type": "string",
           "title": "MySQL database name",
-          "default": "",
-          "description": "Database that will hold the plugin's kvstore table (created automatically)."
+          "default": "ndorganizer",
+          "description": "Database that will hold the plugin's kvstore table (created automatically). Matches MYSQL_DATABASE env var."
         },
         "mysqlUser": {
           "type": "string",
           "title": "MySQL user",
-          "default": "",
-          "description": "A MySQL user with read/write access to the database above."
+          "default": "ndorganizer",
+          "description": "A MySQL user with read/write access to the database above. Matches MYSQL_USER env var."
         },
         "mysqlPassword": {
           "type": "string",
           "title": "MySQL password",
+          "default": "ndorganizer",
           "options": {
             "format": "password"
           },
-          "description": "Credentials are sent only to the mysql sidecar over the internal Docker network."
+          "description": "Credentials are sent only to the mysql sidecar over the internal Docker network. Matches MYSQL_PASSWORD env var."
         },
         "soundtrackFolder": {
           "type": "string",
