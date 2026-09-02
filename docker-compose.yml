@@ -1,23 +1,26 @@
-# nd-organizer full stack - Navidrome plus all six sidecars, one command:
+# nd-organizer full stack - Navidrome plus sidecars, one command:
 #   docker compose up -d
 #
-# Services:
+# Services (required):
 #   navidrome                  (4533)  the music server (plugins enabled)
-#   octo-fiesta                (4535)  missing-track proxy (multi-provider)
 #   nd-organizer-acoustid (8097)  fingerprint + ReplayGain sidecar (fpcalc + ffmpeg)
 #   nd-organizer-webhook  (8099)  dashboard + log/status receiver + radio management
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
-#   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
 #   nd-organizer-essentia (8101)  genre/mood ML analysis (Essentia + Discogs-400)
+#
+# Services (optional, commented out):
+#   nd-organizer-mariadb  (3306)  MySQL/MariaDB for persistent plugin state
+#   nd-organizer-mysql    (8098)  MySQL KV bridge sidecar
+#   octo-fiesta           (4535)  missing-track proxy (third-party, see below)
+#   audiomuse-ai          (8000)  sonic analysis (BPM/key/mood, third-party)
 #
 # Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
 # normal Navidrome user/password - credentials pass through unchanged):
-#   player -> octo-fiesta (4535) -> nd-organizer-proxy (4534) -> navidrome (4533)  [full stack]
-#   player -> nd-organizer-proxy (4534) -> navidrome (4533)                        [filtering only]
-#   player -> navidrome (4533)                                                     [no proxy]
-# Point the player at http://<your-nas>:4535/rest/ to get queue filtering AND
-# missing-track fallback. octo-fiesta is transparent for songs Navidrome already
-# has; only tracks NOT in the library are fetched from the configured provider.
+#   player -> nd-organizer-proxy (4534) -> navidrome (4533)  [filtering only]
+#   player -> navidrome (4533)                               [no proxy]
+#   player -> octo-fiesta (4535) -> nd-organizer-proxy (4534) -> navidrome (4533)  [full stack, optional]
+# Point the player at http://<your-nas>:4534/rest/ for queue filtering.
+# If using octo-fiesta, point at http://<your-nas>:4535/rest/ instead.
 #
 # Providers (octo-fiesta supports all of these; fill credentials in a .env
 # file next to this compose and pick one via MUSIC_SERVICE):

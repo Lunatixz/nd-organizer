@@ -311,12 +311,13 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 
 | Image | Purpose |
 |---|---|
-| `ghcr.io/v1ck3s/octo-fiesta` | Missing-track proxy (third-party, GPL-3.0) — when a requested song isn't in the library, fetches it from the configured provider and streams it. Supports SquidWTF (free, no creds), Deezer, Qobuz, Yandex. |
 | `ghcr.io/lunatixz/nd-organizer/acoustid:latest` | Fingerprints songs (AcoustID) so unverified files can be paired to their album, and computes ReplayGain loudness tags (ffmpeg). |
 | `ghcr.io/lunatixz/nd-organizer/webhook:latest` | A web dashboard showing status + reports (auto-refreshing). |
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
-| `mariadb:11` | Optional MySQL/MariaDB server for persistent plugin state (ratings, playcounts, scan cache). |
+| `mariadb:11` | Optional MySQL/MariaDB server for persistent plugin state (ratings, playcounts, scan cache). **Commented out** in the compose. |
+| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | Genre/mood ML analysis using Essentia (Discogs-400 + MTG-Jamendo models). Fallback when AudioMuse-AI is down, or primary genre source when `genreFrom=essentia`. |
+| `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
 ### MySQL setup (optional)
 
@@ -342,16 +343,15 @@ plugin resets, you can use MySQL/MariaDB instead.
 
 The mysql sidecar creates the `kvstore` table automatically. The MariaDB
 container creates the database and user on first start via environment variables.
-| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | Genre/mood ML analysis using Essentia (Discogs-400 + MTG-Jamendo models). Fallback when AudioMuse-AI is down, or primary genre source when `genreFrom=essentia`. |
-| `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
 The compose files reference the published GHCR images — `docker compose up`
 pulls them (no local build, no build context needed). Tags: `:latest`, `:main`,
 and `vX.Y.Z` semver tags per release.
 
-Here is the **complete `docker-compose.yml`** — Navidrome plus all six sidecars
-(octo-fiesta, acoustid, webhook, filter proxy, mysql, essentia) on one shared network.
-Copy it to your NAS, fill in the paths, then run `docker compose up -d`:
+Here is the **complete `docker-compose.yml`** — Navidrome plus all sidecars
+(acoustid, webhook, filter proxy, mysql, essentia) on one shared network.
+MySQL/MariaDB and AudioMuse-AI are commented out (optional). Copy it to your
+NAS, fill in the paths, then run `docker compose up -d`:
 
 ```yaml
 # nd-organizer full stack - Navidrome plus all six sidecars, one command:
