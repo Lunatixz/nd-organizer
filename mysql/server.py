@@ -92,14 +92,26 @@ NOT_EXPIRED = "(expires_at IS NULL OR expires_at > NOW())"
 def connect(db):
     if pymysql is None:
         raise RuntimeError("pymysql not installed")
+    host = db.get("host", "127.0.0.1")
+    port = int(db.get("port", 3306))
+    user = db.get("user", "")
+    password = db.get("password", "")
+    database = db.get("name", "")
+    
+    # Create database if it doesn't exist
+    if database:
+        try:
+            tmp = pymysql.connect(host=host, port=port, user=user, password=password,
+                                  autocommit=True, connect_timeout=5)
+            with tmp.cursor() as cur:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+            tmp.close()
+        except Exception as e:
+            log.warning("could not ensure database exists: %s", e)
+    
     return pymysql.connect(
-        host=db.get("host", "127.0.0.1"),
-        port=int(db.get("port", 3306)),
-        user=db.get("user", ""),
-        password=db.get("password", ""),
-        database=db.get("name", ""),
-        autocommit=True,
-        connect_timeout=5,
+        host=host, port=port, user=user, password=password,
+        database=database, autocommit=True, connect_timeout=5,
     )
 
 
