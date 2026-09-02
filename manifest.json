@@ -1421,10 +1421,6 @@
             {
               "type": "Control",
               "scope": "#/properties/favoritesSyncBidirectional"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/librefmScrobble"
             }
           ]
         },
