@@ -58,13 +58,14 @@ fn file_mtime(path: &Path) -> i64 {
 }
 
 /// Read + index one file's tags (skips unchanged files via mtime cache).
-fn index_file(cfg: &Config, library_id: i32, rel: &str, abs: &Path) -> Result<(), String> {
+/// Returns `true` if the file was actually (re)indexed, `false` if skipped.
+fn index_file(cfg: &Config, library_id: i32, rel: &str, abs: &Path) -> Result<bool, String> {
     let mtime = file_mtime(abs);
     let key = file_key(library_id, rel);
     if let Ok(Some(v)) = crate::store::kv().get(&key) {
         if let Ok(val) = serde_json::from_slice::<Value>(&v) {
             if val.get("mtime").and_then(|m| m.as_i64()) == Some(mtime) {
-                return Ok(());
+                return Ok(false);
             }
         }
     }
@@ -82,7 +83,8 @@ fn index_file(cfg: &Config, library_id: i32, rel: &str, abs: &Path) -> Result<()
         Some(t) => json!({ "rel": rel, "tags": t, "mtime": mtime }),
         None => json!({ "rel": rel, "tags": null, "mtime": mtime }),
     };
-    crate::store::kv().set(&key, entry.to_string().into_bytes()).map_err(|e| e.to_string())
+    crate::store::kv().set(&key, entry.to_string().into_bytes()).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// How a scan chunk ended: `More` = resume next task, `Done` = the walk
@@ -148,8 +150,10 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
                     break;
                 }
                 last_rel = rel.clone();
-                index_file(cfg, library_id, &rel, &entry.path())?;
-                processed += 1;
+                let did_work = index_file(cfg, library_id, &rel, &entry.path())?;
+                if did_work {
+                    processed += 1;
+                }
                 if processed >= files_per_task {
                     hit_limit = true;
                     break;
