@@ -52,6 +52,7 @@ SIDECAR_LOG_PORTS = {
     "nd-organizer-mysql": 8098,
     "nd-organizer-essentia": 8101,
     "nd-organizer-proxy": 4534,
+    "webhook": 0,  # port 0 = read own log file directly
 }
 _sidecar_logs = {}  # name -> (fetched_ts, text|None); refreshed every 30s
 _sidecar_status = {}  # name -> (fetched_ts, dict|None)
@@ -98,6 +99,17 @@ def _fetch_logs(name, port, timeout=1.0):
         return c[1]
     if not _within_budget():
         return c[1] if c else None
+    # port 0 = read own log file directly (webhook can't HTTP-request itself)
+    if port == 0:
+        try:
+            with open(LOGFILE, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            text = "".join(lines[-200:]).rstrip("\n")
+            _sidecar_logs[name] = (time.time(), text)
+            return text
+        except Exception:
+            _sidecar_logs[name] = (time.time(), None)
+            return None
     try:
         req = urllib.request.Request(
             "http://%s:%d/logs" % (name, port),
@@ -240,7 +252,18 @@ def sidecar_logs_html():
         # Hide MySQL card entirely when not configured
         if name == "nd-organizer-mysql" and not mysql_in_use:
             continue
-        card = _sidecar_card(name, _fetch_json(name, port, "/health", _sidecar_status), _fetch_logs(name, port))
+        # Webhook: use own health data, not an HTTP fetch
+        if name == "webhook":
+            ver = ""
+            try:
+                ver = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
+            except Exception:
+                pass
+            status = {"service": "nd-organizer-webhook", "version": ver,
+                      "uptime": int(time.time() - STARTED), "events": len(entries)}
+            card = _sidecar_card(name, status, _fetch_logs(name, port))
+        else:
+            card = _sidecar_card(name, _fetch_json(name, port, "/health", _sidecar_status), _fetch_logs(name, port))
         if card:
             out.append(card)
     if not out:

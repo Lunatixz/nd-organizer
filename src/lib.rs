@@ -1056,6 +1056,17 @@ pub(crate) mod wasm {
                                 let _ = crate::store::kv().delete(&k);
                             }
                         }
+                        // Clear the per-pass counters so the scan starts fresh
+                        if let Ok(keys) = crate::store::kv().list("scan.pass.") {
+                            for k in keys {
+                                let _ = crate::store::kv().delete(&k);
+                            }
+                        }
+                        if let Ok(keys) = crate::store::kv().list("scan.count.") {
+                            for k in keys {
+                                let _ = crate::store::kv().delete(&k);
+                            }
+                        }
                         // Clear the DB change fingerprint so detect_db_change resets
                         let _ = crate::store::kv().delete("scan.last_db_hash");
                     }
