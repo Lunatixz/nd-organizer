@@ -861,8 +861,7 @@ def service_cards(skip=None):
     hidden entirely (they're not running)."""
     skip = skip or set()
     now = time.time()
-    services["webhook"] = last_any_request
-    display = {"acoustid": "AcoustID", "webhook": "Webhook"}
+    skip.update({"webhook", "proxy"})  # internal services, not user-facing
     cards = ""
     for name in sorted(services):
         if name.lower() in skip:
@@ -872,7 +871,7 @@ def service_cards(skip=None):
         age = max(0, int(now - services[name]))
         if age > 120:
             continue  # no signal in 2 min -> not running, hide it
-        label_name = display.get(name.lower(), name.title())
+        label_name = name.title()
         if age < 120:
             cls, label = "ok", "UP"
         else:
