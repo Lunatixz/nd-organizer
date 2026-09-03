@@ -871,7 +871,7 @@ def service_cards(skip=None):
     skip = skip or set()
     now = time.time()
     services["webhook"] = last_any_request
-    display = {"acoustid": "AcoustID", "proxy": "Proxy", "webhook": "Webhook"}
+    display = {"acoustid": "AcoustID", "webhook": "Webhook"}
     cards = ""
     for name in sorted(services):
         if name.lower() in skip:
