@@ -588,7 +588,7 @@ def radio_station_exists(cur, name, url):
     return cur.fetchone() is not None
 
 def radio_add_stations(stations):
-    import base64, hashlib, datetime
+    import base64, hashlib
     added = 0
     skipped = 0
     errors = []
