@@ -1288,6 +1288,9 @@ pub(crate) mod wasm {
             // A fresh scan pass: reset the maxScanEntries per-pass counter so
             // the cap applies per run, not cumulatively forever.
             let _ = crate::store::kv().delete(&format!("scan.pass.{library_id}"));
+            // Reset the display counter so "files indexed so far" reflects the
+            // current pass, not the sum of every chunk since the plugin was installed.
+            let _ = crate::store::kv().delete(&format!("scan.count.{library_id}"));
             match enqueue_scan_task(library_id) {
                 Ok(()) => enqueued += 1,
                 Err(e) => log_warn(&format!("enqueue scan for library {library_id}: {e}")),

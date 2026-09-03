@@ -115,7 +115,7 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
     let mut skipped = 0usize;
     let mut hit_limit = false;
     let mut last_rel: String = String::new();
-    let initial_stack = stack.len();
+    let _initial_stack = stack.len();
 
     crate::wasm::log_info(&format!(
         "scan_step: starting chunk, stack={} files, pass_count={}",
