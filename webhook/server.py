@@ -52,7 +52,7 @@ SIDECAR_LOG_PORTS = {
     "nd-organizer-mysql": 8098,
     "nd-organizer-essentia": 8101,
     "nd-organizer-proxy": 4534,
-    "webhook": 0,  # port 0 = read own log file directly
+    "nd-organizer-webhook": 0,  # port 0 = read own log file directly
 }
 _sidecar_logs = {}  # name -> (fetched_ts, text|None); refreshed every 30s
 _sidecar_status = {}  # name -> (fetched_ts, dict|None)
@@ -253,7 +253,7 @@ def sidecar_logs_html():
         if name == "nd-organizer-mysql" and not mysql_in_use:
             continue
         # Webhook: use own health data, not an HTTP fetch
-        if name == "webhook":
+        if name == "nd-organizer-webhook":
             ver = ""
             try:
                 ver = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
