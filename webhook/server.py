@@ -1124,7 +1124,7 @@ def pipeline_html(phase, dry):
     Preview/Apply -> Stats, highlighting where the organizer is right now."""
     steps = [("Scan", "scan"), ("Verify", "verify"), ("Group", "group"),
              ("Plan", "plan"), ("Preview" if dry else "Apply", "apply"), ("Stats", "stats")]
-    idx = {"scan": 0, "verify": 1, "group": 2, "plan": 4, "stats": 5}.get(phase)
+    idx = {"scan": 0, "verify": 1, "group": 2, "plan": 3, "apply": 4, "stats": 5}.get(phase)
     if idx is None:
         return ""
     out = "<div class='pipe'>"

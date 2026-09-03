@@ -241,6 +241,31 @@ fn post_scan_status(cfg: &Config, library_id: i32, chunk: usize, current_file: &
     crate::wasm::post_webhook(cfg, &status);
 }
 
+/// Post a lightweight phase-only status so the dashboard pipeline stepper
+/// highlights the current phase (group, plan, etc.) during processing.
+fn post_phase_status(cfg: &Config, library_id: i32, phase: &str) {
+    let status = serde_json::json!({
+        "ts": crate::state::now_ts(),
+        "mode": crate::wasm::mode_label(cfg),
+        "inProgress": true,
+        "phase": phase,
+        "libraries": [{
+            "id": library_id,
+            "albumsFound": 0,
+            "albumsToMove": 0,
+            "fileMoves": 0,
+            "kept": 0,
+            "skipped": 0,
+            "duplicates": 0,
+        }],
+        "warnings": [],
+        "integrations": crate::wasm::integration_health(cfg),
+        "tasks": crate::wasm::task_log(),
+    })
+    .to_string();
+    crate::wasm::post_webhook(cfg, &status);
+}
+
 /// AcoustID circuit breaker: when the sidecar drops mid-run, pause the batch
 /// (retry window), then stop for a cooldown, then resume WITHOUT fingerprinting
 /// rather than blocking the run on Nx30s timeouts. State is just a failure
@@ -461,7 +486,11 @@ fn clear_stale_state() {
 }
 
 /// Returns `(plan_tasks_enqueued, files_grouped)`.
-pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), String> {    let real_root = library_real_path(library_id)?;
+pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), String> {
+    let real_root = library_real_path(library_id)?;
+
+    // Post group phase so the dashboard shows "Grouping files..."
+    post_phase_status(cfg, library_id, "group");
 
     // AcoustID circuit breaker: pause the batch while the sidecar is down, wait
     // for it to come back, and only degrade (run without fingerprinting) after
@@ -778,6 +807,8 @@ pub fn plan_step(
     batch_index: i32,
     batch_total: i32,
 ) -> Result<(), String> {
+    // Post plan phase so the dashboard shows "Planning moves..."
+    post_phase_status(cfg, library_id, "plan");
     let eff = crate::wasm::effective_config(cfg);
     let cfg = &eff;
     let root = lib_root(library_id)?;
