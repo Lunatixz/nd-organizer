@@ -51,6 +51,7 @@ SIDECAR_LOG_PORTS = {
     "nd-organizer-acoustid": 8097,
     "nd-organizer-mysql": 8098,
     "nd-organizer-essentia": 8101,
+    "nd-organizer-proxy": 4534,
 }
 _sidecar_logs = {}  # name -> (fetched_ts, text|None); refreshed every 30s
 _sidecar_status = {}  # name -> (fetched_ts, dict|None)
