@@ -614,8 +614,7 @@ def radio_add_stations(stations):
                 continue
             unique = f"{name}{datetime.now(timezone.utc).isoformat()}"
             station_id = base64.b64encode(hashlib.md5(unique.encode()).digest()).decode().rstrip("=").replace("+", "-").replace("/", "_")[:22]
-            # RFC3339 format for Navidrome's Go time.Time parser
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
             homepage = (st.get("homepage") or "").strip()
             cur.execute(
                 "INSERT INTO radio (id, name, stream_url, home_page_url, created_at, updated_at) "
@@ -1622,7 +1621,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 conn = radio_db_connect()
                 cur = conn.cursor()
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
                 if url:
                     cur.execute("UPDATE radio SET name = ?, updated_at = ? WHERE name = ? OR stream_url = ?",
                                 (new_name, ts, old_name, url))
