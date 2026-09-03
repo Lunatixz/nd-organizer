@@ -271,8 +271,7 @@ def radio_html():
         url_json = json.dumps(s.get("url", "")).replace('"', '&quot;')
         rows += ("<div class='fh'><b>%s</b> <span class='dim'>%s</span>"
                  " <button class='radio-rm' onclick='radioRemove(%s,%s)'>Remove</button>"
-                 " <button class='radio-rn' onclick='radioRename(%s)'>Rename</button>"
-                 "</div>") % (n, u, name_json, url_json, name_json)
+                 "</div>") % (n, u, name_json, url_json)
     out += "<div class='sc-stats'><span>stations <b>%d</b></span></div>" % len(stations)
     out += "<div class='np-head'>Stations</div><div id='radio-stations'>"
     if rows:
@@ -329,13 +328,6 @@ def radio_html():
             "    body:JSON.stringify({name:name,url:url})"
             "  }).then(function(){radioRefreshList()});"
             "}"
-            "function radioRename(oldName){"
-            "  var nn=prompt('Rename station:',oldName);"
-            "  if(!nn||nn===oldName)return;"
-            "  fetch('/radio-rename',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "    body:JSON.stringify({old_name:oldName,new_name:nn})"
-            "  }).then(function(){radioRefreshList()});"
-            "}"
             "function radioRefreshList(){"
             "  fetch('/radio-list',{headers:{'Accept':'application/json'}})"
             "  .then(function(r){return r.json()}).then(function(d){"
@@ -347,8 +339,8 @@ def radio_html():
             "    st.forEach(function(s){"
             "      var nj=JSON.stringify(s.name);var uj=JSON.stringify(s.url);"
             "      h+='<div class=\"fh\"><b>'+esc(s.name)+'</b> <span class=\"dim\">'+esc(s.url)+'</span>'"
-            "        +'<button class=\"radio-rm\" onclick=\"radioRemove('+nj+','+uj+')\">x</button> '"
-            "        +'<button class=\"radio-rn\" onclick=\"radioRename('+nj+')\">rename</button></div>';"
+            "        +'<button class=\"radio-rm\" onclick=\"radioRemove('+nj+','+uj+')\">x</button>'"
+            "        +'</div>';"
             "    });"
             "    el.innerHTML=h;"
             "  }).catch(function(){});"
