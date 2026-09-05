@@ -149,7 +149,7 @@ pub(crate) mod wasm {
         let mut enqueued = 0;
         for (i, chunk) in groups.chunks(batch).enumerate() {
             enqueue_payload(&TaskPayload {
-                kind: "plan".into(),
+                kind: "plan_move".into(),
                 library_id,
                 dir: String::new(),
                 run_id: String::new(),
@@ -157,6 +157,31 @@ pub(crate) mod wasm {
                 groups: chunk.to_vec(),
                 batch_index: i as i32,
                 batch_total: total as i32,
+            })?;
+            enqueued += 1;
+        }
+        Ok(enqueued)
+    }
+
+    /// Enqueue per-album enrich tasks (network-heavy, one album per task to
+    /// stay under the 30s WASM deadline).
+    pub(crate) fn enqueue_enrich_tasks(
+        library_id: i32,
+        groups: &[Vec<String>],
+        batch_index: i32,
+        batch_total: i32,
+    ) -> Result<usize, String> {
+        let mut enqueued = 0;
+        for group in groups {
+            enqueue_payload(&TaskPayload {
+                kind: "plan_enrich".into(),
+                library_id,
+                dir: String::new(),
+                run_id: String::new(),
+                dirs: vec![],
+                groups: vec![group.clone()],
+                batch_index,
+                batch_total,
             })?;
             enqueued += 1;
         }
@@ -327,7 +352,26 @@ pub(crate) mod wasm {
                 },
                 "group" => super::scan::group_step(&cfg, payload.library_id)
                     .map(|(n, files)| format!("grouped {files} files into {n} plan tasks")),
-                "plan" => super::scan::plan_step(
+                "plan_move" => {
+                    let groups = payload.groups.clone();
+                    let lib_id = payload.library_id;
+                    let bi = payload.batch_index;
+                    let bt = payload.batch_total;
+                    super::scan::plan_move_step(&cfg, lib_id, &groups, bi, bt)
+                        .and_then(|()| {
+                            // Enqueue per-album enrich tasks for apply mode.
+                            if cfg.mode == crate::config::Mode::Apply && !groups.is_empty() {
+                                let n = enqueue_enrich_tasks(lib_id, &groups, bi, bt)?;
+                                log_info(&format!("enqueued {n} enrich task(s) for batch {bi}/{bt}"));
+                            }
+                            Ok(format!(
+                                "plan_move batch {}/{} done",
+                                payload.batch_index + 1,
+                                payload.batch_total.max(1)
+                            ))
+                        })
+                }
+                "plan_enrich" => super::scan::plan_enrich_step(
                     &cfg,
                     payload.library_id,
                     &payload.groups,
@@ -336,7 +380,7 @@ pub(crate) mod wasm {
                 )
                 .map(|_| {
                     format!(
-                        "plan batch {}/{} done",
+                        "plan_enrich batch {}/{} done",
                         payload.batch_index + 1,
                         payload.batch_total.max(1)
                     )
