@@ -1392,16 +1392,8 @@ pub(crate) mod wasm {
             return Ok(());
             }
         }
-        // MusicBrainz is metadata enrichment (genres, classification) — scan
-        // proceeds without it but MB-dependent features are skipped.
-        if !crate::net::circuit_check(
-            "musicbrainz",
-            "https://musicbrainz.org/ws/2/",
-            &HashMap::new(),
-            15_000,
-        ) {
-            log_warn("MusicBrainz unreachable — genres/classification/tracklist will be skipped this pass");
-        }
+        // MusicBrainz connectivity is checked per-task; no blocking check here
+        // to avoid blowing the 30s scheduler callback deadline.
         store::write_status(&status_json(cfg, true, &[], None, None));
         if cfg.favorites_sync_lastfm {
             if let Err(e) = enqueue("favsync", 0, "", "") {

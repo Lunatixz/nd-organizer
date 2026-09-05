@@ -101,6 +101,12 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
     let key = stack_key(library_id);
     let mut stack = load_stack(&key);
     let files_per_task = cfg.files_per_scan_task.max(1);
+    // Cap directories walked per task to avoid the 30s WASM deadline on fresh
+    // rescans where the directory tree is large. Tag indexing is already capped
+    // by files_per_task; this caps the directory traversal overhead.
+    // ponytail: hardcoded limit, add config field if users need to tune it.
+    let dirs_per_task: usize = 50;
+    let mut dirs_walked: usize = 0;
     // Per-pass cumulative cap (maxScanEntries; 0 = unlimited). run_pass resets
     // this counter, so the cap throttles how much one pass indexes; the saved
     // stack resumes where it stopped on the next run.
@@ -125,6 +131,13 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
     while let Some(dir_rel) = stack.pop() {
         if crate::organizer::is_excluded(&dir_rel, &cfg.exclude_paths) {
             continue;
+        }
+        dirs_walked += 1;
+        if dirs_walked > dirs_per_task {
+            // Save remaining stack and re-enqueue to stay under 30s.
+            stack.push(dir_rel);
+            hit_limit = true;
+            break;
         }
         let dir_path = root.join(&dir_rel);
         let Ok(entries) = std::fs::read_dir(&dir_path) else {
@@ -1014,15 +1027,17 @@ fn apply_album_budget(cfg: &Config, groups: Vec<Vec<String>>) -> Vec<Vec<String>
     groups.into_iter().take(take).collect()
 }
 
-/// Plan (and in apply mode, apply) a batch of album groups.
-pub fn plan_step(
+/// Plan and apply file moves for a batch of album groups. Local I/O only
+/// (file moves, NFO writes, rollback records). In dry-run mode, generates the
+/// full report. In apply mode, posts a lightweight status and returns — network
+/// enrichment is handled by `plan_enrich_step`.
+pub fn plan_move_step(
     cfg: &Config,
     library_id: i32,
     groups: &[Vec<String>],
     batch_index: i32,
     batch_total: i32,
 ) -> Result<(), String> {
-    // Post plan phase so the dashboard shows "Planning moves..."
     post_phase_status(cfg, library_id, "plan");
     let eff = crate::wasm::effective_config(cfg);
     let cfg = &eff;
@@ -1030,10 +1045,8 @@ pub fn plan_step(
     let mut report_parts = Vec::new();
     let mut actions: Vec<serde_json::Value> = Vec::new();
     let mut total_moves = 0usize;
-let mut total_dupes = 0usize;
-let mut total_autotags = 0usize;
-let mut total_replaygains = 0usize;
-let mut total_to_move = 0usize;
+    let mut total_dupes = 0usize;
+    let mut total_to_move = 0usize;
     let mut plans: Vec<serde_json::Value> = Vec::new();
 
     for group in groups {
@@ -1060,9 +1073,6 @@ let mut total_to_move = 0usize;
             .and_then(|p| p.rsplit_once('/').map(|(d, _)| d.to_string()))
             .unwrap_or_default();
         let info = crate::organizer::album_info_from_tags(&files);
-        // Optional: MusicBrainz release type drives classification (classifyFromMB
-        // + primarySource = musicbrainz). Looked up per album, cached 7 days.
-        // The release (with its MBID) is also reused for auto-tagging below.
         let mb_release = if cfg.classify_from_mb
             && cfg.primary_source == crate::config::PrimarySource::MusicBrainz
         {
@@ -1087,7 +1097,6 @@ let mut total_to_move = 0usize;
                 }
             })
             .unwrap_or_default();
-        // Optional: force-search incomplete albums that are monitored in Lidarr.
         if cfg.lidarr_force_search_incomplete && !cfg.lidarr_url.trim().is_empty() {
             if let Some(album_id) = crate::lidarr::host_lidarr::incomplete_monitored(
                 cfg,
@@ -1110,73 +1119,6 @@ let mut total_to_move = 0usize;
         total_dupes += plan.duplicates.len();
         total_to_move += usize::from(!plan.moves.is_empty());
         report_parts.push(group_report(&plan, cfg.mode != Mode::Apply));
-        // Auto-tag genuinely-missing track fields from the MusicBrainz release
-        // tracklist (title/artist/MBIDs). Apply mode only; dry-run reports.
-        if cfg.auto_tag_from_mb {
-            if let Some(rel) = &mb_release {
-                if let Some(tagged) = autotag_album(cfg, &root, &files, rel, &info) {
-                    total_autotags += tagged;
-                    actions.push(serde_json::json!({
-                        "ts": crate::state::now_ts(),
-                        "text": format!(
-                            "auto-tagged {tagged} track(s) from MusicBrainz ({})",
-                            info.album
-                        ),
-                    }));
-                }
-            }
-        }
-        // ReplayGain loudness tags via the acoustid sidecar (ffmpeg). Apply
-        // mode only, cached per file for 7 days so it runs once per track.
-        // Album mode also writes album-level tags (mean gain / max peak).
-        if cfg.write_replaygain && cfg.mode == Mode::Apply {
-            let mut rg_entries: Vec<(std::path::PathBuf, f64, Option<f64>)> = Vec::new();
-            for (rel, _) in &files {
-                let abs = root.join(rel);
-                if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
-                    if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
-                        .unwrap_or(false)
-                    {
-                        rg_entries.push((abs, gain, peak));
-                    }
-                }
-            }
-            if !rg_entries.is_empty() {
-                total_replaygains += rg_entries.len();
-                if cfg.replay_gain_mode == "album" {
-                    let n = rg_entries.len() as f64;
-                    let album_gain = rg_entries.iter().map(|(_, g, _)| g).sum::<f64>() / n;
-                    let album_peak = rg_entries
-                        .iter()
-                        .filter_map(|(_, _, p)| *p)
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    for (abs, _, _) in &rg_entries {
-                        let peak = if album_peak.is_finite() { Some(album_peak) } else { None };
-                        if crate::tags::write_replaygain_album(
-                            abs,
-                            album_gain,
-                            peak,
-                            cfg.overwrite_existing_tags,
-                        )
-                        .is_err()
-                        {
-                            crate::wasm::log_warn(&format!("write album replaygain {}", abs.display()));
-                        }
-                    }
-                }
-                actions.push(serde_json::json!({
-                    "ts": crate::state::now_ts(),
-                    "text": format!(
-                        "wrote ReplayGain tags for {} track(s) ({}){}",
-                        rg_entries.len(),
-                        info.album,
-                        if cfg.replay_gain_mode == "album" { " + album tags" } else { "" }
-                    ),
-                }));
-            }
-        }
-        // Dry-run visibility: show the current star rating + playcount that each
-        // tracked file in this album would carry (from the plugin tally).
         if cfg.star_tally_enabled {
             let mut star_lines: Vec<String> = Vec::new();
             for (rel, _) in &files {
@@ -1211,8 +1153,6 @@ let mut total_to_move = 0usize;
 
         if cfg.mode == Mode::Apply && !plan.moves.is_empty() {
             crate::organizer::apply_group_plan(&root, &plan, cfg.prune_empty_dirs)?;
-            // Cross-library move: if a destination library is configured,
-            // move the entire album folder to the destination library.
             if !cfg.move_destination_library.is_empty() {
                 let dest_id = crate::wasm::resolve_library_id(&cfg.move_destination_library);
                 if let Some(dest_id) = dest_id {
@@ -1249,26 +1189,18 @@ let mut total_to_move = 0usize;
                     ));
                 }
             }
-            // Live action ticker: record each concrete action taken for this album.
             for m in &plan.moves {
                 actions.push(serde_json::json!({
                     "ts": crate::state::now_ts(),
                     "text": format!("moved {} -> {}", m.from, m.to),
                 }));
             }
-            // Trigger an early Navidrome scan right after moves so the player
-            // can access new files immediately, before slow tag writes (artwork,
-            // lyrics, acoustic) complete. The later scan (after tags) will pick
-            // up the final metadata.
             if cfg.scan_after_album {
                 if let Err(e) = crate::wasm::trigger_navidrome_scan(cfg) {
                     crate::wasm::log_warn(&format!("early scan trigger failed: {e}"));
                 }
             }
-            // Record each move so the run can be rolled back.
             let run_id = crate::wasm::current_run_id(library_id)?;
-            // Back up the album's current album.nfo (if any) BEFORE we rewrite it,
-            // so rollback can restore the original content.
             let mut nfo_backup_key: Option<String> = None;
             let nfo_abs = root.join(&plan.target_dir).join("album.nfo");
             if let Ok(orig) = std::fs::read(&nfo_abs) {
@@ -1280,8 +1212,6 @@ let mut total_to_move = 0usize;
                 }
             }
             for (i, m) in plan.moves.iter().enumerate() {
-                // Carry the star tally to the file's new path so its rating and
-                // playcount survive the rename/move.
                 crate::stats::host_stats::migrate_star_tally(
                     &root.join(&m.from).to_string_lossy(),
                     &root.join(&m.to).to_string_lossy(),
@@ -1318,7 +1248,215 @@ let mut total_to_move = 0usize;
                     "text": "wrote album.nfo".to_string(),
                 }));
             }
-            // Download + embed/save album artwork via fallback chain.
+        } else if cfg.mode != Mode::Apply {
+            for m in &plan.moves {
+                actions.push(serde_json::json!({
+                    "ts": crate::state::now_ts(),
+                    "text": format!("would move {} -> {}", m.from, m.to),
+                }));
+            }
+        }
+    }
+
+    // Dry-run: generate and post the full report now (no enrichment needed).
+    if cfg.mode != Mode::Apply {
+        let mut report_text = if report_parts.is_empty() {
+            format!(
+                "No albums in batch {}/{}\n",
+                batch_index + 1,
+                batch_total.max(1)
+            )
+        } else {
+            report_parts.join("\n")
+        };
+        report_text = format!(
+            "[DRY RUN] batch {}/{} - simulated, nothing changed.\n\
+             Switch mode to 'apply' to execute exactly these actions.\n{}\n",
+            batch_index + 1,
+            batch_total.max(1),
+            report_text
+        );
+        let run_id = crate::wasm::current_run_id(library_id).unwrap_or_default();
+        report_text.push_str(&format!(
+            "\n[rollback] Run ID: {run_id}\nTo undo everything in this run, set 'rollbackRunId' = {run_id} in the plugin settings, then run a pass.\n"
+        ));
+        crate::wasm::save_report(&report_text, cfg.backup_retention_days as i64);
+        crate::wasm::log_info(&report_text);
+        let report_envelope = serde_json::json!({
+            "ts": crate::state::now_ts(),
+            "mode": crate::wasm::mode_label(cfg),
+            "kind": "report",
+            "dryRun": true,
+            "batch": { "index": batch_index, "total": batch_total },
+            "runId": run_id,
+            "text": report_text,
+            "plans": plans,
+            "actions": actions,
+            "libraries": [{
+                "id": library_id,
+                "albumsFound": groups.len(),
+                "albumsToMove": total_to_move,
+                "fileMoves": total_moves,
+                "duplicates": total_dupes,
+                "kept": 0,
+                "skipped": 0
+            }],
+        })
+        .to_string();
+        crate::wasm::post_webhook(cfg, &report_envelope);
+        return Ok(());
+    }
+
+    // Apply mode: post lightweight status. Enrichment is handled by
+    // plan_enrich_step which gets enqueued per-album below.
+    let status_json = serde_json::json!({
+        "ts": crate::state::now_ts(),
+        "mode": "apply",
+        "inProgress": true,
+        "phase": "plan",
+        "batch": { "index": batch_index, "total": batch_total },
+        "libraries": [{
+            "id": library_id,
+            "albumsFound": groups.len(),
+            "albumsToMove": total_to_move,
+            "fileMoves": total_moves,
+            "duplicates": total_dupes,
+            "kept": 0,
+            "skipped": 0
+        }],
+        "totalAlbumsToMove": total_to_move,
+        "totalFileMoves": total_moves,
+        "plans": plans,
+        "actions": actions,
+        "warnings": [],
+        "integrations": crate::wasm::integration_health(cfg),
+        "tasks": crate::wasm::task_log(),
+    })
+    .to_string();
+    crate::wasm::post_webhook(cfg, &status_json);
+    Ok(())
+}
+
+/// Network-heavy enrichment for a batch of album groups: auto-tag, ReplayGain,
+/// artwork, lyrics, genre, acoustic tags, essentia, Lidarr refresh, AudioMuse
+/// re-sync. Runs as a separate WASM task per album to stay under the 30s
+/// deadline.
+pub fn plan_enrich_step(
+    cfg: &Config,
+    library_id: i32,
+    groups: &[Vec<String>],
+    batch_index: i32,
+    batch_total: i32,
+) -> Result<(), String> {
+    post_phase_status(cfg, library_id, "enrich");
+    let eff = crate::wasm::effective_config(cfg);
+    let cfg = &eff;
+    let root = lib_root(library_id)?;
+    let mut report_parts = Vec::new();
+    let mut actions: Vec<serde_json::Value> = Vec::new();
+    let mut total_autotags = 0usize;
+    let mut total_replaygains = 0usize;
+
+    for group in groups {
+        let mut files: Vec<(String, TrackTags)> = Vec::new();
+        for rel in group {
+            let key = file_key(library_id, rel);
+            if let Ok(Some(v)) = crate::store::kv().get(&key) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&v) {
+                    if let Some(tags) = val.get("tags") {
+                        if !tags.is_null() {
+                            if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                                files.push((rel.clone(), t));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if files.is_empty() {
+            continue;
+        }
+        let folder_hint = group
+            .first()
+            .and_then(|p| p.rsplit_once('/').map(|(d, _)| d.to_string()))
+            .unwrap_or_default();
+        let info = crate::organizer::album_info_from_tags(&files);
+        let mb_release = if cfg.classify_from_mb
+            && cfg.primary_source == crate::config::PrimarySource::MusicBrainz
+        {
+            crate::musicbrainz::lookup(&info.album_artist, &info.album, &cfg.musicbrainz_token)
+        } else {
+            None
+        };
+        let plan = crate::organizer::build_group_plan(&root, cfg, &files, &folder_hint, &mb_release.as_ref().map(|r| {
+            if r.primary_type == "Soundtrack" { "Soundtrack".to_string() }
+            else if r.secondary_types.iter().any(|t| t.eq_ignore_ascii_case("compilation") || t.eq_ignore_ascii_case("live")) || r.primary_type == "Compilation" { "Compilation".to_string() }
+            else if r.primary_type == "Single" || r.primary_type == "EP" { "Single".to_string() }
+            else { String::new() }
+        }).unwrap_or_default());
+        report_parts.push(group_report(&plan, false));
+
+        if !plan.moves.is_empty() {
+            if cfg.auto_tag_from_mb {
+                if let Some(rel) = &mb_release {
+                    if let Some(tagged) = autotag_album(cfg, &root, &files, rel, &info) {
+                        total_autotags += tagged;
+                        actions.push(serde_json::json!({
+                            "ts": crate::state::now_ts(),
+                            "text": format!(
+                                "auto-tagged {tagged} track(s) from MusicBrainz ({})",
+                                info.album
+                            ),
+                        }));
+                    }
+                }
+            }
+            if cfg.write_replaygain {
+                let mut rg_entries: Vec<(std::path::PathBuf, f64, Option<f64>)> = Vec::new();
+                for (rel, _) in &files {
+                    let abs = root.join(rel);
+                    if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
+                        if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
+                            .unwrap_or(false)
+                        {
+                            rg_entries.push((abs, gain, peak));
+                        }
+                    }
+                }
+                if !rg_entries.is_empty() {
+                    total_replaygains += rg_entries.len();
+                    if cfg.replay_gain_mode == "album" {
+                        let n = rg_entries.len() as f64;
+                        let album_gain = rg_entries.iter().map(|(_, g, _)| g).sum::<f64>() / n;
+                        let album_peak = rg_entries
+                            .iter()
+                            .filter_map(|(_, _, p)| *p)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        for (abs, _, _) in &rg_entries {
+                            let peak = if album_peak.is_finite() { Some(album_peak) } else { None };
+                            if crate::tags::write_replaygain_album(
+                                abs,
+                                album_gain,
+                                peak,
+                                cfg.overwrite_existing_tags,
+                            )
+                            .is_err()
+                            {
+                                crate::wasm::log_warn(&format!("write album replaygain {}", abs.display()));
+                            }
+                        }
+                    }
+                    actions.push(serde_json::json!({
+                        "ts": crate::state::now_ts(),
+                        "text": format!(
+                            "wrote ReplayGain tags for {} track(s) ({}){}",
+                            rg_entries.len(),
+                            info.album,
+                            if cfg.replay_gain_mode == "album" { " + album tags" } else { "" }
+                        ),
+                    }));
+                }
+            }
             if cfg.embed_artwork || cfg.write_cover_jpg {
                 let mbid = files.iter().find_map(|(_, t)| {
                     if !t.mbid_album.trim().is_empty() {
@@ -1363,7 +1501,6 @@ let mut total_to_move = 0usize;
                     }
                 }
             }
-            // Fetch + write lyrics sidecars (.lrc / .txt) next to the moved files.
             if cfg.lyrics_source == "lrclib" || cfg.lyrics_source == "genius" {
                 let n = download_lyrics_for(&root, &plan, &files, cfg.lyrics_format.as_str());
                 if n > 0 {
@@ -1373,7 +1510,6 @@ let mut total_to_move = 0usize;
                     }));
                 }
             }
-            // Genre fallback chain: try selected source, then others in order.
             if !cfg.genre_source.is_empty() {
                 let mbid = files.iter().find_map(|(_, t)| {
                     if !t.mbid_album.trim().is_empty() {
@@ -1396,7 +1532,6 @@ let mut total_to_move = 0usize;
                     &info.album,
                     &nfo_genres,
                 ) {
-                    // Write genre to all tracks in the album
                     for (rel, _tags) in files.iter() {
                         let path = root.join(rel);
                         let _ = crate::tags::write_genre(&path, &genres);
@@ -1407,7 +1542,6 @@ let mut total_to_move = 0usize;
                     }));
                 }
             }
-            // Write acoustic tags (BPM/key/mood/energy) from AudioMuse-AI.
             if cfg.write_acoustic_tags && !cfg.audiomuse_url.trim().is_empty() {
                 let n = write_acoustic_tags_for(cfg, &root, &plan, &files);
                 if n > 0 {
@@ -1417,9 +1551,6 @@ let mut total_to_move = 0usize;
                     }));
                 }
             }
-            // Essentia genre/mood: fetch from the Essentia sidecar and write
-            // genres (when genreSource=essentia) and mood (fallback when AudioMuse
-            // didn't provide it). Requires essentiaUrl to be set.
             if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() {
                 let n = crate::stats::host_stats::write_essentia_genres(cfg, &root, &plan, &files);
                 if n > 0 {
@@ -1429,16 +1560,11 @@ let mut total_to_move = 0usize;
                     }));
                 }
             }
-            // Scan after tag writes (artwork, lyrics, acoustic tags, essentia)
-            // to pick up the final metadata. The early scan (scanAfterAlbum)
-            // already made files accessible to the player.
             if cfg.scan_after_tag_write {
                 if let Err(e) = crate::wasm::trigger_navidrome_scan(cfg) {
                     crate::wasm::log_warn(&format!("scan trigger failed: {e}"));
                 }
             }
-            // Ask AudioMuse-AI to re-sync after file moves so its analysis stays
-            // valid for the new paths (notifyAudiomuseAfterRun).
             if cfg.notify_audiomuse_after_run && !cfg.audiomuse_url.trim().is_empty() {
                 match crate::audiomuse::re_sync(cfg) {
                     Ok(()) => actions.push(serde_json::json!({
@@ -1448,15 +1574,10 @@ let mut total_to_move = 0usize;
                     Err(e) => crate::wasm::log_warn(&format!("AudioMuse-AI re-sync: {e}")),
                 }
             }
-            // Keep Lidarr's DB in sync after we move files for this album
-            // (only in metadataPlusRescan mode, and once per artist per 5 min).
-            // Also refresh the SOURCE artist when files move between different
-            // artists, so Lidarr prunes stale paths from the old location.
             if cfg.lidarr_mode == crate::config::LidarrMode::MetadataPlusRescan
                 && !cfg.lidarr_url.trim().is_empty()
                 && !cfg.lidarr_api_key.trim().is_empty()
             {
-                // Refresh destination artist.
                 if let Some(lidar) =
                     crate::lidarr::host_lidarr::find_album(cfg, &info.album, &info.album_artist)
                 {
@@ -1476,10 +1597,6 @@ let mut total_to_move = 0usize;
                         }
                     }
                 }
-                // When files move between different artists (e.g., compilation
-                // split), also refresh the source artists so Lidarr prunes the
-                // old paths. Only needed when distinct artists differ from the
-                // album artist.
                 for src_artist in &info.distinct_artists {
                     if src_artist.eq_ignore_ascii_case(&info.album_artist) {
                         continue;
@@ -1512,15 +1629,6 @@ let mut total_to_move = 0usize;
                     }
                 }
             }
-        } else if cfg.mode != Mode::Apply {
-            // Dry-run: record the would-be moves so the action ticker is honest
-            // in preview mode too.
-            for m in &plan.moves {
-                actions.push(serde_json::json!({
-                    "ts": crate::state::now_ts(),
-                    "text": format!("would move {} -> {}", m.from, m.to),
-                }));
-            }
         }
     }
 
@@ -1535,54 +1643,35 @@ let mut total_to_move = 0usize;
     };
     if total_autotags > 0 {
         report_text.push_str(&format!(
-            "\nauto-tag: {} track(s) {} from MusicBrainz\n",
+            "\nauto-tag: {} track(s) tagged from MusicBrainz\n",
             total_autotags,
-            if cfg.mode != Mode::Apply {
-                "would be tagged"
-            } else {
-                "tagged"
-            }
         ));
     }
     if total_replaygains > 0 {
         report_text.push_str(&format!("\nReplayGain: {total_replaygains} track(s) tagged\n"));
     }
-    // Dry run: the report is a full simulation of the work a real run would do,
-    // clearly labelled so the user can trust the plan before applying it.
-    if cfg.mode != Mode::Apply {
-        report_text = format!(
-            "[DRY RUN] batch {}/{} - simulated, nothing changed.\n\
-             Switch mode to 'apply' to execute exactly these actions.\n{}\n",
-            batch_index + 1,
-            batch_total.max(1),
-            report_text
-        );
-    }
-    // Always surface the run id so the user knows what to roll back.
     let run_id = crate::wasm::current_run_id(library_id).unwrap_or_default();
     report_text.push_str(&format!(
         "\n[rollback] Run ID: {run_id}\nTo undo everything in this run, set 'rollbackRunId' = {run_id} in the plugin settings, then run a pass.\n"
     ));
     crate::wasm::save_report(&report_text, cfg.backup_retention_days as i64);
     crate::wasm::log_info(&report_text);
-    // Post the report as a structured envelope so the dashboard can render the
-    // moves/albums and clearly label each entry DRY RUN vs APPLY.
     let report_envelope = serde_json::json!({
         "ts": crate::state::now_ts(),
         "mode": crate::wasm::mode_label(cfg),
         "kind": "report",
-        "dryRun": cfg.mode != Mode::Apply,
+        "dryRun": false,
         "batch": { "index": batch_index, "total": batch_total },
         "runId": run_id,
         "text": report_text,
-        "plans": plans,
+        "plans": [],
         "actions": actions,
         "libraries": [{
             "id": library_id,
             "albumsFound": groups.len(),
-            "albumsToMove": total_to_move,
-            "fileMoves": total_moves,
-            "duplicates": total_dupes,
+            "albumsToMove": 0,
+            "fileMoves": 0,
+            "duplicates": 0,
             "kept": 0,
             "skipped": 0
         }],
@@ -1590,35 +1679,19 @@ let mut total_to_move = 0usize;
     .to_string();
     crate::wasm::post_webhook(cfg, &report_envelope);
     crate::wasm::log_info(&format!(
-        "STATUS: library={} mode={} batch={}/{} albumsToMove={} fileMoves={} duplicates={}",
+        "ENRICH: library={} batch={}/{} autotags={} replaygains={}",
         library_id,
-        crate::wasm::mode_label(cfg),
         batch_index + 1,
         batch_total.max(1),
-        total_to_move,
-        total_moves,
-        total_dupes
+        total_autotags,
+        total_replaygains,
     ));
-    // Also push the status JSON so the webhook dashboard's Status card updates
-    // on every batch, not just on deferral events.
     let status_json = serde_json::json!({
         "ts": crate::state::now_ts(),
-        "mode": crate::wasm::mode_label(cfg),
+        "mode": "apply",
         "inProgress": false,
+        "phase": "enrich",
         "batch": { "index": batch_index, "total": batch_total },
-        "libraries": [{
-            "id": library_id,
-            "albumsFound": groups.len(),
-            "albumsToMove": total_to_move,
-            "fileMoves": total_moves,
-            "duplicates": total_dupes,
-            "kept": 0,
-            "skipped": 0
-        }],
-        "totalAlbumsToMove": total_to_move,
-        "totalFileMoves": total_moves,
-        "plans": plans,
-        "actions": actions,
         "warnings": [],
         "integrations": crate::wasm::integration_health(cfg),
         "tasks": crate::wasm::task_log(),
