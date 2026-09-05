@@ -122,6 +122,11 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
     let mut hit_limit = false;
     let mut last_rel: String = String::new();
     let _initial_stack = stack.len();
+    // Hard time cap: break out before the 30s WASM deadline regardless of
+    // dir/file counters. Check every 200 dirs to avoid syscall overhead.
+    let scan_start = std::time::Instant::now();
+    let time_budget = std::time::Duration::from_secs(25);
+    let mut dirs_since_check: usize = 0;
 
     crate::wasm::log_info(&format!(
         "scan_step: starting chunk, stack={} files, pass_count={}",
@@ -132,18 +137,22 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
         if crate::organizer::is_excluded(&dir_rel, &cfg.exclude_paths) {
             continue;
         }
-        dirs_walked += 1;
-        if dirs_walked > dirs_per_task {
-            // Save remaining stack and re-enqueue to stay under 30s.
-            stack.push(dir_rel);
-            hit_limit = true;
-            break;
+        // Time-based break: bail before the 30s WASM deadline.
+        dirs_since_check += 1;
+        if dirs_since_check >= 200 {
+            dirs_since_check = 0;
+            if scan_start.elapsed() >= time_budget {
+                stack.push(dir_rel);
+                hit_limit = true;
+                break;
+            }
         }
         let dir_path = root.join(&dir_rel);
         let Ok(entries) = std::fs::read_dir(&dir_path) else {
             continue;
         };
         let mut subdirs: Vec<String> = Vec::new();
+        let dir_start_processed = processed;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if cfg.skip_hidden_files && name.starts_with('.') {
@@ -177,6 +186,18 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
         }
         for sub in subdirs.into_iter().rev() {
             stack.push(sub);
+        }
+        // Only count directories that actually indexed new files toward the
+        // budget. Fully-indexed dirs are free — the scan walks them once to
+        // confirm, then skips them on subsequent chunks via mtime checks.
+        if processed > dir_start_processed {
+            dirs_walked += 1;
+        }
+        if dirs_walked >= dirs_per_task {
+            // Save remaining stack and re-enqueue to stay under 30s.
+            stack.push(dir_rel);
+            hit_limit = true;
+            break;
         }
         if hit_limit {
             // Resume this dir next time (already-indexed files are skipped).
