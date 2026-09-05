@@ -437,9 +437,9 @@ pub(crate) mod wasm {
     /// to via the Navidrome "Library Access" permission (the check marks in the
     /// plugin settings) - the sole authority. `get_all_libraries` may list every
     /// library, but `get_library(id)` enforces the permission, so we filter to
-    /// the genuinely accessible set. Legacy `libraries`/`libraryId` config values
-    /// are ignored.
-    pub(crate) fn target_libraries() -> Vec<i32> {
+    /// the genuinely accessible set. When `cfg.libraries` is non-empty, only
+    /// libraries matching those paths/names are included.
+    pub(crate) fn target_libraries(cfg: &Config) -> Vec<i32> {
         let libs = match host::library::get_all_libraries() {
             Ok(libs) if !libs.is_empty() => libs,
             Ok(_) => {
@@ -453,15 +453,44 @@ pub(crate) mod wasm {
         };
         // Only libraries the plugin can actually reach count - this is exactly
         // what the check marks in Library Access control.
-        let targets: Vec<i32> = libs
+        let accessible: Vec<_> = libs
             .into_iter()
             .filter(|l| host::library::get_library(l.id).ok().flatten().is_some())
-            .map(|l| l.id)
             .collect();
+        // Filter by config paths/names if specified.
+        let targets: Vec<i32> = if cfg.libraries.is_empty() {
+            accessible.iter().map(|l| l.id).collect()
+        } else {
+            accessible
+                .iter()
+                .filter(|l| {
+                    cfg.libraries.iter().any(|wanted| {
+                        let w = wanted.trim().trim_start_matches('/');
+                        // Match against path, mount_point, or name (case-insensitive).
+                        l.path.trim_start_matches('/').eq_ignore_ascii_case(w)
+                            || l.mount_point.trim_start_matches('/').eq_ignore_ascii_case(w)
+                            || l.name.eq_ignore_ascii_case(wanted)
+                    })
+                })
+                .map(|l| l.id)
+                .collect()
+        };
         if targets.is_empty() {
             log_warn("no accessible libraries; grant Library Access in the plugin settings");
         }
         targets
+    }
+
+    /// Resolve a library path/name to its numeric ID.
+    /// Matches against path, mount_point, or name (case-insensitive).
+    pub(crate) fn resolve_library_id(name: &str) -> Option<i32> {
+        let libs = host::library::get_all_libraries().ok()?;
+        let needle = name.trim().trim_start_matches('/');
+        libs.into_iter().find(|l| {
+            l.path.trim_start_matches('/').eq_ignore_ascii_case(needle)
+                || l.mount_point.trim_start_matches('/').eq_ignore_ascii_case(needle)
+                || l.name.eq_ignore_ascii_case(name)
+        }).map(|l| l.id)
     }
 
     /// Per-library summary of a pass batch, used to build the status snapshot.
@@ -949,11 +978,23 @@ pub(crate) mod wasm {
     /// in the status JSON so users notice wrong API keys or IP addresses.
     fn collect_warnings(cfg: &Config) -> Vec<String> {
         let mut w = Vec::new();
-        if target_libraries().is_empty() {
+        if target_libraries(cfg).is_empty() {
             w.push(
                 "no libraries are accessible - grant Library Access in the plugin permissions"
                     .into(),
             );
+        }
+        // Show available libraries with paths so users can copy them.
+        if let Ok(libs) = host::library::get_all_libraries() {
+            let accessible: Vec<_> = libs.into_iter()
+                .filter(|l| host::library::get_library(l.id).ok().flatten().is_some())
+                .collect();
+            if !accessible.is_empty() {
+                let list: Vec<String> = accessible.iter()
+                    .map(|l| format!("\"{}\" ({})", l.name, l.path))
+                    .collect();
+                w.push(format!("available libraries: {}", list.join(", ")));
+            }
         }
         if cfg.mode == Mode::Apply {
             for lib in host::library::get_all_libraries().unwrap_or_default() {
@@ -965,19 +1006,16 @@ pub(crate) mod wasm {
                 }
             }
             // Validate moveDestinationLibrary
-            if cfg.move_destination_library > 0 {
-                let dest_ok = host::library::get_library(cfg.move_destination_library)
-                    .ok()
-                    .flatten()
-                    .is_some();
-                if !dest_ok {
+            if !cfg.move_destination_library.is_empty() {
+                let dest_id = resolve_library_id(&cfg.move_destination_library);
+                if dest_id.is_none() {
                     let libs: Vec<String> = host::library::get_all_libraries()
                         .unwrap_or_default()
                         .iter()
-                        .map(|l| format!("{} \"{}\"", l.id, l.name))
+                        .map(|l| format!("{} \"{}\" ({})", l.id, l.name, l.path))
                         .collect();
                     w.push(format!(
-                        "moveDestinationLibrary={} is not accessible. Available libraries: {}",
+                        "moveDestinationLibrary=\"{}\" not found. Available libraries: {}",
                         cfg.move_destination_library,
                         if libs.is_empty() { "none".into() } else { libs.join(", ") }
                     ));
@@ -1254,7 +1292,7 @@ pub(crate) mod wasm {
         if pruned > 0 {
             log_info(&format!("pruned {pruned} stale rollback keys (retention {}d)", cfg.rollback_retention_days));
         }
-        let target_libs = target_libraries();
+        let target_libs = target_libraries(cfg);
         if target_libs.is_empty() {
             log_error("nothing to organize: no libraries are accessible");
             store::write_status(&status_json(cfg, false, &[], None, None));
@@ -1360,7 +1398,7 @@ pub(crate) mod wasm {
             return Ok(());
         }
         let mut errors = Vec::new();
-        let target_libs = target_libraries();
+        let target_libs = target_libraries(cfg);
         for &library_id in &target_libs {
             let lib = host::library::get_library(library_id)
                 .map_err(|e| e.to_string())?

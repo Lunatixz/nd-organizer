@@ -91,8 +91,8 @@ pub struct Config {
     pub mode: Mode,
     /// All libraries to organize. Empty = organize every library the plugin is
     /// granted access to (the Navidrome "Library Access" permission is the
-    /// authority); non-empty = only these IDs (a subset override).
-    pub libraries: Vec<i32>,
+    /// authority); non-empty = only these paths/names (a subset override).
+    pub libraries: Vec<String>,
     /// Run once on plugin start. If schedule_cron is set it then also runs on
     /// that schedule; an empty cron makes this startup run the only automatic run.
     pub run_on_startup: bool,
@@ -256,10 +256,10 @@ pub struct Config {
     pub filler_keywords: String,
     /// Path prefixes/globs under the library root that must never be touched.
     pub exclude_paths: Vec<String>,
-    /// Destination library ID for cross-library moves. 0 = disabled (keep in
-    /// place). When set, processed albums are moved to this library after
-    /// processing. Supports cross-filesystem moves via copy+delete fallback.
-    pub move_destination_library: i32,
+    /// Destination library path/name for cross-library moves. Empty = disabled
+    /// (keep in place). When set, processed albums are moved to this library
+    /// after processing. Supports cross-filesystem moves via copy+delete.
+    pub move_destination_library: String,
     /// Snapshot previous tags (and original .nfo) to plugin storage before any
     /// tag/nfo write. Metadata-only, never copies audio bytes.
     pub backup_before_write: bool,
@@ -450,7 +450,7 @@ impl Default for Config {
             singles_enabled: true,
             filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke".into(),
             exclude_paths: Vec::new(),
-            move_destination_library: 0, // 0 = disabled
+            move_destination_library: String::new(), // empty = disabled
             backup_before_write: true,
             backup_retention_days: 30,
             rollback_retention_days: 30,
@@ -691,10 +691,10 @@ impl Config {
             };
         }
         // Multi-library: `libraries` wins if present; `libraryId` is the single
-        // library fallback. Handles JSON array, comma list or single value.
+        // library fallback. Accepts paths or names as comma-separated list.
         let libs = map.get("libraries").or_else(|| map.get("libraryId"));
         if let Some(v) = libs {
-            let parsed = parse_library_list(v);
+            let parsed = parse_string_list(v);
             if !parsed.is_empty() {
                 c.libraries = parsed;
             }
@@ -875,7 +875,10 @@ impl Config {
             }
         }
         if let Some(v) = map.get("moveDestinationLibrary") {
-            c.move_destination_library = v.trim().parse().unwrap_or(0);
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() && trimmed != "0" {
+                c.move_destination_library = trimmed;
+            }
         }
         c.backup_before_write = bool(map, "backupBeforeWrite", c.backup_before_write);
         if let Some(v) = map.get("backupRetentionDays") {
@@ -1151,8 +1154,8 @@ mod tests {
             ("skipHeavyRatio", "0.75"),
         ]));
         assert_eq!(c.mode, Mode::Apply);
-        assert_eq!(c.libraries, vec![2]);
-        assert_eq!(c.libraries, vec![2]);
+        assert_eq!(c.libraries, vec!["2".to_string()]);
+        assert_eq!(c.libraries, vec!["2".to_string()]);
         assert!(c.run_on_startup);
         assert_eq!(c.folder_schema, "{albumArtist}/{album}");
         assert_eq!(c.incomplete_album_min_tracks, 5);
@@ -1186,19 +1189,18 @@ mod tests {
 
     #[test]
     fn multi_library_parsing() {
-        assert_eq!(parse_library_list("[1,2,3]"), vec![1, 2, 3]);
-        assert_eq!(parse_library_list("1, 2, 3"), vec![1, 2, 3]);
-        assert_eq!(parse_library_list("7"), vec![7]);
-        assert_eq!(parse_library_list(""), Vec::<i32>::new());
-        assert_eq!(parse_library_list("garbage"), Vec::<i32>::new());
+        assert_eq!(parse_string_list("[\"/music\",\"/compilations\"]"), vec!["/music", "/compilations"]);
+        assert_eq!(parse_string_list("/music, /compilations"), vec!["/music", "/compilations"]);
+        assert_eq!(parse_string_list("Music"), vec!["Music"]);
+        assert_eq!(parse_string_list(""), Vec::<String>::new());
 
         // `libraries` wins over `libraryId`.
-        let c = Config::from_map(&map(&[("libraries", "[2,5]"), ("libraryId", "9")]));
-        assert_eq!(c.libraries, vec![2, 5]);
+        let c = Config::from_map(&map(&[("libraries", "/music,/compilations"), ("libraryId", "/other")]));
+        assert_eq!(c.libraries, vec!["/music", "/compilations"]);
 
         // Single `libraryId` fallback.
-        let c = Config::from_map(&map(&[("libraryId", "4")]));
-        assert_eq!(c.libraries, vec![4]);
+        let c = Config::from_map(&map(&[("libraryId", "/music")]));
+        assert_eq!(c.libraries, vec!["/music"]);
     }
 
     #[test]

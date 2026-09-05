@@ -788,16 +788,16 @@
           "description": "Delay Navidrome rescans by this many seconds so a burst of changes coalesces into a single scan. 0 = rescan immediately after each change."
         },
         "moveDestinationLibrary": {
-          "type": "integer",
-          "title": "Destination library ID",
-          "default": 0,
-          "description": "Library ID to move processed albums into. 0 = disabled (keep in place). Run a dry-run to see available library IDs in the warnings panel (e.g. '1 \"Music\"')."
+          "type": "string",
+          "title": "Move to library",
+          "default": "",
+          "description": "Path or name of the library to move processed albums into. Leave empty to keep albums in their current library. Match must be exact (e.g. '/music' or 'Music'). Check the warnings panel for available libraries."
         },
         "libraries": {
           "type": "string",
           "title": "Organize specific libraries only",
           "default": "",
-          "description": "Comma-separated library IDs to organize (e.g. '1,2'). Leave empty to organize all libraries the plugin has access to. Run a dry-run to see available library IDs in the warnings panel."
+          "description": "Comma-separated library paths or names to organize (e.g. '/music, /compilations'). Leave empty to organize all libraries the plugin has access to. Check the warnings panel for available libraries."
         },
         "maxScanEntries": {
           "type": "integer",
@@ -1819,18 +1819,6 @@
             {
               "type": "Control",
               "scope": "#/properties/scanDebounceSeconds"
-            },
-            {
-              "type": "Label",
-              "text": "Cross-library moves: set mode=dryRun, save, then check the warnings panel for available library IDs (e.g. '1 \"Music\"'). Enter the destination library ID below. Set to 0 to keep albums in their current library."
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/moveDestinationLibrary"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/libraries"
             }
           ]
         },
@@ -1887,6 +1875,24 @@
               "options": {
                 "format": "password"
               }
+            }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Libraries",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Available libraries are listed in the warnings panel (set mode=dryRun, save, then check). Copy the path or name exactly as shown."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/libraries"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/moveDestinationLibrary"
             }
           ]
         },

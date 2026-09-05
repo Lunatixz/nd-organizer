@@ -510,7 +510,7 @@ pub fn detect_db_change(cfg: &Config) {
 /// Build a fingerprint of the current Navidrome library state.
 fn db_fingerprint(cfg: &Config) -> Option<String> {
     let mut mounts: Vec<String> = Vec::new();
-    for &lib_id in &crate::wasm::target_libraries() {
+    for &lib_id in &crate::wasm::target_libraries(cfg) {
         if let Ok(root) = library_real_path(lib_id) {
             mounts.push(root);
         }
@@ -1213,30 +1213,38 @@ let mut total_to_move = 0usize;
             crate::organizer::apply_group_plan(&root, &plan, cfg.prune_empty_dirs)?;
             // Cross-library move: if a destination library is configured,
             // move the entire album folder to the destination library.
-            if cfg.move_destination_library > 0 {
-                let source_album_dir = root.join(&plan.target_dir);
-                if let Ok(dest_root) = lib_root(cfg.move_destination_library) {
-                    let dest_album_dir = dest_root.join(&plan.target_dir);
-                    if source_album_dir != dest_album_dir {
-                        match crate::organizer::move_album_folder(&source_album_dir, &dest_album_dir) {
-                            Ok(n) => {
-                                crate::wasm::log_info(&format!(
-                                    "cross-library move: {} file(s) -> library {}",
-                                    n, cfg.move_destination_library
-                                ));
-                                actions.push(serde_json::json!({
-                                    "ts": crate::state::now_ts(),
-                                    "text": format!("cross-library move: {n} file(s) to library {}", cfg.move_destination_library),
-                                }));
-                            }
-                            Err(e) => {
-                                crate::wasm::log_warn(&format!("cross-library move failed: {e}"));
+            if !cfg.move_destination_library.is_empty() {
+                let dest_id = crate::wasm::resolve_library_id(&cfg.move_destination_library);
+                if let Some(dest_id) = dest_id {
+                    let source_album_dir = root.join(&plan.target_dir);
+                    if let Ok(dest_root) = lib_root(dest_id) {
+                        let dest_album_dir = dest_root.join(&plan.target_dir);
+                        if source_album_dir != dest_album_dir {
+                            match crate::organizer::move_album_folder(&source_album_dir, &dest_album_dir) {
+                                Ok(n) => {
+                                    crate::wasm::log_info(&format!(
+                                        "cross-library move: {} file(s) -> {}",
+                                        n, cfg.move_destination_library
+                                    ));
+                                    actions.push(serde_json::json!({
+                                        "ts": crate::state::now_ts(),
+                                        "text": format!("cross-library move: {n} file(s) to {}", cfg.move_destination_library),
+                                    }));
+                                }
+                                Err(e) => {
+                                    crate::wasm::log_warn(&format!("cross-library move failed: {e}"));
+                                }
                             }
                         }
+                    } else {
+                        crate::wasm::log_warn(&format!(
+                            "cross-library move: destination \"{}\" not accessible",
+                            cfg.move_destination_library
+                        ));
                     }
                 } else {
                     crate::wasm::log_warn(&format!(
-                        "cross-library move: destination library {} not accessible",
+                        "cross-library move: destination \"{}\" not found",
                         cfg.move_destination_library
                     ));
                 }
