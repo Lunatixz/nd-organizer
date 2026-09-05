@@ -791,7 +791,13 @@
           "type": "integer",
           "title": "Destination library ID",
           "default": 0,
-          "description": "Library ID to move processed albums into. 0 = disabled (keep in place). Run a dry-run first to see available library IDs in the warnings panel (e.g. '1 \"Music\"')."
+          "description": "Library ID to move processed albums into. 0 = disabled (keep in place). Run a dry-run to see available library IDs in the warnings panel (e.g. '1 \"Music\"')."
+        },
+        "libraries": {
+          "type": "string",
+          "title": "Organize specific libraries only",
+          "default": "",
+          "description": "Comma-separated library IDs to organize (e.g. '1,2'). Leave empty to organize all libraries the plugin has access to. Run a dry-run to see available library IDs in the warnings panel."
         },
         "maxScanEntries": {
           "type": "integer",
@@ -1816,11 +1822,15 @@
             },
             {
               "type": "Label",
-              "text": "To find library IDs: set mode=dryRun, save, then check the warnings panel — it lists all available libraries with their IDs (e.g. '1 \"Music\"'). Set to 0 to disable cross-library moves."
+              "text": "Cross-library moves: set mode=dryRun, save, then check the warnings panel for available library IDs (e.g. '1 \"Music\"'). Enter the destination library ID below. Set to 0 to keep albums in their current library."
             },
             {
               "type": "Control",
               "scope": "#/properties/moveDestinationLibrary"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/libraries"
             }
           ]
         },
