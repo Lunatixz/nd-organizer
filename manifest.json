@@ -788,7 +788,7 @@
           "description": "Delay Navidrome rescans by this many seconds so a burst of changes coalesces into a single scan. 0 = rescan immediately after each change."
         },
         "moveDestinationLibrary": {
-          "type": "string",
+          "type": ["string", "integer"],
           "title": "Move to library",
           "default": "",
           "description": "Path or name of the library to move processed albums into. Leave empty to keep albums in their current library. Match must be exact (e.g. '/music' or 'Music'). Check the warnings panel for available libraries."

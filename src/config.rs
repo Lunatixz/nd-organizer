@@ -876,8 +876,15 @@ impl Config {
         }
         if let Some(v) = map.get("moveDestinationLibrary") {
             let trimmed = v.trim().to_string();
-            if !trimmed.is_empty() && trimmed != "0" {
-                c.move_destination_library = trimmed;
+            // Accept string path/name, or legacy integer ("0" = disabled)
+            if trimmed.is_empty() || trimmed == "0" || trimmed == "\"\"" {
+                // disabled
+            } else {
+                // Strip surrounding quotes if present (JSON string encoding)
+                let inner = trimmed.trim_start_matches('"').trim_end_matches('"');
+                if !inner.is_empty() && inner != "0" {
+                    c.move_destination_library = inner.to_string();
+                }
             }
         }
         c.backup_before_write = bool(map, "backupBeforeWrite", c.backup_before_write);
