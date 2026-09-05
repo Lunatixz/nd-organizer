@@ -27,4 +27,10 @@ services:
       # Mirror every library mount from your Navidrome stack, SAME guest path.
       - /path/to/music:/music:ro
       # - /path/to/unsorted:/unsorted:ro
+    networks:
+      - stack_network
+
+networks:
+  stack_network:
+    external: true
 

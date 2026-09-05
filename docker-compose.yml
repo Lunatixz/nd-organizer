@@ -6,7 +6,7 @@
 #   nd-organizer-acoustid (8097)  fingerprint + ReplayGain sidecar (fpcalc + ffmpeg)
 #   nd-organizer-webhook  (8099)  dashboard + log/status receiver + radio management
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
-#   nd-organizer-essentia (8101)  genre/mood ML analysis (Essentia + Discogs-400)
+#   nd-organizer-essentia (8101)  ML analysis (genre/mood, structure, chords, BPM/key, fingerprinting)
 #
 # Services (optional, commented out):
 #   nd-organizer-mariadb  (3306)  MySQL for persistent plugin state
@@ -43,7 +43,7 @@
 #   acoustidUrl   = http://nd-organizer-acoustid:8097
 #   filterUrl     = http://nd-organizer-proxy:4534
 #   persistenceUrl= http://nd-organizer-mysql:8098   (if using mysql backend)
-#   octoFiestaUrl = http://octo-fiesta:8080         (or your NAS:4535; webhook health)
+#   (connection details are set via MYSQL_* env vars on the sidecar)
 
 services:
   navidrome:
@@ -135,12 +135,19 @@ services:
   #   networks:
   #     - stack_network
 
-  # ===== Essentia (OPTIONAL - genre/mood ML analysis, AudioMuse fallback) =====
-  # When AudioMuse-AI is down, the plugin falls back to this service for
-  # genre/mood analysis using Essentia ML models (Discogs-400 + MTG-Jamendo).
+  # ===== Essentia (OPTIONAL - ML analysis, AudioMuse fallback) =====
+  # Genre/mood analysis (Discogs-400 + MTG-Jamendo), song structure, chords,
+  # BPM/key detection, and audio fingerprinting for cover/duplicate detection.
   # Requires ~100MB disk for models + 2-4GB RAM during analysis.
+  #
+  # IMPORTANT: The sidecar reads audio files directly from the library volumes.
+  # Mirror EVERY library mount from your Navidrome stack at the SAME guest path.
+  # If Navidrome mounts /music but Essentia mounts /data, analysis fails.
+  # The plugin sends the full path (e.g. /music/Artist/Album/song.flac) and the
+  # sidecar must be able to read it at that exact path.
+  #
   # After first start, run `docker exec nd-organizer-essentia python -c "import essentia"`.
-  # If Essentia isn't installed, the sidecar returns empty predictions (fail-soft).
+  # If Essentia isn't installed, the sidecar falls back to librosa (BPM/key/structure/chords only).
   nd-organizer-essentia:
     image: ghcr.io/lunatixz/nd-organizer/essentia:latest
     container_name: nd-organizer-essentia
@@ -157,7 +164,7 @@ services:
   # ===== Octo-Fiesta (OPTIONAL - missing-track proxy) =====
   # Third-party Subsonic proxy that streams songs your library doesn't have.
   # Supports SquidWTF (free), Deezer, Qobuz, Yandex.
-  # Uncomment below to deploy, then set octoFiestaUrl in plugin settings.
+  # Uncomment below to deploy. The webhook auto-detects it on the Docker network.
   # octo-fiesta:
   #   image: ghcr.io/v1ck3s/octo-fiesta
   #   container_name: octo-fiesta
@@ -261,10 +268,10 @@ services:
   #   ports:
   #     - "3306:3306"
   #   environment:
-  #     - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-ndorganizer}
-  #     - MYSQL_DATABASE=ndorganizer
-  #     - MYSQL_USER=ndorganizer
-  #     - MYSQL_PASSWORD=${MYSQL_PASSWORD:-ndorganizer}
+  #     - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-navidrome}
+  #     - MYSQL_DATABASE=navidrome
+  #     - MYSQL_USER=navidrome
+  #     - MYSQL_PASSWORD=${MYSQL_PASSWORD:-navidrome}
   #   volumes:
   #     - mariadb_data:/var/lib/mysql
   #   networks:
@@ -278,6 +285,11 @@ services:
   #     - "8098:8098"
   #   environment:
   #     - WEBHOOK_URL=http://nd-organizer-webhook:8099
+  #     - MYSQL_HOST=nd-organizer-mariadb
+  #     - MYSQL_PORT=3306
+  #     - MYSQL_DATABASE=navidrome
+  #     - MYSQL_USER=navidrome
+  #     - MYSQL_PASSWORD=${MYSQL_PASSWORD:-navidrome}
   #   networks:
   #     - stack_network
 
@@ -286,14 +298,10 @@ services:
 
 volumes:
   mariadb_data:
+  # audiomuse-postgres-data:   # uncomment with AudioMuse-AI services
+  # audiomuse-temp-flask:
+  # audiomuse-temp-worker:
 
 networks:
   stack_network:
     external: true
-
-# Uncomment the volumes below (with the AudioMuse-AI services above) to persist
-# AudioMuse-AI's PostgreSQL data and worker temp files:
-# volumes:
-#   audiomuse-postgres-data:
-#   audiomuse-temp-flask:
-#   audiomuse-temp-worker:

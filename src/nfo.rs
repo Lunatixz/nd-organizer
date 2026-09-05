@@ -7,6 +7,10 @@
 //
 // Read paths are filesystem-based (`read_album_nfo` / `read_artist_nfo`); the
 // XML parse/serialize functions are pure for testability.
+//
+// Album NFO fields: title, artists, album_artists, year, genres, styles, moods,
+// mbid, releasedate, description, bpm, key, chords, structure.
+// Artist NFO fields: name, genres, styles, moods, mbid, biography, similar_artists.
 
 use std::path::Path;
 
@@ -24,6 +28,18 @@ pub struct NfoAlbum {
     pub moods: Vec<String>,
     pub mbid: String,
     pub releasedate: String,
+    pub description: String,
+    pub bpm: Option<f64>,
+    pub key: String,
+    pub chords: Vec<String>,
+    pub structure: Vec<String>,
+    pub credits: Vec<NfoCredit>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NfoCredit {
+    pub name: String,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -34,6 +50,7 @@ pub struct NfoArtist {
     pub moods: Vec<String>,
     pub mbid: String,
     pub biography: String,
+    pub similar_artists: Vec<String>,
 }
 
 pub fn read_album_nfo(dir: &Path) -> Option<NfoAlbum> {
@@ -78,7 +95,21 @@ pub fn parse_album_nfo(xml: &str) -> Option<NfoAlbum> {
                 stack.push(String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase());
             }
             Ok(Event::Empty(e)) => {
-                let _ = e;
+                let tag = String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase();
+                if tag == "credit" {
+                    let mut name = String::new();
+                    let mut role = String::new();
+                    for attr in e.attributes().flatten() {
+                        match attr.key.as_ref() {
+                            b"name" => name = String::from_utf8_lossy(&attr.value).to_string(),
+                            b"role" => role = String::from_utf8_lossy(&attr.value).to_string(),
+                            _ => {}
+                        }
+                    }
+                    if !name.is_empty() {
+                        nfo.credits.push(crate::nfo::NfoCredit { name, role });
+                    }
+                }
             }
             Ok(Event::End(_)) => {
                 stack.pop();
@@ -96,6 +127,11 @@ pub fn parse_album_nfo(xml: &str) -> Option<NfoAlbum> {
                         "moods" if !value.is_empty() => nfo.moods.push(value),
                         "mbid" if !value.is_empty() => nfo.mbid = value,
                         "releasedate" if !value.is_empty() => nfo.releasedate = value,
+                        "description" if !value.is_empty() => nfo.description = value,
+                        "bpm" => nfo.bpm = value.parse().ok(),
+                        "key" if !value.is_empty() => nfo.key = value,
+                        "chord" if !value.is_empty() => nfo.chords.push(value),
+                        "structure" if !value.is_empty() => nfo.structure.push(value),
                         _ => {}
                     }
                 }
@@ -136,6 +172,7 @@ pub fn parse_artist_nfo(xml: &str) -> Option<NfoArtist> {
                         "moods" if !value.is_empty() => nfo.moods.push(value),
                         "mbid" if !value.is_empty() => nfo.mbid = value,
                         "biography" | "biog" => nfo.biography = value,
+                        "similarartist" if !value.is_empty() => nfo.similar_artists.push(value),
                         _ => {}
                     }
                 }
@@ -194,6 +231,31 @@ pub fn serialize_album(nfo: &NfoAlbum) -> String {
             esc(&nfo.releasedate)
         ));
     }
+    if !nfo.description.is_empty() {
+        out.push_str(&format!(
+            "  <description>{}</description>\n",
+            esc(&nfo.description)
+        ));
+    }
+    if let Some(bpm) = nfo.bpm {
+        out.push_str(&format!("  <bpm>{:.1}</bpm>\n", bpm));
+    }
+    if !nfo.key.is_empty() {
+        out.push_str(&format!("  <key>{}</key>\n", esc(&nfo.key)));
+    }
+    for c in &nfo.chords {
+        out.push_str(&format!("  <chord>{}</chord>\n", esc(c)));
+    }
+    for s in &nfo.structure {
+        out.push_str(&format!("  <structure>{}</structure>\n", esc(s)));
+    }
+    for c in &nfo.credits {
+        out.push_str(&format!(
+            "  <credit name=\"{}\" role=\"{}\"/>\n",
+            esc(&c.name),
+            esc(&c.role)
+        ));
+    }
     out.push_str("</album>\n");
     out
 }
@@ -222,6 +284,9 @@ pub fn serialize_artist(nfo: &NfoArtist) -> String {
             "  <biography>{}</biography>\n",
             esc(&nfo.biography)
         ));
+    }
+    for sa in &nfo.similar_artists {
+        out.push_str(&format!("  <similarartist>{}</similarartist>\n", esc(sa)));
     }
     out.push_str("</artist>\n");
     out

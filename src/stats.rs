@@ -51,16 +51,6 @@ pub fn hard_exclude(plays: i64, skips: i64, ratio: f64, min_samples: i64) -> boo
         && (skips as f64) / (total as f64) >= ratio.clamp(0.0, 1.0)
 }
 
-/// A 1-5 enjoyment rating from plays/skips (for future tag writes).
-pub fn rating_1_5(plays: i64, skips: i64) -> u8 {
-    if plays <= 0 {
-        return 0;
-    }
-    let ratio = plays as f64 / ((plays + skips).max(1) as f64);
-    let r = (1.0 + 4.0 * ratio).round().clamp(1.0, 5.0);
-    r as u8
-}
-
 /// Parse a Subsonic `getNowPlaying` response.
 pub fn parse_nowplaying(json: &str) -> Vec<NowPlayingEntry> {
     let Ok(v) = serde_json::from_str::<Value>(json) else {
@@ -556,15 +546,6 @@ pub mod host_stats {
                 crate::state::now_ts(),
             );
         }
-        if band == StarBand::Full && cfg.librefm_scrobble {
-            crate::librefm::host_librefm::scrobble(
-                cfg,
-                &prev.artist,
-                &prev.title,
-                &prev.album,
-                crate::state::now_ts(),
-            );
-        }
         let before = star_rating(&t);
         t = apply_band(t, band);
         let after = star_rating(&t);
@@ -659,6 +640,10 @@ pub mod host_stats {
                 let uri = format!("setRating?id={}&rating={}&u={user}", t.id, int_rating);
                 match host::subsonicapi::call(&uri) {
                     Ok(_) => {
+                        crate::wasm::log_debug(&format!(
+                            "star: {} -> {}/5 (full={}, half={}, skips={})",
+                            t.path, int_rating, t.full, t.half, t.skips
+                        ));
                         let _ = crate::store::kv().set(&pub_key, int_rating.to_string().into_bytes());
                         published += 1;
                     }
@@ -1241,6 +1226,7 @@ pub mod host_stats {
             return 0;
         }
         let mut written = 0usize;
+        let total = files.len();
         for (rel, _ft) in files {
             let abs = root.join(rel);
             let path_str = abs.to_string_lossy().to_string();
@@ -1250,11 +1236,19 @@ pub mod host_stats {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&v) {
                     if write_essentia_tags(&abs, &val, cfg.overwrite_existing_tags) {
                         written += 1;
+                        crate::wasm::log_debug(&format!("essentia: cached genre for {}", abs.file_name().unwrap_or_default().to_string_lossy()));
                     }
                 }
                 continue;
             }
-            let body = serde_json::json!({"path": &path_str, "genres": true, "moods": true});
+            let body = serde_json::json!({
+                "path": &path_str,
+                "genres": true,
+                "moods": true,
+                "structure": cfg.essentia_structure,
+                "chroma": cfg.essentia_chords,
+                "bpm": cfg.essentia_bpm,
+            });
             let mut headers = std::collections::HashMap::new();
             headers.insert("Content-Type".into(), "application/json".into());
             let req = host::http::HTTPRequest {
@@ -1275,12 +1269,22 @@ pub mod host_stats {
                         );
                         if write_essentia_tags(&abs, &val, cfg.overwrite_existing_tags) {
                             written += 1;
+                            crate::wasm::log_debug(&format!("essentia: analyzed {}", abs.file_name().unwrap_or_default().to_string_lossy()));
                         }
                     }
                 }
-                _ => {}
+                Ok(Some(resp)) => {
+                    crate::wasm::log_warn(&format!("essentia: HTTP {} for {}", resp.status_code, abs.file_name().unwrap_or_default().to_string_lossy()));
+                }
+                Ok(None) => {
+                    crate::wasm::log_warn(&format!("essentia: no response for {}", abs.file_name().unwrap_or_default().to_string_lossy()));
+                }
+                Err(e) => {
+                    crate::wasm::log_warn(&format!("essentia: request failed for {}: {e}", abs.file_name().unwrap_or_default().to_string_lossy()));
+                }
             }
         }
+        crate::wasm::log_info(&format!("essentia genres: wrote {written}/{total} tracks"));
         written
     }
 }
@@ -1329,6 +1333,66 @@ fn write_essentia_tags(path: &std::path::Path, data: &serde_json::Value, overwri
             }
         }
     }
+    // BPM: write as "BPM" tag when present.
+    if let Some(bpm_val) = data.get("bpm").and_then(|b| b.as_f64()) {
+        if bpm_val > 0.0 {
+            let bpm_str = format!("{:.1}", bpm_val);
+            let existing = tag.get_string(&ItemKey::Unknown("BPM".into())).unwrap_or("");
+            if crate::tags::should_write(existing, &bpm_str, overwrite) {
+                tag.insert_text(ItemKey::Unknown("BPM".into()), bpm_str);
+                changed = true;
+            }
+        }
+    }
+    // Key: write as "KEY" tag (e.g. "C major").
+    if let Some(key) = data.get("key").and_then(|k| k.as_str()) {
+        if !key.is_empty() {
+            let mode = data.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+            let key_str = if mode.is_empty() {
+                key.to_string()
+            } else {
+                format!("{} {}", key, mode)
+            };
+            let existing = tag.get_string(&ItemKey::Unknown("KEY".into())).unwrap_or("");
+            if crate::tags::should_write(existing, &key_str, overwrite) {
+                tag.insert_text(ItemKey::Unknown("KEY".into()), key_str);
+                changed = true;
+            }
+        }
+    }
+    // Chord: write dominant chord from chroma analysis.
+    if let Some(chords) = data.get("chords") {
+        if let Some(chord) = chords.get("chord").and_then(|c| c.as_str()) {
+            if !chord.is_empty() {
+                let existing = tag.get_string(&ItemKey::Unknown("CHORD".into())).unwrap_or("");
+                if crate::tags::should_write(existing, chord, overwrite) {
+                    tag.insert_text(ItemKey::Unknown("CHORD".into()), chord.to_string());
+                    changed = true;
+                }
+            }
+        }
+    }
+    // Structure: write section labels as a comment tag (not standard, but useful for Kodi/NFO).
+    if let Some(structure) = data.get("structure").and_then(|s| s.as_array()) {
+        if !structure.is_empty() {
+            let sections: Vec<String> = structure
+                .iter()
+                .filter_map(|s| {
+                    let label = s.get("label").and_then(|l| l.as_str())?;
+                    let start = s.get("start").and_then(|f| f.as_f64())?;
+                    Some(format!("{}@{:.0}s", label, start))
+                })
+                .collect();
+            if !sections.is_empty() {
+                let structure_str = sections.join(", ");
+                let existing = tag.get_string(&ItemKey::Unknown("STRUCTURE".into())).unwrap_or("");
+                if crate::tags::should_write(existing, &structure_str, overwrite) {
+                    tag.insert_text(ItemKey::Unknown("STRUCTURE".into()), structure_str);
+                    changed = true;
+                }
+            }
+        }
+    }
     if !changed {
         return false;
     }
@@ -1353,9 +1417,6 @@ mod tests {
     fn weight_and_rating() {
         assert_eq!(weight(10, 0), 10.0);
         assert_eq!(weight(10, 9), -8.0);
-        assert!(rating_1_5(10, 0) >= 4);
-        assert_eq!(rating_1_5(0, 0), 0);
-        assert!(rating_1_5(2, 8) < rating_1_5(8, 2));
     }
 
     #[test]

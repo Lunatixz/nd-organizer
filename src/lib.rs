@@ -8,6 +8,29 @@
 // Phased development: some helpers are still only exercised by host tests.
 #![allow(dead_code)]
 
+/// Cross-target logging facade. On wasm32, delegates to the plugin host log.
+/// On native (tests), writes to stderr.
+pub(crate) mod log {
+    pub fn info(msg: &str) {
+        #[cfg(target_arch = "wasm32")]
+        crate::wasm::log_info(msg);
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!("INFO: {msg}");
+    }
+    pub fn warn(msg: &str) {
+        #[cfg(target_arch = "wasm32")]
+        crate::wasm::log_warn(msg);
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!("WARN: {msg}");
+    }
+    pub fn debug(msg: &str) {
+        #[cfg(target_arch = "wasm32")]
+        crate::wasm::log_debug(msg);
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!("DEBUG: {msg}");
+    }
+}
+
 mod config;
 #[cfg(target_arch = "wasm32")]
 mod artwork;
@@ -28,7 +51,6 @@ mod lyrics;
 mod musicbrainz;
 mod nfo;
 mod organizer;
-mod report;
 #[cfg(target_arch = "wasm32")]
 mod scan;
 mod state;
@@ -337,16 +359,23 @@ pub(crate) mod wasm {
                     )
                 }),
                 "migrate" => match crate::store::migrate_mysql_chunk(&cfg, 400) {
-                    Ok(crate::store::MigrateStatus::Copied(_)) => {
+                    Ok(crate::store::MigrateStatus::Copied(n)) => {
+                        log_info(&format!("db migration: batch copied {n} keys, re-enqueueing"));
                         // More local keys to copy - keep going on the next pass.
                         if let Err(e) = enqueue("migrate", 0, "", "") {
                             log_warn(&format!("re-enqueue migrate: {e}"));
                         }
                         Ok("db migration in progress (batch copied)".into())
                     }
-                    Ok(crate::store::MigrateStatus::Done) => Ok("db migration complete".into()),
+                    Ok(crate::store::MigrateStatus::Done) => {
+                        log_info("db migration: all local keys copied to MySQL");
+                        Ok("db migration complete".into())
+                    }
                     Ok(crate::store::MigrateStatus::NoMysql) => Ok("not on mysql backend".into()),
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        log_warn(&format!("db migration error: {e}"));
+                        Err(e)
+                    }
                 },
                 "stats" => match crate::stats::host_stats::poll(&cfg) {
                     Ok(report) => {
@@ -879,7 +908,7 @@ pub(crate) mod wasm {
         // Radio is merged into webhook — no separate sidecar.
         let sidecars = [
             ("nd-organizer-proxy", "Filter Proxy", 4534),
-            ("nd-organizer-essentia", "Essentia", 8101),
+            ("nd-organizer-essentia", "Essentia ML", 8101),
         ];
         for (container, name, port) in sidecars {
             let url = format!("http://{container}:{port}/health");
@@ -1614,6 +1643,10 @@ pub(crate) mod wasm {
     pub(crate) fn log_warn(msg: &str) {
         extism_pdk::log!(extism_pdk::LogLevel::Warn, "{}", msg);
         file_log("WARN", msg);
+    }
+    pub(crate) fn log_debug(msg: &str) {
+        extism_pdk::log!(extism_pdk::LogLevel::Debug, "{}", msg);
+        file_log("DEBUG", msg);
     }
     fn log_error(msg: &str) {
         extism_pdk::log!(extism_pdk::LogLevel::Error, "{}", msg);

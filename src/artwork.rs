@@ -119,11 +119,13 @@ pub fn fetch_with_fallback(
         "embedded" => vec![],
         _ => vec!["coverartarchive", "applemusic", "theaudiodb"],
     };
-    for source in sources {
-        match source {
+    for source in &sources {
+        crate::log::debug(&format!("artwork: trying {source} for {artist} - {album}"));
+        match *source {
             "coverartarchive" => {
                 if let Some(m) = mbid {
                     if let Some(bytes) = fetch(m, ArtKind::Front) {
+                        crate::log::debug(&format!("artwork: got image from coverartarchive for {artist} - {album}"));
                         return Some((bytes, "coverartarchive".into()));
                     }
                 }
@@ -133,6 +135,7 @@ pub fn fetch_with_fallback(
                     if let Some(bytes) = crate::apple_music::host_apple_music::fetch_album_artwork(
                         cfg, artist, album, &countries,
                     ) {
+                        crate::log::debug(&format!("artwork: got image from applemusic for {artist} - {album}"));
                         return Some((bytes, "applemusic".into()));
                     }
                 }
@@ -142,6 +145,7 @@ pub fn fetch_with_fallback(
                     if let Some(bytes) = crate::theaudiodb::host_theaudiodb::fetch_album_artwork(
                         cfg, artist, album,
                     ) {
+                        crate::log::debug(&format!("artwork: got image from theaudiodb for {artist} - {album}"));
                         return Some((bytes, "theaudiodb".into()));
                     }
                 }
@@ -149,6 +153,7 @@ pub fn fetch_with_fallback(
             _ => {}
         }
     }
+    crate::log::debug(&format!("artwork: no image found for {artist} - {album} (tried: {})", sources.join(", ")));
     None
 }
 

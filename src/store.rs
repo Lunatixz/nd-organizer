@@ -338,11 +338,13 @@ pub fn migrate_mysql_chunk(cfg: &crate::config::Config, chunk: usize) -> Result<
         .map(|r| r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false))
         .unwrap_or(false);
     if done {
+        crate::wasm::log_info("db migration: already completed, skipping");
         return Ok(MigrateStatus::Done);
     }
     // Everything currently in the local store.
     let keys = host::kvstore::list("").map_err(|e| e.to_string())?;
     if keys.is_empty() {
+        crate::wasm::log_info("db migration: no local keys found, marking complete");
         let _ = kv.mysql_op(
             "set",
             json!({ "key": MIGRATED_MARKER, "value": BASE64.encode(b"1".to_vec()), "ttlSeconds": 0 }),
@@ -363,6 +365,17 @@ pub fn migrate_mysql_chunk(cfg: &crate::config::Config, chunk: usize) -> Result<
         .as_ref()
         .map(|c| sorted.partition_point(|k| k <= c))
         .unwrap_or(0);
+    if start > 0 {
+        crate::wasm::log_info(&format!(
+            "db migration: resuming from key {}/{}, {} total keys remaining",
+            start, sorted.len(), sorted.len() - start
+        ));
+    } else {
+        crate::wasm::log_info(&format!(
+            "db migration: starting with {} local keys to copy (chunk size {})",
+            sorted.len(), chunk
+        ));
+    }
 
     let mut copied = 0usize;
     for k in sorted.iter().skip(start).take(chunk) {

@@ -22,3 +22,11 @@ services:
       # (octo exposes only the Subsonic API, no /logs endpoint).
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
+      - NAVIDROME_DB=/data/nd/navidrome.db   # radio management
+      - PLAYLIST_DIR=/data/nd/playlists      # smart playlist writing
+    networks:
+      - stack_network
+
+networks:
+  stack_network:
+    external: true

@@ -73,6 +73,7 @@ pub struct AlbumInfo {
     /// MusicBrainz release type ("Soundtrack"/"Compilation"/"Single") when
     /// classifyFromMB found one; empty otherwise.
     pub release_type: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +284,7 @@ fn album_info_raw(album: &AlbumDir) -> AlbumInfo {
         distinct_artists,
         recording,
         release_type: String::new(),
+        description: String::new(),
     }
 }
 
@@ -319,6 +321,9 @@ impl AlbumInfo {
         }
         if self.genre.is_empty() {
             self.genre = first_of(&nfo.genres, &nfo.styles, &nfo.moods);
+        }
+        if self.description.is_empty() {
+            self.description = nfo.description.clone();
         }
     }
 
@@ -769,6 +774,7 @@ pub fn album_info_from_tags(files: &[(String, TrackTags)]) -> AlbumInfo {
         distinct_artists,
         recording,
         release_type: String::new(),
+        description: String::new(),
     }
 }
 
@@ -1114,20 +1120,29 @@ pub fn apply_group_plan(root: &Path, plan: &GroupPlan, prune: bool) -> Result<()
         let to_path = root.join(&m.to);
         if let Some(parent) = to_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                errors.push(format!("mkdir {}: {e}", parent.display()));
+                let msg = format!("mkdir {}: {e}", parent.display());
+                crate::log::warn(&msg);
+                errors.push(msg);
                 continue;
             }
         }
         let from_path = root.join(&m.from);
         if let Err(e) = std::fs::rename(&from_path, &to_path) {
-            errors.push(format!("move {} -> {}: {e}", m.from, m.to));
+            let msg = format!("move {} -> {}: {e}", m.from, m.to);
+            crate::log::warn(&msg);
+            errors.push(msg);
             continue;
         }
+        crate::log::debug(&format!("moved {} -> {}", m.from, m.to));
         // Move sidecars into the target dir alongside the new file.
         if let Some(src_dir) = from_path.parent() {
             if let Some(dst_dir) = to_path.parent() {
                 for sc in &m.sidecars {
-                    let _ = std::fs::rename(src_dir.join(sc), dst_dir.join(sc));
+                    if let Err(e) = std::fs::rename(src_dir.join(sc), dst_dir.join(sc)) {
+                        crate::log::debug(&format!("sidecar {} move failed: {e}", sc));
+                    } else {
+                        crate::log::debug(&format!("sidecar {} moved with track", sc));
+                    }
                 }
             }
         }
@@ -1142,15 +1157,18 @@ pub fn apply_group_plan(root: &Path, plan: &GroupPlan, prune: bool) -> Result<()
         let target_path = root.join(&dup.target);
         if let Some(parent) = target_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                errors.push(format!("mkdir {}: {e}", parent.display()));
+                let msg = format!("mkdir {}: {e}", parent.display());
+                crate::log::warn(&msg);
+                errors.push(msg);
                 continue;
             }
         }
         if let Err(e) = std::fs::rename(&loser_path, &target_path) {
-            errors.push(format!(
-                "move duplicate {} -> {}: {e}",
-                dup.loser, dup.target
-            ));
+            let msg = format!("move duplicate {} -> {}: {e}", dup.loser, dup.target);
+            crate::log::warn(&msg);
+            errors.push(msg);
+        } else {
+            crate::log::debug(&format!("duplicate {} -> {}", dup.loser, dup.target));
         }
     }
     if prune {
@@ -1334,6 +1352,7 @@ mod tests {
             },
             recording: Recording::Studio,
             release_type: String::new(),
+            description: String::new(),
         };
 
         assert_eq!(
@@ -1372,6 +1391,7 @@ mod tests {
             distinct_artists: vec![],
             recording: Recording::Studio,
             release_type: t.to_string(),
+            description: String::new(),
         };
         assert_eq!(classify(&mb_info("Soundtrack"), &c2), Bucket::Soundtrack);
         assert_eq!(classify(&mb_info("Compilation"), &c2), Bucket::Various);
@@ -1454,6 +1474,7 @@ mod tests {
             distinct_artists: vec![],
             recording: Recording::Studio,
             release_type: String::new(),
+            description: String::new(),
         };
         assert_eq!(
             target_album_dir(Bucket::Singles, &info, &c, "Crazy"),

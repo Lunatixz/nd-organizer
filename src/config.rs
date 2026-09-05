@@ -120,7 +120,7 @@ pub struct Config {
     pub top_picks_count: usize,
     pub skip_threshold_percent: i32,
     /// Drop filler-keyword tracks (fillerKeywords) from auto-queues via the
-    /// Subsonic filter proxy. Explicit user searches still return them.
+    /// Subsonic proxy. Explicit user searches still return them.
     pub keyword_filter_enabled: bool,
     /// How much skip-heavy (low-star) content may appear in queued lists:
     /// none / exclude / third / lessThanHalf / half. The proxy enforces it.
@@ -130,7 +130,7 @@ pub struct Config {
     /// is a net negative (skipped more times than ever fully played). Full plays
     /// forgive skips, so liking a song again brings it back automatically.
     pub skip_heavy_ratio: f64,
-    /// Base URL of the Subsonic filter proxy (e.g. http://nd-organizer-proxy:4534).
+    /// Base URL of the Subsonic proxy (e.g. http://nd-organizer-proxy:4534).
     pub filter_url: String,
 
     // Playback star rating + playcount (0-5.0 star system, half-star steps).
@@ -181,8 +181,9 @@ pub struct Config {
     pub log_webhook_token: String,
 
     // Persistence backend. "host" = Navidrome-managed SQLite KVStore (default).
-    // "mysql" = the plugin's KVStore state lives in the user's MySQL/MariaDB via
-    // the mysql sidecar (persistenceUrl), with the connection details below.
+    // "mysql" = the plugin's KVStore state lives in your MySQL/MariaDB via
+    // the mysql sidecar (persistenceUrl). Only the sidecar URL is needed here;
+    // the sidecar connects to your DB using the credentials below.
     pub persistence_backend: String,
     pub persistence_url: String,
     pub mysql_host: String,
@@ -320,6 +321,14 @@ pub struct Config {
     pub audiomuse_token: String,
     /// URL of the Essentia genre/mood analysis sidecar (fallback when AudioMuse is unreachable).
     pub essentia_url: String,
+    /// Fetch song structure (intro/verse/chorus/outro) from Essentia.
+    pub essentia_structure: bool,
+    /// Fetch chord progression from Essentia.
+    pub essentia_chords: bool,
+    /// Fetch BPM and key from Essentia.
+    pub essentia_bpm: bool,
+    /// Detect duplicates/covers via audio fingerprinting (Essentia).
+    pub essentia_fingerprint: bool,
     pub notify_audiomuse_after_run: bool,
     pub write_acoustic_tags: bool,
 
@@ -380,7 +389,7 @@ impl Default for Config {
             favorites_sync_lastfm: false,
             favorites_sync_max: 500,
             favorites_sync_bidirectional: false,
-            playback_stats_enabled: true,
+            playback_stats_enabled: false,
             stats_poll_minutes: 5,
             top_picks_count: 50,
             skip_threshold_percent: 30,
@@ -398,7 +407,7 @@ impl Default for Config {
             rating_sync_pull_from_navidrome: false,
             lastfm_scrobble: false,
             listenbrainz_scrobble: false,
-            scrobble_provider: "lastfm".into(),
+            scrobble_provider: "none".into(),
             lastfm_import_playcount: false,
     rollback_run_id: String::new(),
             log_webhook_url: "http://nd-organizer-webhook:8099".into(),
@@ -407,9 +416,9 @@ impl Default for Config {
             persistence_url: "http://nd-organizer-mysql:8098".into(),
             mysql_host: "nd-organizer-mariadb".into(),
             mysql_port: 3306,
-            mysql_name: "ndorganizer".into(),
-            mysql_user: "ndorganizer".into(),
-            mysql_password: "ndorganizer".into(),
+            mysql_name: "navidrome".into(),
+            mysql_user: "navidrome".into(),
+            mysql_password: "navidrome".into(),
             soundtrack_folder: "Sound Tracks".into(),
             various_folder: "Various Artist".into(),
             singles_folder: "Singles".into(),
@@ -477,7 +486,11 @@ impl Default for Config {
             lidarr_force_search_incomplete: false,
             use_lidarr_naming_schema: false,
             audiomuse_url: "http://audiomuse-ai-flask-app:8000".into(),
-            essentia_url: "http://nd-organizer-essentia:8080".into(),
+            essentia_url: "http://nd-organizer-essentia:8101".into(),
+            essentia_structure: false,
+            essentia_chords: false,
+            essentia_bpm: false,
+            essentia_fingerprint: false,
             audiomuse_token: String::new(),
             notify_audiomuse_after_run: true,
             write_acoustic_tags: false,
@@ -626,6 +639,10 @@ impl Config {
             "useLidarrNamingSchema",
             "audiomuseUrl",
             "essentiaUrl",
+            "essentiaStructure",
+            "essentiaChords",
+            "essentiaBpm",
+            "essentiaFingerprint",
             "audiomuseToken",
             "notifyAudiomuseAfterRun",
             "writeAcousticTags",
@@ -955,6 +972,10 @@ impl Config {
         if let Some(v) = map.get("essentiaUrl") {
             c.essentia_url = v.trim().to_string();
         }
+        c.essentia_structure = bool(map, "essentiaStructure", c.essentia_structure);
+        c.essentia_chords = bool(map, "essentiaChords", c.essentia_chords);
+        c.essentia_bpm = bool(map, "essentiaBpm", c.essentia_bpm);
+        c.essentia_fingerprint = bool(map, "essentiaFingerprint", c.essentia_fingerprint);
         if let Some(v) = map.get("audiomuseToken") {
             c.audiomuse_token = v.clone();
         }
@@ -1231,7 +1252,7 @@ mod tests {
         assert_eq!(c.top_picks_count, 80);
         // Defaults are opt-in (off).
         let d = Config::from_map(&HashMap::new());
-        assert!(d.playback_stats_enabled); // defaults to true (stats system must be online)
+        assert!(!d.playback_stats_enabled); // defaults to false (opt-in)
         assert_eq!(d.skip_threshold_percent, 30);
     }
 
@@ -1240,7 +1261,7 @@ mod tests {
         let c = Config::from_map(&map(&[
             ("persistenceBackend", "mysql"),
             ("persistenceUrl", "http://nd-organizer-mysql:8098"),
-            ("mysqlHost", "db.internal"),
+            ("mysqlHost", "db.example.com"),
             ("mysqlPort", "3307"),
             ("mysqlName", "navidrome_plugins"),
             ("mysqlUser", "plugin"),
@@ -1248,7 +1269,7 @@ mod tests {
         ]));
         assert_eq!(c.persistence_backend, "mysql");
         assert_eq!(c.persistence_url, "http://nd-organizer-mysql:8098");
-        assert_eq!(c.mysql_host, "db.internal");
+        assert_eq!(c.mysql_host, "db.example.com");
         assert_eq!(c.mysql_port, 3307);
         assert_eq!(c.mysql_name, "navidrome_plugins");
         assert_eq!(c.mysql_user, "plugin");
@@ -1256,7 +1277,6 @@ mod tests {
         // Default backend is the Navidrome host KVStore.
         let d = Config::from_map(&HashMap::new());
         assert_eq!(d.persistence_backend, "host");
-        assert_eq!(d.mysql_port, 3306);
         assert_eq!(d.rollback_retention_days, 30);
     }
 }

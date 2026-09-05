@@ -1,3 +1,4 @@
 --pre
 essentia-tensorflow==2.1b6.dev1110
 numpy==1.26.4
+librosa==0.10.2

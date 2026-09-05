@@ -153,6 +153,8 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
                 let did_work = index_file(cfg, library_id, &rel, &entry.path())?;
                 if did_work {
                     processed += 1;
+                } else {
+                    skipped += 1;
                 }
                 if processed >= files_per_task {
                     hit_limit = true;
@@ -403,6 +405,75 @@ pub fn identify_file(cfg: &Config, abs_path: &str) -> Option<(String, Option<Str
     result
 }
 
+/// Compute the Essentia spectral fingerprint for a file via the sidecar's
+/// POST /fingerprint endpoint. Returns the quantized peak-frequency vector,
+/// cached per path for 7 days in the KV store.
+fn essentia_fingerprint_for(cfg: &Config, abs_path: &str) -> Option<Vec<i32>> {
+    let base = cfg.essentia_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let cache_key = format!("esfp:{:016x}", crate::state::fnv1a64(abs_path));
+    if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+        if let Ok(fp) = serde_json::from_slice::<Vec<i32>>(&v) {
+            if !fp.is_empty() {
+                return Some(fp);
+            }
+        }
+    }
+    let body = serde_json::json!({"path": abs_path}).to_string();
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("Content-Type".into(), "application/json".into());
+    let req = host::http::HTTPRequest {
+        method: "POST".into(),
+        url: format!("{base}/fingerprint"),
+        headers,
+        no_follow_redirects: false,
+        body: body.into_bytes(),
+        timeout_ms: 30_000,
+    };
+    let resp = host::http::send(req).ok()??;
+    if resp.status_code != 200 {
+        return None;
+    }
+    let val: serde_json::Value = serde_json::from_slice(&resp.body).ok()?;
+    if val.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+        return None;
+    }
+    let fp: Vec<i32> = val
+        .get("fingerprint")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_i64().map(|n| n as i32))
+        .collect();
+    if fp.is_empty() {
+        return None;
+    }
+    let _ = crate::store::kv().set_with_ttl(
+        &cache_key,
+        serde_json::to_vec(&fp).unwrap_or_default(),
+        7 * 24 * 3600,
+    );
+    Some(fp)
+}
+
+/// Jaccard similarity between two fingerprint vectors (quantized peak frequencies).
+/// Returns a value in [0.0, 1.0]. A score >= 0.95 indicates the same recording.
+fn jaccard_similarity(a: &[i32], b: &[i32]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let set_a: std::collections::HashSet<i32> = a.iter().copied().collect();
+    let set_b: std::collections::HashSet<i32> = b.iter().copied().collect();
+    let intersection = set_a.intersection(&set_b).count();
+    let union = set_a.union(&set_b).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
 /// After the scan completes: load the index, group files into albums by their
 /// tags, and enqueue plan tasks for each group (batched). When identity
 /// verification is on, files without any MBID/ISRC are fingerprinted via the
@@ -562,6 +633,11 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     // AcoustID (giving an album MBID to group by) or left unverified.
     let total_files = entries.len();
     let mut verified: Vec<(String, TrackTags)> = Vec::new();
+    // Essentia fingerprint fallback: when AcoustID fails, compare spectral
+    // fingerprints against already-identified files. Populated lazily.
+    let use_essentia_fp = cfg.essentia_fingerprint && !cfg.essentia_url.trim().is_empty();
+    let mut essentia_fp_cache: std::collections::HashMap<String, Vec<i32>> =
+        std::collections::HashMap::new();
     if cfg.verify_identity {
         for (rel, t) in entries {
             // AcoustID dropped mid-batch: pause now; verified files still get
@@ -607,10 +683,70 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
                         verified.push((rel, t2));
                     }
                     None => {
-                        // Unverified: organize into Singles folder by tag
-                        // heuristics instead of leaving in place. The
-                        // organizer routes these to {albumArtist}/Singles/.
-                        verified.push((rel, t));
+                        // Essentia fingerprint fallback: when AcoustID fails,
+                        // compare spectral fingerprint against already-identified files.
+                        let mut matched = false;
+                        if use_essentia_fp {
+                            if let Some(fp) = essentia_fingerprint_for(cfg, &abs) {
+                                let mut compared = 0;
+                                for (crel, ct) in verified.iter().rev() {
+                                    if compared >= 100 { break; }
+                                    if ct.mbid_album.is_empty() { continue; }
+                                    compared += 1;
+                                    let cabs = format!("{real_root}/{crel}");
+                                    let cfp = if let Some(cached) = essentia_fp_cache.get(&cabs) {
+                                        cached.clone()
+                                    } else if let Some(fetched) = essentia_fingerprint_for(cfg, &cabs) {
+                                        essentia_fp_cache.insert(cabs, fetched.clone());
+                                        fetched
+                                    } else {
+                                        continue;
+                                    };
+                                    if jaccard_similarity(&fp, &cfp) >= 0.95 {
+                                        crate::wasm::log_info(&format!(
+                                            "essentia_fp: identified {rel} via fingerprint match with {crel} (album: {})",
+                                            ct.mbid_album
+                                        ));
+                                        let mut t2 = t.clone();
+                                        t2.mbid_album = ct.mbid_album.clone();
+                                        if cfg.mode == Mode::Apply
+                                            && crate::wasm::should_write_tags(cfg, &t2.album_artist)
+                                        {
+                                            if cfg.backup_before_write {
+                                                let _ = crate::state::backup_tag_state(
+                                                    &crate::wasm::current_run_id(library_id)
+                                                        .unwrap_or_default(),
+                                                    &abs,
+                                                    &t2,
+                                                );
+                                            }
+                                            if let Err(e) = crate::tags::write_mbids(
+                                                Path::new(&abs),
+                                                &ct.mbid_album,
+                                                None,
+                                                cfg.overwrite_existing_tags,
+                                            ) {
+                                                crate::wasm::log_warn(&format!(
+                                                    "write Essentia fallback MBID tags {rel}: {e}"
+                                                ));
+                                            }
+                                        }
+                                        verified.push((rel.clone(), t2));
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !matched {
+                            if cfg.skip_unverified {
+                                crate::wasm::log_info(&format!(
+                                    "skip_unverified: skipping unverified file {rel}"
+                                ));
+                            } else {
+                                verified.push((rel, t));
+                            }
+                        }
                     }
                 }
             }
@@ -619,10 +755,22 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         verified = entries;
     }
 
+    if cfg.verify_identity {
+        let unverified = total_files - verified.len();
+        crate::wasm::log_info(&format!(
+            "group_step: verified {}/{total_files} files (unverified: {unverified})",
+            verified.len()
+        ));
+    }
+
     // Report files across the library that share an audio fingerprint (size +
     // content sample) - possible duplicates. Report-only, nothing moves.
     if cfg.detect_duplicates {
         report_cross_duplicates(cfg, &real_root, &verified);
+    }
+    // Essentia fingerprint-based duplicate/cover detection (enhanced detection).
+    if cfg.essentia_fingerprint && !cfg.essentia_url.trim().is_empty() {
+        report_essentia_duplicates(cfg, &real_root, &verified);
     }
 
     let groups = crate::organizer::group_entries(&verified);
@@ -680,6 +828,73 @@ fn report_cross_duplicates(
         summary.push_str(&format!("  {joined}\n"));
     }
     crate::wasm::post_webhook(cfg, &summary);
+}
+
+/// Essentia audio-fingerprint duplicate/cover detection. Compares files within
+/// each album group using the Essentia sidecar's spectral fingerprint endpoint.
+/// Reports covers (50-95% similarity) and duplicates (>95% similarity).
+fn report_essentia_duplicates(
+    cfg: &Config,
+    root: &str,
+    verified: &[(String, crate::tags::TrackTags)],
+) {
+    let base = cfg.essentia_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return;
+    }
+    let groups = crate::organizer::group_entries(verified);
+    let mut covers = Vec::new();
+    let mut dupes = Vec::new();
+    for group in &groups {
+        // Compare each pair within the group (cap at 20 files to avoid O(n^2) explosion).
+        let limit = group.len().min(20);
+        for i in 0..limit {
+            for j in (i + 1)..limit {
+                let abs_a = std::path::Path::new(root).join(&group[i]);
+                let abs_b = std::path::Path::new(root).join(&group[j]);
+                let body = serde_json::json!({
+                    "path_a": abs_a.to_string_lossy(),
+                    "path_b": abs_b.to_string_lossy(),
+                });
+                let mut headers = std::collections::HashMap::new();
+                headers.insert("Content-Type".into(), "application/json".into());
+                let req = host::http::HTTPRequest {
+                    method: "POST".into(),
+                    url: format!("{}/compare", base),
+                    headers,
+                    no_follow_redirects: false,
+                    body: body.to_string().into_bytes(),
+                    timeout_ms: 30_000,
+                };
+                if let Ok(Some(resp)) = host::http::send(req) {
+                    if resp.status_code == 200 {
+                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                            let sim = val.get("similarity").and_then(|s| s.as_f64()).unwrap_or(0.0);
+                            if sim >= 0.95 {
+                                dupes.push(format!("{} <=> {} ({:.0}%)", group[i], group[j], sim * 100.0));
+                            } else if sim >= 0.5 {
+                                covers.push(format!("{} <=> {} ({:.0}%)", group[i], group[j], sim * 100.0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !dupes.is_empty() {
+        let summary = format!("nd-organizer: Essentia duplicate audio:\n  {}", dupes.join("\n  "));
+        for d in &dupes {
+            crate::wasm::log_warn(&format!("essentia duplicate: {d}"));
+        }
+        crate::wasm::post_webhook(cfg, &summary);
+    }
+    if !covers.is_empty() {
+        let summary = format!("nd-organizer: Essentia possible covers:\n  {}", covers.join("\n  "));
+        for c in &covers {
+            crate::wasm::log_info(&format!("essentia cover: {c}"));
+        }
+        crate::wasm::post_webhook(cfg, &summary);
+    }
 }
 
 /// Cheap content fingerprint: file size + first/last 8 KiB (only read for
@@ -1600,6 +1815,121 @@ fn write_group_nfo(
     } else {
         vec![info.genre.clone()]
     };
+    // Fetch Apple Music album editorial notes (gated by appleMusicAlbumInfo).
+    let countries = crate::apple_music::host_apple_music::parse_countries(&cfg.apple_music_countries);
+    let am_description = if !cfg.apple_music_album_info {
+        None
+    } else {
+        crate::apple_music::host_apple_music::fetch_album_info(
+            cfg,
+            &info.album_artist,
+            &info.album,
+            &countries,
+        )
+    };
+    let description = am_description.unwrap_or_default();
+    // Fetch Essentia data (structure, chords, BPM/key) for NFO from cache or sidecar.
+    let essentia_data = if cfg.essentia_structure || cfg.essentia_chords || cfg.essentia_bpm {
+        files.first().and_then(|(rel, _)| {
+            let abs = root.join(rel);
+            let path_str = abs.to_string_lossy().to_string();
+            let cache_key = format!("essentia:{}", path_str);
+            // Try cache first.
+            if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                serde_json::from_slice::<serde_json::Value>(&v).ok()
+            } else {
+                // Fetch from sidecar.
+                let base = cfg.essentia_url.trim().trim_end_matches('/');
+                if base.is_empty() {
+                    return None;
+                }
+                let body = serde_json::json!({
+                    "path": &path_str,
+                    "genres": false,
+                    "moods": false,
+                    "structure": cfg.essentia_structure,
+                    "chroma": cfg.essentia_chords,
+                    "bpm": cfg.essentia_bpm,
+                });
+                let mut headers = std::collections::HashMap::new();
+                headers.insert("Content-Type".into(), "application/json".into());
+                let req = host::http::HTTPRequest {
+                    method: "POST".into(),
+                    url: format!("{}/analyze", base),
+                    headers,
+                    no_follow_redirects: false,
+                    body: body.to_string().into_bytes(),
+                    timeout_ms: 20_000,
+                };
+                if let Ok(Some(resp)) = host::http::send(req) {
+                    if resp.status_code == 200 {
+                        let val = serde_json::from_slice::<serde_json::Value>(&resp.body).ok()?;
+                        let _ = crate::store::kv().set_with_ttl(
+                            &cache_key,
+                            serde_json::to_vec(&val).unwrap_or_default(),
+                            7 * 24 * 3600,
+                        );
+                        Some(val)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    // Extract NFO fields from Essentia data.
+    let (bpm, key, chords, structure) = if let Some(ref data) = essentia_data {
+        let bpm = data.get("bpm").and_then(|b| b.as_f64());
+        let key = data.get("key").and_then(|k| k.as_str()).unwrap_or("").to_string();
+        let mode = data.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+        let key = if key.is_empty() || mode.is_empty() {
+            key
+        } else {
+            format!("{} {}", key, mode)
+        };
+        let chords: Vec<String> = data.get("chords")
+            .and_then(|c| c.get("changes"))
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c.get("chord").and_then(|ch| ch.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let structure: Vec<String> = data.get("structure")
+            .and_then(|s| s.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| {
+                        let label = s.get("label").and_then(|l| l.as_str())?;
+                        let start = s.get("start").and_then(|f| f.as_f64())?;
+                        Some(format!("{}@{:.0}s", label, start))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (bpm, key, chords, structure)
+    } else {
+        (None, String::new(), vec![], vec![])
+    };
+    // Fetch Discogs credits (gated by discogsCredits + discogsToken).
+    let credits = if cfg.discogs_credits && !cfg.discogs_token.trim().is_empty() {
+        crate::discogs::host_discogs::search_release(cfg, &info.album_artist, &info.album)
+            .map(|rel| {
+                crate::discogs::host_discogs::get_credits(cfg, rel.id)
+                    .into_iter()
+                    .map(|c| crate::nfo::NfoCredit { name: c.name, role: c.role })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
     let nfo_album = crate::nfo::NfoAlbum {
         title: info.album.clone(),
         album_artists: if info.album_artist.is_empty() {
@@ -1609,6 +1939,12 @@ fn write_group_nfo(
         },
         year: info.year,
         genres: genre.clone(),
+        description,
+        bpm,
+        key,
+        chords,
+        structure,
+        credits,
         ..Default::default()
     };
     let path = root.join(&plan.target_dir).join("album.nfo");
@@ -1619,15 +1955,33 @@ fn write_group_nfo(
         crate::wasm::log_warn(&format!("write album.nfo: {e}"));
     }
     // Also write artist.nfo into the artist folder (parent of the album dir)
-    // with the artist name + genres. Kodi reads it there.
+    // with the artist name + genres + similar artists. Kodi reads it there.
     if let Some(artist_dir) = Path::new(&plan.target_dir).parent() {
         if !info.album_artist.trim().is_empty() {
+            // Fetch Apple Music similar artists (gated by appleMusicSimilarArtists).
+            let similar_artists = if cfg.apple_music_similar_artists {
+                crate::apple_music::host_apple_music::fetch_similar_artists(
+                    cfg,
+                    &info.album_artist,
+                    &countries,
+                )
+            } else {
+                None
+            }
+            .unwrap_or_default();
+            // Read existing artist.nfo if present to preserve other fields.
+            let a_path = root.join(artist_dir).join("artist.nfo");
+            let existing_nfo = if let Ok(xml) = std::fs::read_to_string(&a_path) {
+                crate::nfo::parse_artist_nfo(&xml)
+            } else {
+                None
+            };
             let nfo_artist = crate::nfo::NfoArtist {
                 name: info.album_artist.clone(),
                 genres: genre.clone(),
-                ..Default::default()
+                similar_artists,
+                ..existing_nfo.unwrap_or_default()
             };
-            let a_path = root.join(artist_dir).join("artist.nfo");
             if let Some(p) = a_path.parent() {
                 let _ = std::fs::create_dir_all(p);
             }
@@ -1636,7 +1990,6 @@ fn write_group_nfo(
             }
         }
     }
-    let _ = cfg;
 }
 
 /// Write acoustic tags (BPM/key/mood/energy) for each moved file from the
@@ -1747,10 +2100,8 @@ fn fetch_genre_with_fallback(
                 }
             }
             "essentia" => {
-                if !cfg.essentia_url.trim().is_empty() {
-                    // Essentia genres are written by the write_essentia_genres function
-                    // which is called separately in the pipeline
-                }
+                // Essentia genres are written by write_essentia_genres() separately.
+                // In the fallback chain, skip Essentia and try other sources.
             }
             "nfo" => {
                 if !nfo_genres.is_empty() {
@@ -1763,92 +2114,6 @@ fn fetch_genre_with_fallback(
     None
 }
 
-/// Download + embed/save album artwork for a group (Cover Art Archive). Uses the
-/// album's release MBID; honors the enabled kinds, the overwrite rule, and the
-/// priority list (embedded / folder art are preferred when listed first).
-fn apply_artwork(
-    cfg: &Config,
-    root: &Path,
-    plan: &crate::organizer::GroupPlan,
-    files: &[(String, TrackTags)],
-) -> Option<String> {
-    use crate::artwork::ArtKind;
-    let mbid = files
-        .iter()
-        .find_map(|(_, t)| (!t.mbid_album.trim().is_empty()).then(|| t.mbid_album.clone()));
-    let Some(mbid) = mbid else {
-        crate::wasm::log_info(&format!(
-            "artwork: no release MBID for {} - skipping",
-            plan.target_dir
-        ));
-        return None;
-    };
-    // artworkSource picks the external source. 'coverartarchive', 'applemusic',
-    // and 'theaudiodb' trigger downloads; 'embedded' keeps existing art.
-    if cfg.artwork_source != "coverartarchive" && cfg.artwork_source != "applemusic" && cfg.artwork_source != "theaudiodb" {
-        crate::wasm::log_info(&format!(
-            "artwork: source '{}' — trying fallback chain",
-            cfg.artwork_source
-        ));
-        return None;
-    }
-    let kinds = {
-        let mut k = Vec::new();
-        if cfg.artwork_front {
-            k.push(ArtKind::Front);
-        }
-        if cfg.artwork_back {
-            k.push(ArtKind::Back);
-        }
-        if cfg.artwork_cd {
-            k.push(ArtKind::Cd);
-        }
-        if cfg.artwork_booklet {
-            k.push(ArtKind::Booklet);
-        }
-        k
-    };
-    let dir = root.join(&plan.target_dir);
-    let mut embedded = 0usize;
-    let mut sidecar = false;
-    for kind in kinds {
-        let Some(bytes) = crate::artwork::fetch(&mbid, kind) else {
-            continue;
-        };
-        if cfg.embed_artwork {
-            // overwriteArt=false: keep existing embedded art.
-            let first = files.first().map(|(r, _)| root.join(r)).unwrap_or_default();
-            if cfg.overwrite_art || !crate::artwork::has_embedded(&first) {
-                for (rel, _) in files {
-                    let path = root.join(rel);
-                    if crate::artwork::embed(&path, bytes.clone(), kind).is_ok() {
-                        embedded += 1;
-                    }
-                }
-            }
-        }
-        if kind == ArtKind::Front && cfg.write_cover_jpg {
-            if cfg.overwrite_art || !dir.join("cover.jpg").exists() {
-                if crate::artwork::write_sidecar(&dir, bytes.clone()).is_ok() {
-                    sidecar = true;
-                }
-            }
-        }
-    }
-    if embedded > 0 || sidecar {
-        crate::wasm::log_info(&format!(
-            "artwork: embedded {embedded} image(s){}{} for {}",
-            if sidecar { " + cover.jpg" } else { "" },
-            if cfg.embed_artwork && !cfg.artwork_front { "" } else { "" },
-            plan.target_dir
-        ));
-        Some(format!(
-            "artwork: embedded {embedded} image(s){}",
-            if sidecar { " + cover.jpg" } else { "" }
-        ))
-    } else {
-        None
-    }
-}
+
 
 

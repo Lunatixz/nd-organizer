@@ -259,7 +259,7 @@ The plugin pulls metadata from multiple sources to enrich your library:
 | **Genius** | Lyrics, annotations, artist backgrounds | Yes (client token) | `geniusToken` + `lyricsSource = genius` |
 | **AcoustID** | Fingerprinting, identity verification | Yes | `acoustidUrl` + `acoustidApiKey` |
 | **AudioMuse-AI** | BPM/key/mood acoustic tags | No | `audiomuseUrl` |
-| **Essentia** | Genre/mood ML analysis | No | `essentiaUrl` |
+| **Essentia** | Genre/mood ML analysis, song structure, chords, BPM/key, fingerprinting | No | `essentiaUrl` + `essentiaStructure` + `essentiaChords` + `essentiaBpm` + `essentiaFingerprint` |
 | **LRCLIB** | Synchronized + plain lyrics | No | `lyricsSource = lrclib` |
 
 ### Metadata Source Matrix
@@ -274,9 +274,11 @@ The plugin pulls metadata from multiple sources to enrich your library:
 | **Genre** | **X** | | | **X** | **X** | | | **X** | | |
 | **Styles** | | | | | **X** | | | | | |
 | **Mood** | | | | | | | | **X** | **X** | |
-| **BPM** | | | | | | | | | **X** | |
-| **Key** | | | | | | | | | **X** | |
+| **BPM** | | | | | | | | **X** | **X** | |
+| **Key** | | | | | | | | **X** | **X** | |
 | **Energy** | | | | | | | | | **X** | |
+| **Chords** | | | | | | | | **X** | | |
+| **Structure** | | | | | | | | **X** | | |
 | **Album Art** | | **X** | **X** | **X** | | | | | | |
 | Artist Bio | | | **X** | **X** | | | | | | |
 | Artist Image | | | **X** | **X** | | | | | | |
@@ -295,7 +297,9 @@ metadata from the available sources with automatic fallback chains:
 - **Artwork**: tries `artworkSource` first, then other configured sources (CoverArtArchive → Apple Music → TheAudioDB → embedded)
 - **Genre**: tries `genreSource` first, then other configured sources (MusicBrainz → Discogs → TheAudioDB → Essentia → NFO)
 - **Lyrics**: tries `lyricsSource` first, then other configured sources (LRCLIB → Genius)
-- **BPM/Key/Mood**: AudioMuse-AI (primary), Essentia (mood fallback)
+- **BPM/Key/Mood**: AudioMuse-AI (primary), Essentia (fallback for mood, BPM, key)
+- **Chords**: Essentia (chroma-based chord detection)
+- **Structure**: Essentia (song section segmentation)
 
 ### Community vs personal ratings
 
@@ -316,7 +320,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
 | `docker.io/library/mariadb:11.8` | Optional MySQL server for persistent plugin state (ratings, playcounts, scan cache). **Commented out** in the compose. |
-| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | Genre/mood ML analysis using Essentia (Discogs-400 + MTG-Jamendo models). Fallback when AudioMuse-AI is down, or primary genre source when `genreFrom=essentia`. |
+| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | ML analysis using Essentia (genre/mood Discogs-400 + MTG-Jamendo, song structure, chords, BPM/key, audio fingerprinting). Falls back to librosa when Essentia is unavailable (BPM/key/structure/chords still work; genre/mood require Essentia models). **Requires library volumes to match Navidrome's mounts.** |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
 ### MySQL setup (optional)
@@ -334,10 +338,11 @@ plugin resets, you can use MySQL instead.
    ```
 3. In the plugin settings (Navidrome UI):
    - Set `persistenceBackend` = `mysql`
+   - Set `persistenceUrl` = `http://nd-organizer-mysql:8098`
    - Set `mysqlHost` = `nd-organizer-mariadb`
    - Set `mysqlPort` = `3306`
-   - Set `mysqlName` = `ndorganizer`
-   - Set `mysqlUser` = `ndorganizer`
+   - Set `mysqlName` = `navidrome`
+   - Set `mysqlUser` = `navidrome`
    - Set `mysqlPassword` = (your app password)
 4. On first run, the plugin automatically migrates existing data from SQLite to MySQL
 
@@ -354,7 +359,7 @@ MySQL/MariaDB and AudioMuse-AI are commented out (optional). Copy it to your
 NAS, fill in the paths, then run `docker compose up -d`:
 
 ```yaml
-# nd-organizer full stack - Navidrome plus all six sidecars, one command:
+# nd-organizer full stack - Navidrome plus sidecars, one command:
 #   docker compose up -d
 #
 # Services:
@@ -561,6 +566,11 @@ services:
       - "8098:8098"
     environment:
       - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+      - MYSQL_HOST=nd-organizer-mariadb
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=navidrome
+      - MYSQL_USER=navidrome
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-navidrome}
     networks:
       - stack_network
 
@@ -568,6 +578,9 @@ services:
   # When AudioMuse-AI is down, the plugin falls back to this service for
   # genre/mood analysis using Essentia ML models (Discogs-400 + MTG-Jamendo).
   # Requires ~100MB disk for models + 2-4GB RAM during analysis.
+  #
+  # IMPORTANT: Mirror EVERY library mount at the SAME guest path Navidrome uses.
+  # The sidecar reads audio files directly — if paths don't match, analysis fails.
   nd-organizer-essentia:
     image: ghcr.io/lunatixz/nd-organizer/essentia:latest
     container_name: nd-organizer-essentia
@@ -665,11 +678,9 @@ Yandex:
 - **Client setup**: server type `Subsonic/OpenSubsonic`, URL
   `http://<your-nas>:4535/rest/` (or keep `:4534` for filtered-only, no missing
   tracks).
-- **Dashboard**: set the plugin's `octoFiestaUrl` (e.g.
-  `http://octo-fiesta:8080` on the shared network) and
-  `octoFiestaProvider` (SquidWTF/Deezer/Qobuz/Yandex). The webhook reads them
-  from the plugin status to probe octo-fiesta's health and show its Docker logs
-  (via the read-only socket mount).
+- **Dashboard**: the webhook dashboard shows octo-fiesta health and Docker logs
+  (via the read-only socket mount) when the container is running on the same
+  Docker network.
 - **Optional admin creds** (`SUBSONIC_ADMIN_USERNAME/PASSWORD`) are only needed
   for Permanent-mode library registration; Cache mode works without them.
 - Note: SquidWTF is a free third-party service and can be slow or intermittently
@@ -692,6 +703,26 @@ the `writeReplayGain` tag setting. The image bundles `fpcalc` (chromaprint) and
 Then in the plugin settings: `acoustidUrl = http://nd-organizer-acoustid:8097`
 and `acoustidApiKey = <your AcoustID client key>` (free at
 <https://acoustid.org/new-application>).
+
+### Essentia (ML analysis, fingerprinting)
+
+ML-powered analysis sidecar using [Essentia](https://essentia.upf.edu/) (Music
+Technology Group) with Discogs-400 (genres) and MTG-Jamendo (mood) models.
+Provides genre/mood predictions, song structure segmentation, chord detection,
+BPM/key detection, and audio fingerprinting for cover/duplicate detection.
+Falls back to **librosa** when Essentia is unavailable — BPM/key/structure/chords
+still work; genre/mood require Essentia's pre-trained models.
+
+> **Critical rule:** like the Acoustid sidecar, the Essentia sidecar reads
+> audio files directly from the library volumes. **Mirror every library mount
+> at the same guest path Navidrome uses.** If Navidrome mounts `/music` but
+> Essentia mounts `/data`, analysis fails for that library. The plugin sends
+> the full path (e.g. `/music/Artist/Album/song.flac`) and the sidecar must
+> read it at that exact path.
+
+Then in the plugin settings: `essentiaUrl = http://nd-organizer-essentia:8101`.
+Enable individual features with `essentiaStructure`, `essentiaChords`,
+`essentiaBpm`, and `essentiaFingerprint`.
 
 ### Log dashboard (webhook)
 
@@ -735,8 +766,7 @@ Substreamer, Navidrome's own apps, ...).
 
 URL format: `http://<your-nas>:<port>/rest/`.
 
-- **`4535`** needs octo-fiesta deployed (and the plugin's `octoFiestaUrl` set so
-  the webhook can monitor it). Songs Navidrome already has stream straight
+- **`4535`** needs octo-fiesta deployed. Songs Navidrome already has stream straight
   through; only tracks missing from the library are fetched on demand. This is
   the one to give your player.
 - **`4534`** is a faithful mirror — responses are touched only when they are
@@ -771,7 +801,7 @@ table — the same way the web UI does — so they appear without a restart.
 - **Endpoints**: `GET /radio-list`, `GET /radio-lookup?q=...&type=byname|bytag|bycountry`,
   `POST /radio-add`, `POST /radio-remove`, `POST /radio-rename`.
 - **Dashboard**: the webhook shows a **Radio panel** (existing stations) and a
-- The sidecar is registered in `SIDECAR_LOG_PORTS` (port `8100`).
+  **Smart Playlists** panel for managing Navidrome playlists.
 
 ### Smart playlists
 

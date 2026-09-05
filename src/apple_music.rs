@@ -48,21 +48,6 @@ pub mod host_apple_music {
             .collect::<Vec<_>>()
     }
 
-    /// Auto-detect country from Navidrome locale env vars.
-    pub fn detect_country() -> String {
-        if let Ok(locale) = std::env::var("ND_LOCALE") {
-            if let Some(country) = locale.split('_').last() {
-                return country.to_lowercase();
-            }
-        }
-        if let Ok(lang) = std::env::var("ND_DEFAULT_LANGUAGE") {
-            if let Some(country) = lang.split('-').last() {
-                return country.to_lowercase();
-            }
-        }
-        "us".into()
-    }
-
     /// Resolve an artist name to an iTunes artist ID. Cached permanently;
     /// negative results cached for 2 hours.
     pub fn resolve_artist_id(artist: &str, countries: &[String]) -> Option<i64> {
@@ -404,5 +389,236 @@ pub mod host_apple_music {
             .join("\n")
             .trim()
             .to_string()
+    }
+
+    /// Fetch album editorial notes from Apple Music web page (JSON-LD description).
+    pub fn fetch_album_info(
+        cfg: &Config,
+        artist: &str,
+        album: &str,
+        countries: &[String],
+    ) -> Option<String> {
+        if !cfg.apple_music_album_info {
+            return None;
+        }
+        let artist_id = resolve_artist_id(artist, countries)?;
+        let cache_key = format!("am:albuminfo:{}:{}", artist_id, album.to_lowercase());
+        if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+            if let Ok(s) = serde_json::from_str::<String>(&std::string::String::from_utf8_lossy(&v)) {
+                return if s.is_empty() { None } else { Some(s) };
+            }
+        }
+        if !net::circuit_probe("applemusic", "https://itunes.apple.com", &HashMap::new(), 10_000) {
+            return None;
+        }
+        if !net::throttle("applemusic", 1000) {
+            return None;
+        }
+        // Use iTunes Lookup API to find the album, then fetch its web page for description.
+        let url = format!(
+            "{}?id={}&entity=album&limit=200",
+            ITUNES_LOOKUP_URL, artist_id
+        );
+        let mut headers = HashMap::new();
+        headers.insert("User-Agent".into(), user_agent());
+        let req = host::http::HTTPRequest {
+            method: "GET".into(),
+            url,
+            headers,
+            no_follow_redirects: false,
+            body: vec![],
+            timeout_ms: 10_000,
+        };
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                net::circuit_clear("applemusic");
+                let val: serde_json::Value = serde_json::from_slice(&resp.body).ok()?;
+                let results = val.get("results")?.as_array()?;
+                let album_lower = album.trim().to_lowercase();
+                let best = results.iter().find(|r| {
+                    r.get("wrapperType").and_then(|w| w.as_str()) == Some("collection")
+                        && r.get("collectionName")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n.to_lowercase() == album_lower)
+                            .unwrap_or(false)
+                })?;
+                let collection_url = best.get("collectionViewUrl")?.as_str()?;
+                // Fetch the album's web page to extract editorial notes from JSON-LD.
+                let mut page_headers = HashMap::new();
+                page_headers.insert("User-Agent".into(), user_agent());
+                let page_req = host::http::HTTPRequest {
+                    method: "GET".into(),
+                    url: collection_url.to_string(),
+                    headers: page_headers,
+                    no_follow_redirects: false,
+                    body: vec![],
+                    timeout_ms: 10_000,
+                };
+                match host::http::send(page_req) {
+                    Ok(Some(page_resp)) if page_resp.status_code == 200 => {
+                        let html = String::from_utf8_lossy(&page_resp.body);
+                        let desc = extract_album_description_from_html(&html);
+                        let ttl = cfg.apple_music_cache_ttl as i64 * 24 * 3600;
+                        let _ = crate::store::kv().set_with_ttl(
+                            &cache_key,
+                            serde_json::to_vec(&desc.clone().unwrap_or_default()).unwrap_or_default(),
+                            ttl,
+                        );
+                        desc
+                    }
+                    _ => {
+                        let _ = crate::store::kv().set_with_ttl(
+                            &cache_key,
+                            serde_json::to_vec(&String::new()).unwrap_or_default(),
+                            NEGATIVE_CACHE_TTL,
+                        );
+                        None
+                    }
+                }
+            }
+            _ => {
+                net::circuit_mark_failed("applemusic");
+                None
+            }
+        }
+    }
+
+    /// Fetch similar artists from Apple Music web page (JSON-LD "related" or "similar" artists).
+    pub fn fetch_similar_artists(
+        cfg: &Config,
+        artist: &str,
+        countries: &[String],
+    ) -> Option<Vec<String>> {
+        if !cfg.apple_music_similar_artists {
+            return None;
+        }
+        let artist_id = resolve_artist_id(artist, countries)?;
+        let cache_key = format!("am:similar:{artist_id}");
+        if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+            if let Ok(names) = serde_json::from_slice::<Vec<String>>(&v) {
+                return if names.is_empty() { None } else { Some(names) };
+            }
+        }
+        if !net::circuit_probe("applemusic", "https://music.apple.com", &HashMap::new(), 10_000) {
+            return None;
+        }
+        if !net::throttle("applemusic", 1000) {
+            return None;
+        }
+        let country = countries.first().map(|s| s.as_str()).unwrap_or("us");
+        let page_url = format!("{}/{}/artist/-/{}", APPLE_MUSIC_BASE, country, artist_id);
+        let mut headers = HashMap::new();
+        headers.insert("User-Agent".into(), user_agent());
+        let req = host::http::HTTPRequest {
+            method: "GET".into(),
+            url: page_url,
+            headers,
+            no_follow_redirects: false,
+            body: vec![],
+            timeout_ms: 10_000,
+        };
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                let html = String::from_utf8_lossy(&resp.body);
+                let names = extract_similar_from_html(&html);
+                let ttl = cfg.apple_music_cache_ttl as i64 * 24 * 3600;
+                let _ = crate::store::kv().set_with_ttl(
+                    &cache_key,
+                    serde_json::to_vec(&names).unwrap_or_default(),
+                    ttl,
+                );
+                if names.is_empty() { None } else { Some(names) }
+            }
+            _ => {
+                let _ = crate::store::kv().set_with_ttl(
+                    &cache_key,
+                    serde_json::to_vec(&Vec::<String>::new()).unwrap_or_default(),
+                    NEGATIVE_CACHE_TTL,
+                );
+                None
+            }
+        }
+    }
+
+    /// Extract album description from HTML (JSON-LD "description" or "about" field).
+    fn extract_album_description_from_html(html: &str) -> Option<String> {
+        if let Some(start) = html.find("application/ld+json") {
+            let chunk = &html[start..];
+            if let Some(ld_start) = chunk.find('{') {
+                if let Some(ld_end) = chunk[ld_start..].find("}</script>") {
+                    let json_str = &chunk[ld_start..ld_start + ld_end + 1];
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(desc) = val.get("description").and_then(|d| d.as_str()) {
+                            let text = normalize_text(desc);
+                            if !text.is_empty() {
+                                return Some(text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract similar artist names from HTML (JSON-LD "relatedLink" or "similar" section).
+    fn extract_similar_from_html(html: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        // Try JSON-LD first: look for "relatedLink" or "similarArtists"
+        if let Some(start) = html.find("application/ld+json") {
+            let chunk = &html[start..];
+            if let Some(ld_start) = chunk.find('{') {
+                if let Some(ld_end) = chunk[ld_start..].find("}</script>") {
+                    let json_str = &chunk[ld_start..ld_start + ld_end + 1];
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        // Try "relatedLink" array (Apple Music artist pages)
+                        if let Some(arr) = val.get("relatedLink").and_then(|r| r.as_array()) {
+                            for item in arr {
+                                if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                                    let t = name.trim().to_string();
+                                    if !t.is_empty() {
+                                        names.push(t);
+                                    }
+                                }
+                            }
+                        }
+                        // Try "similarArtists" array
+                        if names.is_empty() {
+                            if let Some(arr) = val.get("similarArtists").and_then(|r| r.as_array()) {
+                                for item in arr {
+                                    if let Some(name) = item.as_str() {
+                                        let t = name.trim().to_string();
+                                        if !t.is_empty() {
+                                            names.push(t);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: parse "You Might Also Like" section from HTML
+        if names.is_empty() {
+            if let Some(idx) = html.find("You Might Also Like") {
+                let chunk = &html[idx..];
+                // Look for artist name patterns in nearby links
+                for link_start in chunk.match_indices("<a ") {
+                    let offset = link_start.0;
+                    let segment = &chunk[offset..];
+                    if let Some(title_start) = segment.find(r#"title=""#) {
+                        let title_offset = title_start + 7;
+                        if let Some(title_end) = segment[title_offset..].find('"') {
+                            let name = segment[title_offset..title_offset + title_end].trim().to_string();
+                            if !name.is_empty() && names.len() < 20 {
+                                names.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        names
     }
 }

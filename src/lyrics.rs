@@ -81,13 +81,19 @@ pub fn fetch(artist: &str, title: &str, album: &str, duration_secs: i64) -> Opti
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
             if synced.is_none() && plain.is_none() {
+                crate::log::debug(&format!("lyrics: no lyrics in LRCLIB response for {artist} - {title}"));
                 None
             } else {
+                crate::log::debug(&format!("lyrics: found for {artist} - {title}"));
                 Some(Lyrics { synced, plain })
             }
         }
-        Ok(Some(resp)) if resp.status_code == 404 => None, // no lyrics - not an outage
+        Ok(Some(resp)) if resp.status_code == 404 => {
+            crate::log::debug(&format!("lyrics: not found for {artist} - {title}"));
+            None
+        }
         Ok(Some(_)) | Ok(None) | Err(_) => {
+            crate::log::warn(&format!("lyrics: LRCLIB request failed for {artist} - {title}"));
             crate::net::circuit_mark_failed("lrclib");
             None
         }

@@ -155,6 +155,11 @@ def _sidecar_card(name, status, logs):
     """One rich card per sidecar. Unreachable sidecars show as 'OFFLINE' instead
     of being hidden, so the user sees all services at a glance."""
     short = name.replace("nd-organizer-", "")
+    port = SIDECAR_LOG_PORTS.get(name, 0)
+    if port == 0:
+        url = "%s:%d" % (name, PORT)
+    else:
+        url = "http://%s:%d" % (name, port)
     state, state_cls = "OK", "ok"
     if status is None and logs is None:
         state, state_cls = "OFFLINE", "bad"
@@ -208,9 +213,9 @@ def _sidecar_card(name, status, logs):
     ver = ""
     if status and status.get("version"):
         ver = " <span class='dim'>v%s</span>" % esc(status["version"])
-    return ("<div class='sc'><div class='sc-top'><b>%s</b>%s"
+    return ("<div class='sc'><div class='sc-top'><b>%s</b> <span class='dim'>%s</span>%s"
             "<span class='tag %s'>%s</span></div>%s%s%s</div>") % (
-        esc(name), ver, state_cls, state, stats, extra, logs_html)
+        esc(name), esc(url), ver, state_cls, state, stats, extra, logs_html)
 
 
 def _uptime(secs):

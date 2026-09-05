@@ -276,11 +276,34 @@ pub mod host_lidarr {
         }
         let a = find_album(cfg, album, artist)?;
         if !(a.monitored && a.artist_monitored) {
+            crate::log::debug(&format!(
+                "Lidarr: '{}' - '{}' not monitored (album={}, artist={})",
+                artist, album, a.monitored, a.artist_monitored
+            ));
             return None;
         }
         match a.track_count {
-            Some(tc) if tc > local_track_count as i64 => Some(a.id),
-            _ => None,
+            Some(tc) if tc > local_track_count as i64 => {
+                crate::log::debug(&format!(
+                    "Lidarr: '{}' - '{}' incomplete ({tc} expected vs {local_track_count} local)",
+                    artist, album
+                ));
+                Some(a.id)
+            }
+            Some(tc) => {
+                crate::log::debug(&format!(
+                    "Lidarr: '{}' - '{}' complete ({tc} tracks)",
+                    artist, album
+                ));
+                None
+            }
+            None => {
+                crate::log::debug(&format!(
+                    "Lidarr: '{}' - '{}' no track count from Lidarr",
+                    artist, album
+                ));
+                None
+            }
         }
     }
 

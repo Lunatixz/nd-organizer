@@ -127,7 +127,7 @@
             },
             {
               "const": "mysql",
-              "title": "External MySQL / MariaDB"
+              "title": "MySQL / MariaDB"
             }
           ],
           "description": "Where the plugin keeps its cache/state (scan index, task log, stats, caches). 'host' = the Navidrome-managed SQLite KVStore. 'mysql' = your own database via the mysql sidecar (mysql/docker-compose.yml), so plugin state survives plugin resets."
@@ -142,36 +142,34 @@
           "type": "string",
           "title": "MySQL host",
           "default": "nd-organizer-mariadb",
-          "description": "Hostname/IP of your MySQL or MariaDB server. Matches docker-compose service name."
+          "description": "Hostname or IP of the MySQL/MariaDB server reachable from the sidecar container."
         },
         "mysqlPort": {
           "type": "integer",
           "title": "MySQL port",
-          "minimum": 1,
-          "maximum": 65535,
           "default": 3306,
-          "description": "Port your MySQL or MariaDB server listens on (usually 3306)."
+          "description": "Port of the MySQL/MariaDB server."
         },
         "mysqlName": {
           "type": "string",
           "title": "MySQL database name",
-          "default": "ndorganizer",
-          "description": "Database that will hold the plugin's kvstore table (created automatically). Matches MYSQL_DATABASE env var."
+          "default": "navidrome",
+          "description": "Database that will hold the plugin's kvstore table (created automatically)."
         },
         "mysqlUser": {
           "type": "string",
           "title": "MySQL user",
-          "default": "ndorganizer",
-          "description": "A MySQL user with read/write access to the database above. Matches MYSQL_USER env var."
+          "default": "navidrome",
+          "description": "A MySQL user with read/write access to the database above."
         },
         "mysqlPassword": {
           "type": "string",
           "title": "MySQL password",
-          "default": "ndorganizer",
+          "default": "navidrome",
           "options": {
             "format": "password"
           },
-          "description": "Credentials are sent only to the mysql sidecar over the internal Docker network. Matches MYSQL_PASSWORD env var."
+          "description": "Credentials are sent only to the mysql sidecar over the internal Docker network."
         },
         "soundtrackFolder": {
           "type": "string",
@@ -219,7 +217,7 @@
           "type": "string",
           "title": "Filler keywords",
           "default": "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke",
-          "description": "Comma-separated keywords. A track whose title matches one (whole-word) is ignored from the queue: the filter proxy drops it from auto-play lists (random/search/playlist/genre/top/similar). Albums stay whole - it remains in its album, and files are never moved."
+          "description": "Comma-separated keywords. A track whose title matches one (whole-word) is ignored from the queue: the proxy drops it from auto-play lists (random/search/playlist/genre/top/similar). Albums stay whole - it remains in its album, and files are never moved."
         },
         "playbackStatsEnabled": {
           "type": "boolean",
@@ -254,7 +252,7 @@
           "type": "boolean",
           "title": "Keyword filter (drop filler tracks from auto-queues)",
           "default": true,
-          "description": "Drop filler-keyword tracks (see fillerKeywords) from auto-queues (random/playlist/similar/genre/top/starred) via the filter proxy. Explicit user searches still return them. No files are moved."
+          "description": "Drop filler-keyword tracks (see fillerKeywords) from auto-queues (random/playlist/similar/genre/top/starred) via the proxy. Explicit user searches still return them. No files are moved."
         },
         "skipContentMode": {
           "type": "string",
@@ -279,9 +277,9 @@
         },
         "filterUrl": {
           "type": "string",
-          "title": "Navidrome filter proxy URL",
+          "title": "Proxy URL",
           "default": "http://nd-organizer-proxy:4534",
-          "description": "Base URL of the nd-organizer filter proxy (e.g. http://nd-organizer-proxy:4534). The proxy drops filler-keyword tracks from auto-queues and limits skip-heavy content in queues according to your settings."
+          "description": "Base URL of the nd-organizer proxy (e.g. http://nd-organizer-proxy:4534). The proxy drops filler-keyword tracks from auto-queues and limits skip-heavy content in queues according to your settings."
         },
         "starTallyEnabled": {
           "type": "boolean",
@@ -933,8 +931,32 @@
         "essentiaUrl": {
           "type": "string",
           "title": "Essentia analysis URL",
-          "default": "http://nd-organizer-essentia:8080",
+          "default": "http://nd-organizer-essentia:8101",
           "description": "Essentia genre/mood ML sidecar URL. Default is http://nd-organizer-essentia:8080 (Docker container name). Acts as fallback when AudioMuse is unreachable, or primary source when genreFrom=essentia."
+        },
+        "essentiaStructure": {
+          "type": "boolean",
+          "title": "Song structure analysis",
+          "default": false,
+          "description": "Detect song sections (intro, verse, chorus, outro) via Essentia spectral analysis. Writes structure tags to files. Requires essentiaUrl."
+        },
+        "essentiaChords": {
+          "type": "boolean",
+          "title": "Chord detection",
+          "default": false,
+          "description": "Detect chord progressions via chroma features from Essentia. Writes dominant chord tag to files. Requires essentiaUrl."
+        },
+        "essentiaBpm": {
+          "type": "boolean",
+          "title": "BPM and key detection",
+          "default": false,
+          "description": "Detect BPM tempo and musical key from Essentia. Writes BPM and KEY tags to files. Requires essentiaUrl."
+        },
+        "essentiaFingerprint": {
+          "type": "boolean",
+          "title": "Audio fingerprinting (cover/duplicate detection)",
+          "default": false,
+          "description": "Compute audio fingerprints via Essentia for detecting cover songs and duplicate recordings. Requires essentiaUrl."
         },
         "discogsToken": {
           "type": "string",
@@ -1221,10 +1243,6 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/writePlaycount"
-            },
-            {
-              "type": "Control",
               "scope": "#/properties/autoTagFromMB"
             },
             {
@@ -1352,11 +1370,29 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/minConfidence"
+              "scope": "#/properties/minConfidence",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/verifyIdentity",
+                  "schema": {
+                    "const": true
+                  }
+                }
+              }
             },
             {
               "type": "Control",
-              "scope": "#/properties/skipUnverified"
+              "scope": "#/properties/skipUnverified",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/verifyIdentity",
+                  "schema": {
+                    "const": true
+                  }
+                }
+              }
             }
           ]
         },
@@ -1501,6 +1537,27 @@
             {
               "type": "Control",
               "scope": "#/properties/essentiaUrl"
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/essentiaStructure"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/essentiaChords"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/essentiaBpm"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/essentiaFingerprint"
+                }
+              ]
             }
           ]
         },
@@ -1704,18 +1761,6 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/skipThresholdPercent"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/skipContentMode"
-            },
-            {
-              "type": "Control",
-              "scope": "#/properties/skipHeavyRatio"
-            },
-            {
-              "type": "Control",
               "scope": "#/properties/starIgnorePercent"
             },
             {
@@ -1768,6 +1813,10 @@
             {
               "type": "Control",
               "scope": "#/properties/scanDebounceSeconds"
+            },
+            {
+              "type": "Label",
+              "text": "To find library IDs: set mode=dryRun, save, then check the warnings panel — it lists all available libraries with their IDs (e.g. '1 \"Music\"'). Set to 0 to disable cross-library moves."
             },
             {
               "type": "Control",
@@ -1857,17 +1906,21 @@
               }
             },
             {
-              "type": "HorizontalLayout",
-              "elements": [
-                {
-                  "type": "Control",
-                  "scope": "#/properties/mysqlHost"
-                },
-                {
-                  "type": "Control",
-                  "scope": "#/properties/mysqlPort"
+              "type": "Control",
+              "scope": "#/properties/mysqlHost",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/persistenceBackend",
+                  "schema": {
+                    "const": "mysql"
+                  }
                 }
-              ],
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/mysqlPort",
               "rule": {
                 "effect": "SHOW",
                 "condition": {

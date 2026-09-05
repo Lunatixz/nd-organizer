@@ -2,8 +2,8 @@
 #
 # Bridge that lets the plugin store its KVStore state (cache, task log, scan
 # index, stats) in YOUR MySQL/MariaDB database instead of the local SQLite file
-# Navidrome manages per-plugin. The plugin sends the DB connection details from
-# its Navidrome config on every request; nothing is stored in this container.
+# Navidrome manages per-plugin. Connection details are read from environment
+# variables below; the plugin only needs the sidecar URL.
 #
 # Prerequisites: a MySQL/MariaDB server reachable from this container, and a
 # database + user it can write to (the `kvstore` table is created automatically).
@@ -13,7 +13,7 @@
 # Then in the plugin settings set:
 #   persistenceBackend = mysql
 #   persistenceUrl      = http://<host>:8098
-#   mysqlHost/Port/Name/User/Password = your database connection
+#   mysqlName/User/Password = your database connection
 
 services:
   nd-organizer-mysql:
@@ -24,6 +24,11 @@ services:
       - "8098:8098"
     environment:
       - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
+      - MYSQL_HOST=nd-organizer-mariadb
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=navidrome
+      - MYSQL_USER=navidrome
+      - MYSQL_PASSWORD=navidrome
     networks:
       - stack_network
 

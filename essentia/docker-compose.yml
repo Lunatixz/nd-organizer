@@ -1,10 +1,24 @@
-# Essentia genre/mood ML analysis sidecar for nd-organizer.
+# Essentia ML analysis sidecar for nd-organizer.
 #
-# Provides genre and mood predictions using Essentia ML models (Discogs-400 +
-# MTG-Jamendo). Acts as a fallback when AudioMuse-AI is unreachable, or as the
-# primary genre source when genreFrom=essentia.
+# Provides genre/mood predictions (Discogs-400 + MTG-Jamendo), song structure
+# detection, chord analysis, BPM/key detection, and audio fingerprinting for
+# cover/duplicate detection. Acts as a fallback when AudioMuse-AI is unreachable,
+# or as the primary genre source when genreFrom=essentia.
+#
+# Features:
+#   - Genre/mood analysis (Discogs-400 + MTG-Jamendo models)
+#   - Song structure segmentation (intro/verse/chorus/outro)
+#   - Chord detection via chroma features
+#   - BPM and musical key detection
+#   - Audio fingerprinting for cover/duplicate detection
 #
 # Requires ~100MB disk for models + 2-4GB RAM during analysis.
+#
+# IMPORTANT: The sidecar reads audio files directly from the library volumes.
+# Mirror EVERY library mount from your Navidrome stack at the SAME guest path.
+# If Navidrome mounts /music but Essentia mounts /data, analysis fails for that
+# library. The plugin sends the full path (e.g. /music/Artist/Album/song.flac)
+# and the sidecar must be able to read it at that exact path.
 #
 # Usage:
 #   docker compose -f essentia/docker-compose.yml up -d
@@ -19,3 +33,9 @@ services:
       - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
     volumes:
       - /path/to/music:/music:ro   # mirror every Navidrome library mount
+    networks:
+      - stack_network
+
+networks:
+  stack_network:
+    external: true
