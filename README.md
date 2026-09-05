@@ -251,7 +251,7 @@ The plugin pulls metadata from multiple sources to enrich your library:
 | **MusicBrainz** | Release IDs, tracklists, classification, genre tags | No (User-Agent only) | `musicbrainzToken` (optional, raises rate limit) |
 | **Cover Art Archive** | Front/back covers, liner notes, booklets | No | `artworkSource = coverartarchive` |
 | **Apple Music / iTunes** | Album artwork, artist images, biographies | No | `appleMusicCountries`, `appleMusicAlbumArt`, etc. |
-| **Last.fm** | Loved tracks, playcount | Yes | `lastfmApiKey` + `lastfmUser` |
+| **Last.fm / Libre.fm** | Loved tracks, playcount, scrobble | Yes | `lastfmApiKey` + `lastfmUser` + `scrobbleProvider` |
 | **ListenBrainz** | Listening metrics, scrobbles, ratings | Yes (MusicBrainz token) | `listenbrainzScrobble` |
 | **Lidarr** | Track/album ratings, monitored status | Yes | `lidarrUrl` + `lidarrApiKey` |
 | **Discogs** | Release credits, community ratings, genre/style tags | Yes (personal token) | `discogsToken` + `discogsCredits` |
@@ -259,7 +259,7 @@ The plugin pulls metadata from multiple sources to enrich your library:
 | **Genius** | Lyrics, annotations, artist backgrounds | Yes (client token) | `geniusToken` + `lyricsSource = genius` |
 | **AcoustID** | Fingerprinting, identity verification | Yes | `acoustidUrl` + `acoustidApiKey` |
 | **AudioMuse-AI** | BPM/key/mood acoustic tags | No | `audiomuseUrl` |
-| **Essentia** | Genre/mood ML analysis, song structure, chords, BPM/key, fingerprinting | No | `essentiaUrl` + `essentiaStructure` + `essentiaChords` + `essentiaBpm` + `essentiaFingerprint` |
+| **Essentia / librosa** | Genre/mood ML analysis, song structure, chords, BPM/key, fingerprinting (librosa fallback for BPM/key/structure/chords when Essentia unavailable) | No | `essentiaUrl` + `essentiaStructure` + `essentiaChords` + `essentiaBpm` + `essentiaFingerprint` |
 | **LRCLIB** | Synchronized + plain lyrics | No | `lyricsSource = lrclib` |
 
 ### Metadata Source Matrix
