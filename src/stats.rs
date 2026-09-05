@@ -528,7 +528,9 @@ pub mod host_stats {
                 );
             }
             if use_librefm {
-                crate::librefm::host_librefm::scrobble(
+                // Libre.fm uses the same API protocol as Last.fm; the base URL
+                // is selected by scrobbleProvider in favorites.rs.
+                crate::favorites::host_favorites::scrobble(
                     cfg,
                     &prev.artist,
                     &prev.title,

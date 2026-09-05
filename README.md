@@ -162,7 +162,7 @@ publishes outward.
 |--------|---------------|---------------|----------------|-------------|-----------|----------|-----------|
 | **Navidrome** | setRating (1-5) | — | — | star/unstar | observed | — | In + Out |
 | **Last.fm** | — | — | — | love/unlove | userplaycount | track.scrobble | In + Out |
-| **Libre.fm** | — | — | — | — | — | scrobble | Out only |
+| **Libre.fm** | — | — | — | love/unlove | userplaycount | scrobble | In + Out |
 | **ListenBrainz** | feedback (0-100) | release_group_mbid | artist_mbid | feedback | scrobble | submit-listens | In + Out |
 | **Lidarr** | track rating (0-5) | album rating (0-5) | — | — | — | — | In + Out |
 | **MusicBrainz** | — | — | — | — | — | — | In only (metadata) |
@@ -173,24 +173,24 @@ publishes outward.
 The `scrobbleProvider` dropdown selects which service receives your listen
 data. Both Last.fm and Libre.fm share the **same credentials** (lastfmUser,
 lastfmApiKey, lastfmApiSecret) — selecting Libre.fm just changes the API
-backend URL.
+backend URL. Favorites sync (love/unlove, playcount import) works with both.
 
 | Provider | API Base | Features | Cost |
 |----------|----------|----------|------|
 | **Last.fm** | `ws.audioscrobbler.com` | Scrobble, loved tracks, playcount, artist info | Free (API key required) |
-| **Libre.fm** | `libre.fm` | Scrobble (same protocol as Last.fm) | Free (open-source) |
+| **Libre.fm** | `libre.fm` | Scrobble, loved tracks, playcount (same API as Last.fm) | Free (open-source) |
 
 **When to use Libre.fm**: If you want to scrobble to an open-source alternative
 to Last.fm, or if you want to dual-scrobble to both services. Libre.fm uses the
-same Subsonic-compatible scrobble protocol as Last.fm.
+same Last.fm-compatible API — scrobble, love/unlove, and playcount all work.
 
-**Note**: Libre.fm is scrobble-only — it does not provide loved tracks,
-playcount import, or artist metadata. Use Last.fm for full feature support.
+**Note**: Libre.fm is community-run and may have occasional downtime. Favorites
+sync and scrobble will retry automatically via the circuit breaker.
 
 ### Inbound (pull into plugin DB)
 
 - **Navidrome** starred tracks → seed as 3-star loved (only if no local data yet)
-- **Last.fm** playcount + loved → seed baseline on first sight
+- **Last.fm / Libre.fm** playcount + loved → seed baseline on first sight
 - **ListenBrainz** loved/hated feedback → seed as loved on first sight
 - **Lidarr** track/album rating → seed initial rating (highest concrete wins)
 - **Discogs** community ratings → seed initial rating (if `useCommunityRatings` enabled)
@@ -201,15 +201,15 @@ playcount import, or artist metadata. Use Last.fm for full feature support.
 - **Navidrome** `setRating` + `star`/`unstar` (every stats pass)
 - **Lidarr** track + album ratings (if `ratingSyncWriteToLidarr`)
 - **ListenBrainz** track/album/artist ratings (if `listenbrainzScrobble`)
-- **Last.fm** scrobble on full plays (if `scrobbleProvider = lastfm`)
-- **Libre.fm** scrobble on full plays (if `scrobbleProvider = librefm`)
+- **Last.fm** love/unlove + scrobble (if `scrobbleProvider = lastfm`)
+- **Libre.fm** love/unlove + scrobble (if `scrobbleProvider = librefm`)
 
 ### Favorites sync (Navidrome ↔ Last.fm/Libre.fm)
 
-- **Bidirectional**: Navidrome stars ↔ Last.fm loved tracks
+- **Bidirectional**: Navidrome stars ↔ Last.fm/Libre.fm loved tracks
+- **Provider selection**: uses `scrobbleProvider` — same credentials for both
 - **Unstar/unlove propagation**: when `favoritesSyncBidirectional` is enabled
 - **Additive only** when bidirectional is off (never removes)
-- **Libre.fm**: no favorites API — scrobble only
 
 ### Config options
 
@@ -219,7 +219,7 @@ playcount import, or artist metadata. Use Last.fm for full feature support.
 | `scrobbleProvider` | none | Scrobble backend: none/lastfm/librefm |
 | `ratingSyncWriteToLidarr` | false | Push ratings to Lidarr (track + album) |
 | `ratingSyncPullFromNavidrome` | false | Import manual ratings from Navidrome UI |
-| `favoritesSyncLastfm` | false | Bidirectional loved sync with Last.fm |
+| `favoritesSyncLastfm` | false | Bidirectional loved sync with Last.fm/Libre.fm (uses scrobbleProvider) |
 | `favoritesSyncBidirectional` | false | Propagate unstar/unlove (not just add) |
 | `favoritesSyncMax` | 500 | Max favorites per sync pass |
 | `lastfmImportPlaycount` | false | Seed playcount from Last.fm on first sight |
@@ -229,7 +229,7 @@ playcount import, or artist metadata. Use Last.fm for full feature support.
 
 ### Conflict resolution
 
-- **First sight**: highest concrete rating wins (Lidarr > Last.fm > playcount mapping)
+- **First sight**: highest concrete rating wins (Lidarr > Last.fm/Libre.fm > playcount mapping)
 - **Ongoing**: plugin DB is authoritative — computed rating propagates outward
 - **Loved = OR**: if any source says loved, mark as loved
 - **ListenBrainz**: uses recording MBID from file tags (must be tagged for track-level sync)
@@ -264,31 +264,31 @@ The plugin pulls metadata from multiple sources to enrich your library:
 
 ### Metadata Source Matrix
 
-| Type | MusicBrainz | CAA | Apple Music | TheAudioDB | Discogs | Genius | LRCLIB | Essentia | AudioMuse | AcoustID |
-|------|:-----------:|:---:|:-----------:|:----------:|:-------:|:------:|:------:|:--------:|:---------:|:--------:|
-| Album Title | X | | X | X | X | X | | | | |
-| Track Title | X | | | | | X | | | | |
-| Artist | X | | X | X | | X | | | | |
-| Year | X | | X | | X | | | | | |
-| Release Type | X | | | | | | | | | |
-| **Genre** | **X** | | | **X** | **X** | | | **X** | | |
-| **Styles** | | | | | **X** | | | | | |
-| **Mood** | | | | | | | | **X** | **X** | |
-| **BPM** | | | | | | | | **X** | **X** | |
-| **Key** | | | | | | | | **X** | **X** | |
-| **Energy** | | | | | | | | | **X** | |
-| **Chords** | | | | | | | | **X** | | |
-| **Structure** | | | | | | | | **X** | | |
-| **Album Art** | | **X** | **X** | **X** | | | | | | |
-| Artist Bio | | | **X** | **X** | | | | | | |
-| Artist Image | | | **X** | **X** | | | | | | |
-| **Lyrics (plain)** | | | | | | **X** | **X** | | | |
-| **Lyrics (synced)** | | | | | | | **X** | | | |
-| **Credits** | | | | | **X** | | | | | |
-| **Community Rating** | | | | | **X** | | | | | |
-| **ReplayGain** | | | | | | | | | | **X** |
-| Recording MBID | X | | | | | | | | | X |
-| Release MBID | X | | | | | | | | | |
+| Type | MusicBrainz | CAA | Apple Music | TheAudioDB | Discogs | Genius | LRCLIB | Essentia | **librosa** | AudioMuse | AcoustID |
+|------|:-----------:|:---:|:-----------:|:----------:|:-------:|:------:|:------:|:--------:|:-----------:|:---------:|:--------:|
+| Album Title | X | | X | X | X | X | | | | | |
+| Track Title | X | | | | | X | | | | | |
+| Artist | X | | X | X | | X | | | | | |
+| Year | X | | X | | X | | | | | | |
+| Release Type | X | | | | | | | | | | |
+| **Genre** | **X** | | | **X** | **X** | | | **X** | | | |
+| **Styles** | | | | | **X** | | | | | | |
+| **Mood** | | | | | | | | **X** | | **X** | |
+| **BPM** | | | | | | | | **X** | **X** | **X** | |
+| **Key** | | | | | | | | **X** | **X** | **X** | |
+| **Energy** | | | | | | | | | | **X** | |
+| **Chords** | | | | | | | | **X** | **X** | | |
+| **Structure** | | | | | | | | **X** | **X** | | |
+| **Album Art** | | **X** | **X** | **X** | | | | | | | |
+| Artist Bio | | | **X** | **X** | | | | | | | |
+| Artist Image | | | **X** | **X** | | | | | | | |
+| **Lyrics (plain)** | | | | | | **X** | **X** | | | | |
+| **Lyrics (synced)** | | | | | | | **X** | | | | |
+| **Credits** | | | | | **X** | | | | | | |
+| **Community Rating** | | | | | **X** | | | | | | |
+| **ReplayGain** | | | | | | | | | | | **X** |
+| Recording MBID | X | | | | | | | | | | X |
+| Release MBID | X | | | | | | | | | | |
 
 ### Filling missing tags on AcoustID match
 
@@ -297,9 +297,9 @@ metadata from the available sources with automatic fallback chains:
 - **Artwork**: tries `artworkSource` first, then other configured sources (CoverArtArchive → Apple Music → TheAudioDB → embedded)
 - **Genre**: tries `genreSource` first, then other configured sources (MusicBrainz → Discogs → TheAudioDB → Essentia → NFO)
 - **Lyrics**: tries `lyricsSource` first, then other configured sources (LRCLIB → Genius)
-- **BPM/Key/Mood**: AudioMuse-AI (primary), Essentia (fallback for mood, BPM, key)
-- **Chords**: Essentia (chroma-based chord detection)
-- **Structure**: Essentia (song section segmentation)
+- **BPM/Key/Mood**: AudioMuse-AI (primary), Essentia (fallback), librosa (BPM/key only when Essentia unavailable)
+- **Chords**: Essentia (primary), librosa (fallback)
+- **Structure**: Essentia (primary), librosa (fallback)
 
 ### Community vs personal ratings
 

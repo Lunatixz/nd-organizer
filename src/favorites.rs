@@ -151,6 +151,34 @@ pub mod host_favorites {
         out
     }
 
+    /// Last.fm-compatible API base URL. Returns Libre.fm when the provider is
+    /// set to "librefm", otherwise ws.audioscrobbler.com.
+    fn api_base(cfg: &Config) -> &'static str {
+        if cfg.scrobble_provider == "librefm" {
+            "https://libre.fm"
+        } else {
+            "https://ws.audioscrobbler.com"
+        }
+    }
+
+    /// Circuit-breaker service name for the configured provider.
+    fn circuit_name(cfg: &Config) -> &'static str {
+        if cfg.scrobble_provider == "librefm" {
+            "librefm"
+        } else {
+            "lastfm"
+        }
+    }
+
+    /// Human-readable provider name for log messages.
+    fn provider_name(cfg: &Config) -> &'static str {
+        if cfg.scrobble_provider == "librefm" {
+            "Libre.fm"
+        } else {
+            "Last.fm"
+        }
+    }
+
     /// Last.fm method signature: md5 of sorted "namevalue" params (excluding
     /// `api_sig` and `format`) concatenated with the API secret.
     fn api_sig(secret: &str, params: &mut Vec<(String, String)>) -> String {
@@ -165,9 +193,11 @@ pub mod host_favorites {
     }
 
     fn lastfm_get(cfg: &Config, method: &str, params: &[(&str, &str)]) -> Option<Value> {
+        let base = api_base(cfg);
+        let cn = circuit_name(cfg);
         if !crate::net::circuit_probe(
-            "lastfm",
-            "https://ws.audioscrobbler.com/2.0/",
+            cn,
+            &format!("{base}/2.0/"),
             &HashMap::new(),
             10_000,
         ) {
@@ -179,7 +209,7 @@ pub mod host_favorites {
         }
         let req = host::http::HTTPRequest {
             method: "GET".into(),
-            url: format!("https://ws.audioscrobbler.com/2.0/?{q}"),
+            url: format!("{base}/2.0/?{q}"),
             headers: HashMap::new(),
             no_follow_redirects: false,
             body: vec![],
@@ -187,12 +217,12 @@ pub mod host_favorites {
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
-                crate::net::circuit_clear("lastfm");
+                crate::net::circuit_clear(cn);
                 serde_json::from_slice::<Value>(&resp.body).ok()
             }
             Ok(Some(_)) => None, // API error (auth etc.) - live, not an outage
             Ok(None) | Err(_) => {
-                crate::net::circuit_mark_failed("lastfm");
+                crate::net::circuit_mark_failed(cn);
                 None
             }
         }
@@ -204,6 +234,8 @@ pub mod host_favorites {
         method: &str,
         params: &[(&str, &str)],
     ) -> Result<Value, String> {
+        let base = api_base(cfg);
+        let cn = circuit_name(cfg);
         let mut ps: Vec<(String, String)> = params
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -228,7 +260,7 @@ pub mod host_favorites {
         );
         let req = host::http::HTTPRequest {
             method: "POST".into(),
-            url: "https://ws.audioscrobbler.com/2.0/".into(),
+            url: format!("{base}/2.0/"),
             headers,
             no_follow_redirects: false,
             body: body.into_bytes(),
@@ -236,7 +268,7 @@ pub mod host_favorites {
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
-                crate::net::circuit_clear("lastfm");
+                crate::net::circuit_clear(cn);
                 serde_json::from_slice::<Value>(&resp.body).map_err(|e| e.to_string())
             }
             Ok(Some(resp)) => {
@@ -248,25 +280,26 @@ pub mod host_favorites {
                     .filter(|c| !c.is_control())
                     .take(160)
                     .collect::<String>();
-                Err(format!("Last.fm HTTP {}: {}", resp.status_code, hint.trim()))
+                Err(format!("{} HTTP {}: {}", provider_name(cfg), resp.status_code, hint.trim()))
             }
             Ok(None) => {
-                crate::net::circuit_mark_failed("lastfm");
-                Err("Last.fm no response".into())
+                crate::net::circuit_mark_failed(cn);
+                Err(format!("{} no response", provider_name(cfg)))
             }
             Err(e) => {
-                crate::net::circuit_mark_failed("lastfm");
-                Err(format!("Last.fm request failed: {e}"))
+                crate::net::circuit_mark_failed(cn);
+                Err(format!("{} request failed: {e}", provider_name(cfg)))
             }
         }
     }
 
-    /// Obtain (and cache) the Last.fm session key via auth.getMobileSession.
+    /// Obtain (and cache) the session key via auth.getMobileSession.
     ///
     /// Hard cooldown on the actual auth POST so repeated runs/tasks never
-    /// hammer Last.fm (repeated failures can also trigger a temporary account
-    /// lockout). While throttled it returns the last recorded error instead.
+    /// hammer the provider (repeated failures can also trigger a temporary
+    /// account lockout). While throttled it returns the last recorded error.
     pub(crate) fn session(cfg: &Config) -> Result<String, String> {
+        let pname = provider_name(cfg);
         if let Ok(Some(v)) = crate::store::kv().get("lastfm.sk") {
             if let Ok(s) = String::from_utf8(v) {
                 if !s.is_empty() {
@@ -275,10 +308,9 @@ pub mod host_favorites {
             }
         }
         if cfg.lastfm_api_secret.is_empty() || cfg.lastfm_password.is_empty() {
-            return Err(
-                "favorites sync needs lastfmApiSecret + lastfmPassword (for the session key)"
-                    .into(),
-            );
+            return Err(format!(
+                "favorites sync needs lastfmApiSecret + lastfmPassword (for the {pname} session key)"
+            ));
         }
         // Cooldown between real auth attempts (even across callers).
         const AUTH_COOLDOWN_SECS: i64 = 5 * 60;
@@ -289,16 +321,16 @@ pub mod host_favorites {
                     let wait = AUTH_COOLDOWN_SECS - (now - last);
                     if let Ok(Some(e)) = crate::store::kv().get("lastfm.auth_error") {
                         return Err(format!(
-                            "Last.fm auth throttled (retry in ~{wait}s): {}",
+                            "{pname} auth throttled (retry in ~{wait}s): {}",
                             String::from_utf8_lossy(&e)
                         ));
                     }
-                    return Err(format!("Last.fm auth throttled (retry in ~{wait}s)"));
+                    return Err(format!("{pname} auth throttled (retry in ~{wait}s)"));
                 }
             }
         }
         let _ = crate::store::kv().set("lastfm.auth_attempt", now.to_string().into_bytes());
-        // Last.fm mobile auth: the login credential is `authToken` =
+        // Mobile auth: the login credential is `authToken` =
         // md5(username + md5(password)), NOT a `password` param. Sending
         // `password` is rejected with "Authentication Failed" (error 4) even
         // for correct credentials (verified against the API + pylast).
@@ -314,7 +346,7 @@ pub mod host_favorites {
                 let key = res
                     .pointer("/session/key")
                     .and_then(|k| k.as_str())
-                    .ok_or_else(|| format!("could not obtain Last.fm session: {res}"))?
+                    .ok_or_else(|| format!("could not obtain {pname} session: {res}"))?
                     .to_string();
                 let _ = crate::store::kv().set("lastfm.sk", key.clone().into_bytes());
                 let _ = crate::store::kv().delete("lastfm.auth_error");
@@ -660,11 +692,12 @@ pub mod host_favorites {
         result
     }
 
-    /// Scrobble a full listen to Last.fm so its playcount grows too. Best-effort
+    /// Scrobble a full listen so the provider's playcount grows too. Best-effort
     /// (fails silently on auth/config problems - session() logs the issue).
-    /// Callers should only invoke this when the user opted into lastfmScrobble,
+    /// Callers should only invoke this when the user opted into scrobbling,
     /// since scrobbling alongside Navidrome's own scrobbler double-counts plays.
     pub(crate) fn scrobble(cfg: &Config, artist: &str, title: &str, album: &str, ts: i64) {
+        let pname = provider_name(cfg);
         let Ok(sk) = session(cfg) else {
             return;
         };
@@ -679,11 +712,11 @@ pub mod host_favorites {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         if let Err(e) = lastfm_post(cfg, &sk, "track.scrobble", &p) {
-            crate::wasm::log_warn(&format!("Last.fm scrobble failed: {e}"));
+            crate::wasm::log_warn(&format!("{pname} scrobble failed: {e}"));
         }
     }
 
-    /// Last.fm playcount for a track (used to seed the star-tally baseline).
+    /// Provider playcount for a track (used to seed the star-tally baseline).
     pub(crate) fn playcount(cfg: &Config, artist: &str, title: &str) -> i64 {
         let res = lastfm_get(
             cfg,
@@ -703,8 +736,8 @@ pub mod host_favorites {
         .unwrap_or(0)
     }
 
-    /// Whether the user has "loved" this track on Last.fm (from track.getInfo's
-    /// `userloved` flag). Used to seed the initial star rating (>= 3).
+    /// Whether the user has "loved" this track on the provider (from
+    /// track.getInfo's `userloved` flag). Used to seed the initial star rating.
     pub(crate) fn is_loved(cfg: &Config, artist: &str, title: &str) -> bool {
         let res = lastfm_get(
             cfg,
@@ -766,26 +799,27 @@ pub mod host_favorites {
 
     /// Bidirectional favorites sync: Navidrome stars <-> Last.fm loved tracks.
     pub fn sync(cfg: &Config) -> Result<SyncSummary, String> {
+        let pname = provider_name(cfg);
         let mut summary = SyncSummary::default();
         if !cfg.favorites_sync_lastfm {
-            crate::wasm::log_info("favorites sync: Last.fm disabled (favoritesSyncLastfm off)");
+            crate::wasm::log_info(&format!("favorites sync: {pname} disabled (favoritesSyncLastfm off)"));
             return Ok(summary);
         }
         if cfg.lastfm_api_key.is_empty() || cfg.lastfm_user.is_empty() {
-            return Err("favorites sync needs lastfmApiKey + lastfmUser".into());
+            return Err(format!("favorites sync needs lastfmApiKey + lastfmUser (for {pname})"));
         }
         let sk = session(cfg)?;
         let max = cfg.favorites_sync_max.max(1);
         let starred = nav_starred(cfg);
         let loved = lastfm_loved(cfg);
         crate::wasm::log_info(&format!(
-            "favorites sync: {} starred in Navidrome, {} loved on Last.fm (bidirectional={})",
+            "favorites sync: {} starred in Navidrome, {} loved on {pname} (bidirectional={})",
             starred.len(),
             loved.len(),
             cfg.favorites_sync_bidirectional
         ));
 
-        // Navidrome -> Last.fm (love what's starred but not loved).
+        // Navidrome -> provider (love what's starred but not loved).
         for song in starred.iter().take(max) {
             if song.title.trim().is_empty() || song.artist.trim().is_empty() {
                 continue;
@@ -800,7 +834,7 @@ pub mod host_favorites {
                 Ok(_) => {
                     summary.nav_to_lastfm += 1;
                     crate::wasm::log_info(&format!(
-                        "Last.fm loved: {} - {}",
+                        "{pname} loved: {} - {}",
                         song.artist, song.title
                     ));
                 }
@@ -814,7 +848,7 @@ pub mod host_favorites {
             }
         }
 
-        // Bidirectional: unlove on Last.fm what's no longer starred in Navidrome.
+        // Bidirectional: unlove on provider what's no longer starred in Navidrome.
         if cfg.favorites_sync_bidirectional {
             for t in loved.iter().take(max) {
                 if starred
@@ -827,7 +861,7 @@ pub mod host_favorites {
                     Ok(_) => {
                         summary.nav_to_lastfm += 1;
                         crate::wasm::log_info(&format!(
-                            "Last.fm unloved: {} - {}",
+                            "{pname} unloved: {} - {}",
                             t.artist, t.title
                         ));
                     }
@@ -842,7 +876,7 @@ pub mod host_favorites {
             }
         }
 
-        // Last.fm -> Navidrome (star what's loved but not starred).
+        // Provider -> Navidrome (star what's loved but not starred).
         for t in loved.iter().take(max) {
             if starred
                 .iter()
@@ -871,7 +905,7 @@ pub mod host_favorites {
             }
         }
 
-        // Bidirectional: unstar in Navidrome what's no longer loved on Last.fm.
+        // Bidirectional: unstar in Navidrome what's no longer loved on the provider.
         if cfg.favorites_sync_bidirectional {
             for song in starred.iter().take(max) {
                 if song.title.trim().is_empty() || song.artist.trim().is_empty() {

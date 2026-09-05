@@ -41,7 +41,6 @@ mod audiomuse;
 mod discogs;
 mod theaudiodb;
 mod genius;
-mod librefm;
 mod favorites;
 mod identity;
 mod lidarr;
@@ -343,8 +342,9 @@ pub(crate) mod wasm {
                     )
                 }),
                 "favsync" => crate::favorites::host_favorites::sync(&cfg).map(|s| {
+                    let pname = if cfg.scrobble_provider == "librefm" { "Libre.fm" } else { "Last.fm" };
                     format!(
-                        "favorites sync: {} -> Last.fm, {} -> Navidrome, {} errors",
+                        "favorites sync: {} -> {pname}, {} -> Navidrome, {} errors",
                         s.nav_to_lastfm, s.lastfm_to_nav, s.errors
                     )
                 }),
@@ -877,25 +877,31 @@ pub(crate) mod wasm {
         // These are external APIs unreachable from the WASM sandbox. The
         // webhook probes them directly via normal HTTP.
 
-        // 6. Last.fm (external API — scrobble + favorites)
+        // 6. Last.fm / Libre.fm (external API — scrobble + favorites)
+        let lfm_base = if cfg.scrobble_provider == "librefm" {
+            "https://libre.fm"
+        } else {
+            "https://ws.audioscrobbler.com"
+        };
+        let lfm_name = if cfg.scrobble_provider == "librefm" { "Libre.fm" } else { "Last.fm" };
         if cfg.lastfm_api_key.trim().is_empty() || cfg.lastfm_user.trim().is_empty() {
-            arr.push(json!({"name":"Last.fm","state":"notConfigured","detail":"set lastfmApiKey + lastfmUser"}));
+            arr.push(json!({"name":lfm_name,"state":"notConfigured","detail":"set lastfmApiKey + lastfmUser"}));
         } else if cfg.favorites_sync_lastfm
             && !cfg.lastfm_api_secret.trim().is_empty()
             && !cfg.lastfm_password.trim().is_empty()
         {
             match lastfm_auth_issue(cfg) {
-                Some(issue) => arr.push(json!({"name":"Last.fm","state":"authFailed","detail":issue})),
-                None => arr.push(json!({"name":"Last.fm","state":"ok","detail":"auth ok (favorites)"})),
+                Some(issue) => arr.push(json!({"name":lfm_name,"state":"authFailed","detail":issue})),
+                None => arr.push(json!({"name":lfm_name,"state":"ok","detail":"auth ok (favorites)"})),
             }
         } else {
             let url = format!(
-                "https://ws.audioscrobbler.com/2.0/?method=user.getinfo&user={}&api_key={}&format=json",
+                "{lfm_base}/2.0/?method=user.getinfo&user={}&api_key={}&format=json",
                 cfg.lastfm_user, cfg.lastfm_api_key
             );
             match probe_ok("lastfm", &url, &empty) {
-                None => arr.push(json!({"name":"Last.fm","state":"ok","detail":"api reachable"})),
-                Some(w) => arr.push(json!({"name":"Last.fm","state":"unreachable","detail":w})),
+                None => arr.push(json!({"name":lfm_name,"state":"ok","detail":"api reachable"})),
+                Some(w) => arr.push(json!({"name":lfm_name,"state":"unreachable","detail":w})),
             }
         }
 
@@ -992,19 +998,21 @@ pub(crate) mod wasm {
             w.push("writePlaycount requires lastfmApiKey and lastfmUser".into());
         }
         if cfg.lastfm_scrobble || cfg.lastfm_import_playcount {
+            let pname = if cfg.scrobble_provider == "librefm" { "Libre.fm" } else { "Last.fm" };
             if cfg.lastfm_api_key.trim().is_empty()
                 || cfg.lastfm_api_secret.trim().is_empty()
                 || cfg.lastfm_password.trim().is_empty()
             {
-                w.push("lastfmScrobble / lastfmImportPlaycount need lastfmApiKey + lastfmApiSecret + lastfmPassword (Last.fm session)".into());
+                w.push(format!("lastfmScrobble / lastfmImportPlaycount need lastfmApiKey + lastfmApiSecret + lastfmPassword ({pname} session)"));
             }
         }
         if cfg.favorites_sync_lastfm {
+            let pname = if cfg.scrobble_provider == "librefm" { "Libre.fm" } else { "Last.fm" };
             if cfg.lastfm_api_secret.trim().is_empty() || cfg.lastfm_password.trim().is_empty() {
-                w.push("favorites sync (Last.fm) is on but needs lastfmApiSecret + lastfmPassword (for the session key)".into());
+                w.push(format!("favorites sync ({pname}) is on but needs lastfmApiSecret + lastfmPassword (for the session key)"));
             } else if let Some(issue) = lastfm_auth_issue(cfg) {
                 w.push(format!(
-                    "favorites sync (Last.fm) cannot log in: {issue}. Check lastfmPassword (and lastfmApiSecret)."
+                    "favorites sync ({pname}) cannot log in: {issue}. Check lastfmPassword (and lastfmApiSecret)."
                 ));
             }
             if scan_user(cfg).is_empty() {
