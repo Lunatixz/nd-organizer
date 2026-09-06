@@ -1212,7 +1212,8 @@
                 },
                 {
                   "type": "Control",
-                  "scope": "#/properties/navidromeAdminPassword"
+                  "scope": "#/properties/navidromeAdminPassword",
+                  "options": { "format": "password" }
                 }
               ]
             }
@@ -1342,7 +1343,8 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/musicbrainzToken"
+              "scope": "#/properties/musicbrainzToken",
+              "options": { "format": "password" }
             }
           ]
         },
@@ -1364,7 +1366,8 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/acoustidApiKey"
+              "scope": "#/properties/acoustidApiKey",
+              "options": { "format": "password" }
             },
             {
               "type": "Label",
@@ -1417,7 +1420,8 @@
             {
               "type": "Control",
               "scope": "#/properties/lastfmApiKey",
-              "description": "API key for Last.fm (or Libre.fm API key if scrobble provider is Libre.fm)"
+              "description": "API key for Last.fm (or Libre.fm API key if scrobble provider is Libre.fm)",
+              "options": { "format": "password" }
             },
             {
               "type": "Control",
@@ -1577,7 +1581,8 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/discogsToken"
+              "scope": "#/properties/discogsToken",
+              "options": { "format": "password" }
             },
             {
               "type": "Control",
@@ -1595,7 +1600,8 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/theAudioDbKey"
+              "scope": "#/properties/theAudioDbKey",
+              "options": { "format": "password" }
             },
             {
               "type": "Control",
@@ -1613,7 +1619,8 @@
             },
             {
               "type": "Control",
-              "scope": "#/properties/geniusToken"
+              "scope": "#/properties/geniusToken",
+              "options": { "format": "password" }
             }
           ]
         },

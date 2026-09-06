@@ -63,8 +63,14 @@ services:
       - ND_PLAYLISTSPATH=playlists
       # Optional: agents the plugin can power for the UI (see README/agents):
       # - ND_AGENTS=nd-organizer
+      # Automated daily backup (keeps 7 days). Restore: stop Navidrome, run
+      # `docker compose run navidrome backup restore`, then start again.
+      - ND_BACKUP_PATH=/backup
+      - ND_BACKUP_SCHEDULE=0 3 * * *
+      - ND_BACKUP_COUNT=7
     volumes:
       - ./navidrome-data:/data
+      - ./navidrome-backups:/backup
       - /path/to/music:/music:rw        # library 1  (path = /music)
       - /path/to/unsorted:/unsorted:rw  # library 2  (path = /unsorted)
       # add more - /host/path:/guest:rw lines for every library
