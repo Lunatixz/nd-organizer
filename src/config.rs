@@ -407,7 +407,7 @@ impl Default for Config {
             rating_sync_pull_from_navidrome: false,
             lastfm_scrobble: false,
             listenbrainz_scrobble: false,
-            scrobble_provider: "none".into(),
+            scrobble_provider: "lastfm".into(),
             lastfm_import_playcount: false,
     rollback_run_id: String::new(),
             log_webhook_url: "http://nd-organizer-webhook:8099".into(),

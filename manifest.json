@@ -926,7 +926,7 @@
         "scrobbleProvider": {
           "type": "string",
           "title": "Scrobble provider",
-          "default": "none",
+          "default": "lastfm",
           "oneOf": [
             { "const": "none", "title": "None" },
             { "const": "lastfm", "title": "Last.fm" },

@@ -8,7 +8,7 @@
 #   nd-organizer-proxy    (4534)  Subsonic filter proxy
 #   nd-organizer-essentia (8101)  ML analysis (genre/mood, structure, chords, BPM/key, fingerprinting)
 #
-# Services (optional, commented out):
+# Services (optional):
 #   nd-organizer-mariadb  (3306)  MySQL for persistent plugin state
 #   nd-organizer-mysql    (8098)  MySQL KV bridge sidecar
 #   octo-fiesta           (4535)  missing-track proxy (third-party, see below)
@@ -264,40 +264,40 @@ services:
       - stack_network
 
   # ===== MySQL (OPTIONAL - for persistent KVStore) =====
-  # Uncomment to deploy. When enabled, the plugin's state (ratings, playcounts,
-  # scan cache) lives in MySQL instead of Navidrome's SQLite. Set
-  # persistenceBackend=mysql in the plugin settings.
-  # nd-organizer-mariadb:
-  #   image: docker.io/library/mariadb:11.8
-  #   container_name: nd-organizer-mariadb
-  #   restart: unless-stopped
-  #   ports:
-  #     - "3306:3306"
-  #   environment:
-  #     - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-navidrome}
-  #     - MYSQL_DATABASE=navidrome
-  #     - MYSQL_USER=navidrome
-  #     - MYSQL_PASSWORD=${MYSQL_PASSWORD:-navidrome}
-  #   volumes:
-  #     - mariadb_data:/var/lib/mysql
-  #   networks:
-  #     - stack_network
+  # Deploy to persist plugin state (ratings, playcounts, scan cache) in MySQL
+  # instead of Navidrome's SQLite. Set persistenceBackend=mysql in the plugin
+  # settings. The sidecar auto-migrates existing local data on first run.
+  nd-organizer-mariadb:
+    image: docker.io/library/mariadb:11.8
+    container_name: nd-organizer-mariadb
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-navidrome}
+      - MYSQL_DATABASE=navidrome
+      - MYSQL_USER=navidrome
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-navidrome}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - stack_network
 
-  # nd-organizer-mysql:
-  #   image: ghcr.io/lunatixz/nd-organizer/mysql:latest
-  #   container_name: nd-organizer-mysql
-  #   restart: unless-stopped
-  #   ports:
-  #     - "8098:8098"
-  #   environment:
-  #     - WEBHOOK_URL=http://nd-organizer-webhook:8099
-  #     - MYSQL_HOST=nd-organizer-mariadb
-  #     - MYSQL_PORT=3306
-  #     - MYSQL_DATABASE=navidrome
-  #     - MYSQL_USER=navidrome
-  #     - MYSQL_PASSWORD=${MYSQL_PASSWORD:-navidrome}
-  #   networks:
-  #     - stack_network
+  nd-organizer-mysql:
+    image: ghcr.io/lunatixz/nd-organizer/mysql:latest
+    container_name: nd-organizer-mysql
+    restart: unless-stopped
+    ports:
+      - "8098:8098"
+    environment:
+      - WEBHOOK_URL=http://nd-organizer-webhook:8099
+      - MYSQL_HOST=nd-organizer-mariadb
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=navidrome
+      - MYSQL_USER=navidrome
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-navidrome}
+    networks:
+      - stack_network
 
   # Radio management is now built into the webhook (no separate sidecar).
   # Mount navidrome.db at /data/nd/navidrome.db in the webhook container.

@@ -319,7 +319,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/webhook:latest` | A web dashboard showing status + reports (auto-refreshing). |
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
-| `docker.io/library/mariadb:11.8` | Optional MySQL server for persistent plugin state (ratings, playcounts, scan cache). **Commented out** in the compose. |
+| `docker.io/library/mariadb:11.8` | MySQL server for persistent plugin state (ratings, playcounts, scan cache). Included in the compose. |
 | `ghcr.io/lunatixz/nd-organizer/essentia:latest` | ML analysis using Essentia (genre/mood Discogs-400 + MTG-Jamendo, song structure, chords, BPM/key, audio fingerprinting). Falls back to librosa when Essentia is unavailable (BPM/key/structure/chords still work; genre/mood require Essentia models). **Requires library volumes to match Navidrome's mounts.** |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
@@ -330,8 +330,8 @@ By default this is Navidrome's SQLite database. For durable storage across
 plugin resets, you can use MySQL instead.
 
 **Quick start:**
-1. Uncomment `nd-organizer-mariadb` and `nd-organizer-mysql` in docker-compose.yml
-2. Set MySQL credentials in `.env`:
+1. MySQL services are included in the compose (MariaDB + mysql sidecar)
+2. Set MySQL credentials in `.env` (optional, defaults work):
    ```
    MYSQL_ROOT_PASSWORD=your_root_password
    MYSQL_PASSWORD=your_app_password
@@ -343,7 +343,7 @@ plugin resets, you can use MySQL instead.
    - Set `mysqlPort` = `3306`
    - Set `mysqlName` = `navidrome`
    - Set `mysqlUser` = `navidrome`
-   - Set `mysqlPassword` = (your app password)
+   - Set `mysqlPassword` = `navidrome` (or your custom password)
 4. On first run, the plugin automatically migrates existing data from SQLite to MySQL
 
 The mysql sidecar creates the `kvstore` table automatically. The MySQL
@@ -355,7 +355,7 @@ and `vX.Y.Z` semver tags per release.
 
 Here is the **complete `docker-compose.yml`** — Navidrome plus all sidecars
 (acoustid, webhook, filter proxy, mysql, essentia) on one shared network.
-MySQL/MariaDB and AudioMuse-AI are commented out (optional). Copy it to your
+AudioMuse-AI is commented out (optional, third-party). Copy it to your
 NAS, fill in the paths, then run `docker compose up -d`:
 
 ```yaml
@@ -555,6 +555,22 @@ services:
       - NAVIDROME_URL=http://navidrome:4533
       - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
       # - FILTER_KEYWORDS=intro,outro,interlude
+    networks:
+      - stack_network
+
+  nd-organizer-mariadb:
+    image: docker.io/library/mariadb:11.8
+    container_name: nd-organizer-mariadb
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-navidrome}
+      - MYSQL_DATABASE=navidrome
+      - MYSQL_USER=navidrome
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-navidrome}
+    volumes:
+      - mariadb_data:/var/lib/mysql
     networks:
       - stack_network
 
