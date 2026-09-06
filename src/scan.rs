@@ -502,6 +502,11 @@ pub fn index_step(
             skipped += 1;
         }
         i += 1;
+        // Check time after each file — a single large file's tag read can
+        // take several seconds, so we need to break mid-iteration.
+        if scan_start.elapsed() >= time_budget {
+            break;
+        }
     }
 
     // Remove processed files from the list.
