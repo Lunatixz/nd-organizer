@@ -302,6 +302,229 @@ fn post_phase_status(cfg: &Config, library_id: i32, phase: &str) {
     crate::wasm::post_webhook(cfg, &status);
 }
 
+// ---------------------------------------------------------------------------
+// Snapshot scan: two-phase walk → index
+// ---------------------------------------------------------------------------
+
+fn walk_stack_key(library_id: i32) -> String {
+    format!("scan.walkv2.{library_id}")
+}
+fn walk_files_key(library_id: i32) -> String {
+    format!("scan.walkfiles.{library_id}")
+}
+
+/// Phase 1: Walk the directory tree and collect audio file paths + mtimes.
+/// No tag reading — just filesystem traversal. Each chunk walks until the
+/// time budget expires, saves the accumulated list, and re-enqueues.
+/// When the tree is fully walked, transitions to Phase 2 (index_step).
+pub fn walk_step(
+    cfg: &Config,
+    library_id: i32,
+) -> Result<ScanOutcome, String> {
+    let root = lib_root(library_id)?;
+    let key = walk_stack_key(library_id);
+    let mut stack = load_stack(&key);
+
+    // Load accumulated file list from previous chunks.
+    let files_key = walk_files_key(library_id);
+    let mut files: Vec<(String, i64)> = crate::store::kv()
+        .get(&files_key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
+
+    let scan_start = std::time::Instant::now();
+    let time_budget = std::time::Duration::from_secs(25);
+    let mut dirs_since_check: usize = 0;
+    let mut dirs_walked: usize = 0;
+
+    crate::wasm::log_info(&format!(
+        "walk_step: starting chunk, stack={}, files_so_far={}",
+        stack.len(), files.len()
+    ));
+
+    while let Some(dir_rel) = stack.pop() {
+        if crate::organizer::is_excluded(&dir_rel, &cfg.exclude_paths) {
+            continue;
+        }
+        dirs_since_check += 1;
+        if dirs_since_check >= 10 {
+            dirs_since_check = 0;
+            if scan_start.elapsed() >= time_budget {
+                stack.push(dir_rel);
+                break;
+            }
+        }
+        let dir_path = root.join(&dir_rel);
+        let Ok(entries) = std::fs::read_dir(&dir_path) else {
+            continue;
+        };
+        let mut subdirs: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if cfg.skip_hidden_files && name.starts_with('.') {
+                continue;
+            }
+            let rel = if dir_rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{dir_rel}/{name}")
+            };
+            // Check extension first to skip stat calls on non-audio files.
+            if is_audio(&name) {
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_file() {
+                        let mtime = file_mtime(&entry.path());
+                        files.push((rel, mtime));
+                    }
+                }
+            } else if let Ok(ft) = entry.file_type() {
+                if ft.is_dir() {
+                    subdirs.push(rel);
+                }
+            }
+        }
+        for sub in subdirs.into_iter().rev() {
+            stack.push(sub);
+        }
+        dirs_walked += 1;
+    }
+
+    crate::wasm::log_info(&format!(
+        "walk_step: chunk done, dirs_walked={}, files_total={}, stack_remaining={}",
+        dirs_walked, files.len(), stack.len()
+    ));
+
+    if stack.is_empty() {
+        // Tree fully walked — save file list and transition to index phase.
+        let _ = crate::store::kv().delete(&key);
+        crate::store::kv()
+            .set(&files_key, serde_json::to_vec(&files).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+        crate::wasm::enqueue_index_task(library_id)?;
+        post_scan_status(cfg, library_id, 0, "walk complete");
+        Ok(ScanOutcome::Done)
+    } else {
+        // More directories to walk — save state and re-enqueue.
+        crate::store::kv()
+            .set(&key, serde_json::to_vec(&stack).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+        crate::store::kv()
+            .set(&files_key, serde_json::to_vec(&files).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+        crate::wasm::enqueue_walk_task(library_id)?;
+        post_scan_status(cfg, library_id, 0, &format!("walking... {} files found", files.len()));
+        Ok(ScanOutcome::More)
+    }
+}
+
+/// Phase 2: Index files from the snapshot list collected by walk_step.
+/// Reads tags for each file, stores in KV for group_step. Chunked by
+/// files_per_task to stay under the 30s WASM deadline.
+pub fn index_step(
+    cfg: &Config,
+    library_id: i32,
+) -> Result<(ScanOutcome, usize), String> {
+    let root = lib_root(library_id)?;
+    let files_key = walk_files_key(library_id);
+    let mut files: Vec<(String, i64)> = crate::store::kv()
+        .get(&files_key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
+
+    if files.is_empty() {
+        // Nothing to index — transition to group phase.
+        let _ = crate::store::kv().delete(&files_key);
+        let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
+        crate::wasm::enqueue_group_task(library_id)?;
+        post_scan_status(cfg, library_id, 0, "index complete");
+        return Ok((ScanOutcome::Done, 0));
+    }
+
+    let files_per_task = cfg.files_per_scan_task.max(1);
+    let cap = cfg.max_scan_entries;
+    let pass_count: usize = crate::store::kv()
+        .get(&format!("scan.pass.{library_id}"))
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8_lossy(&v).parse().ok())
+        .unwrap_or(0);
+
+    let scan_start = std::time::Instant::now();
+    let time_budget = std::time::Duration::from_secs(25);
+    let mut processed = 0usize;
+    let mut skipped = 0usize;
+    let mut last_rel = String::new();
+
+    crate::wasm::log_info(&format!(
+        "index_step: starting chunk, files_remaining={}, pass_count={}",
+        files.len(), pass_count
+    ));
+
+    // Process files from the front of the list.
+    let mut i = 0;
+    while i < files.len() {
+        if scan_start.elapsed() >= time_budget {
+            break;
+        }
+        if cap > 0 && pass_count + processed >= cap {
+            break;
+        }
+        if processed >= files_per_task {
+            break;
+        }
+        let (rel, _mtime) = &files[i];
+        last_rel = rel.clone();
+        let abs = root.join(rel);
+        let did_work = index_file(cfg, library_id, rel, &abs)?;
+        if did_work {
+            processed += 1;
+        } else {
+            skipped += 1;
+        }
+        i += 1;
+    }
+
+    // Remove processed files from the list.
+    files.drain(..i);
+    let remaining = files.len();
+
+    // Save remaining files.
+    crate::store::kv()
+        .set(&files_key, serde_json::to_vec(&files).unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    let _ = crate::store::kv().set(
+        &format!("scan.pass.{library_id}"),
+        (pass_count + processed).to_string().into_bytes(),
+    );
+
+    crate::wasm::log_info(&format!(
+        "index_step: chunk done, processed={}, skipped={}, remaining={}",
+        processed, skipped, remaining
+    ));
+
+    let capped = cap > 0 && pass_count + processed >= cap;
+
+    if capped {
+        post_scan_status(cfg, library_id, processed, &last_rel);
+        Ok((ScanOutcome::Paused, processed))
+    } else if remaining > 0 {
+        crate::wasm::enqueue_index_task(library_id)?;
+        post_scan_status(cfg, library_id, processed, &last_rel);
+        Ok((ScanOutcome::More, processed))
+    } else {
+        // All files indexed — transition to group phase.
+        let _ = crate::store::kv().delete(&files_key);
+        let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
+        crate::wasm::enqueue_group_task(library_id)?;
+        post_scan_status(cfg, library_id, processed, &last_rel);
+        Ok((ScanOutcome::Done, processed))
+    }
+}
+
 /// AcoustID circuit breaker: when the sidecar drops mid-run, pause the batch
 /// (retry window), then stop for a cooldown, then resume WITHOUT fingerprinting
 /// rather than blocking the run on Nx30s timeouts. State is just a failure

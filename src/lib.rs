@@ -131,6 +131,14 @@ pub(crate) mod wasm {
         enqueue("scan", library_id, "", "")
     }
 
+    pub(crate) fn enqueue_walk_task(library_id: i32) -> Result<(), String> {
+        enqueue("walk", library_id, "", "")
+    }
+
+    pub(crate) fn enqueue_index_task(library_id: i32) -> Result<(), String> {
+        enqueue("index", library_id, "", "")
+    }
+
     pub(crate) fn enqueue_group_task(library_id: i32) -> Result<(), String> {
         enqueue("group", library_id, "", "")
     }
@@ -348,6 +356,22 @@ pub(crate) mod wasm {
                             ),
                         })
                     }
+                    Err(e) => Err(e),
+                },
+                "walk" => match super::scan::walk_step(&cfg, payload.library_id) {
+                    Ok(outcome) => Ok(match outcome {
+                        super::scan::ScanOutcome::More => "walk: more directories to scan".into(),
+                        super::scan::ScanOutcome::Done => "walk: directory tree fully cataloged".into(),
+                        super::scan::ScanOutcome::Paused => "walk: paused at maxScanEntries".into(),
+                    }),
+                    Err(e) => Err(e),
+                },
+                "index" => match super::scan::index_step(&cfg, payload.library_id) {
+                    Ok((outcome, n)) => Ok(match outcome {
+                        super::scan::ScanOutcome::More => format!("index: {n} files indexed, more remain"),
+                        super::scan::ScanOutcome::Done => format!("index: complete, {n} files indexed"),
+                        super::scan::ScanOutcome::Paused => format!("index: paused at maxScanEntries, {n} this chunk"),
+                    }),
                     Err(e) => Err(e),
                 },
                 "group" => super::scan::group_step(&cfg, payload.library_id)
@@ -647,34 +671,21 @@ pub(crate) mod wasm {
     /// without it; MB-dependent features are skipped for that pass.
     fn required_meta_unreachable(cfg: &Config) -> Option<&'static str> {
         use crate::config::{AcoustIdMode, LidarrMode};
-        let empty = HashMap::new();
+        // Check cached circuit state only — no live HTTP probes here.
+        // Live probes run in background tasks; this function must be instant
+        // because it's called from the 30s scheduler callback.
         if cfg.verify_identity
             && cfg.acoustid_mode != AcoustIdMode::Disabled
             && !cfg.acoustid_url.trim().is_empty()
+            && crate::net::circuit_open("acoustid")
         {
-            let url = format!("{}/health", cfg.acoustid_url.trim_end_matches('/'));
-            if !crate::net::circuit_check("acoustid", &url, &empty, 10_000) {
-                return Some("AcoustID");
-            }
+            return Some("AcoustID");
         }
-        if cfg.lidarr_mode != LidarrMode::Disabled && !cfg.lidarr_url.trim().is_empty() {
-            let mut h = HashMap::new();
-            if !cfg.lidarr_api_key.trim().is_empty() {
-                h.insert("X-Api-Key".to_string(), cfg.lidarr_api_key.clone());
-            }
-            // Resolve through the same candidates as the health check (host
-            // LAN / docker host alias / subnet gateway) so a stale container
-            // IP doesn't block runs when the port is host-published.
-            let base = resolve_url_base(
-                "lidarr",
-                cfg.lidarr_url.trim_end_matches('/'),
-                "/api/v1/system/status",
-                &h,
-            );
-            let url = format!("{base}/api/v1/system/status");
-            if !crate::net::circuit_check("lidarr", &url, &h, 10_000) {
-                return Some("Lidarr");
-            }
+        if cfg.lidarr_mode != LidarrMode::Disabled
+            && !cfg.lidarr_url.trim().is_empty()
+            && crate::net::circuit_open("lidarr")
+        {
+            return Some("Lidarr");
         }
         None
     }
@@ -1366,6 +1377,8 @@ pub(crate) mod wasm {
         // being unreachable means we can't build proper identities or
         // album/track metadata. Skip the run and retry later.
         // MusicBrainz is metadata enrichment — scan continues without it.
+        // NOTE: do NOT do live HTTP probes here — this runs in the 30s
+        // scheduler callback. Check cached circuit state instead.
         if cfg.meta_gate_enabled {
             if let Some(provider) = required_meta_unreachable(cfg) {
                 log_info(&format!(
@@ -1413,12 +1426,12 @@ pub(crate) mod wasm {
             // Reset the display counter so "files indexed so far" reflects the
             // current pass, not the sum of every chunk since the plugin was installed.
             let _ = crate::store::kv().delete(&format!("scan.count.{library_id}"));
-            match enqueue_scan_task(library_id) {
+            match enqueue_walk_task(library_id) {
                 Ok(()) => enqueued += 1,
-                Err(e) => log_warn(&format!("enqueue scan for library {library_id}: {e}")),
+                Err(e) => log_warn(&format!("enqueue walk for library {library_id}: {e}")),
             }
         }
-        log_info(&format!("run pass: enqueued {enqueued} scan tasks"));
+        log_info(&format!("run pass: enqueued {enqueued} walk tasks"));
         Ok(())
     }
 
