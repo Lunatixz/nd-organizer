@@ -338,6 +338,11 @@ pub fn walk_step(
     let time_budget = std::time::Duration::from_secs(25);
     let mut dirs_since_check: usize = 0;
     let mut dirs_walked: usize = 0;
+    let mut entries_since_check: usize = 0;
+    // Cap entries per chunk to avoid one huge directory consuming the entire
+    // 30s budget. Time check runs every 200 entries to avoid syscall overhead.
+    let entries_per_chunk: usize = 500;
+    let mut hit_limit = false;
 
     crate::wasm::log_info(&format!(
         "walk_step: starting chunk, stack={}, files_so_far={}",
@@ -384,11 +389,22 @@ pub fn walk_step(
                     subdirs.push(rel);
                 }
             }
+            entries_since_check += 1;
+            if entries_since_check >= 200 {
+                entries_since_check = 0;
+                if scan_start.elapsed() >= time_budget || files.len() >= entries_per_chunk {
+                    hit_limit = true;
+                    break;
+                }
+            }
         }
         for sub in subdirs.into_iter().rev() {
             stack.push(sub);
         }
         dirs_walked += 1;
+        if hit_limit {
+            break;
+        }
     }
 
     crate::wasm::log_info(&format!(
