@@ -681,6 +681,14 @@ impl Config {
         Ok(Config::from_map(&map))
     }
 
+    /// CRITICAL: NEVER write the full Config back to the Navidrome DB via
+    /// `UPDATE plugin SET config = ...`. The user's API keys, passwords, and
+    /// custom settings live in that JSONB column. Overwriting it with defaults
+    /// (even if most fields match) permanently destroys secrets that cannot be
+    /// recovered. If you need to change a single field, use targeted SQL like
+    /// `UPDATE plugin SET config = json_set(config, '$.mode', 'Apply')` or
+    /// patch only the specific key. This mistake was made on 2026-09-06 and
+    /// wiped all of the user's API keys (AcoustID, Last.fm, Lidarr, etc.).
     pub fn from_map(map: &HashMap<String, String>) -> Config {
         let mut c = Config::default();
         if let Some(v) = map.get("mode") {
