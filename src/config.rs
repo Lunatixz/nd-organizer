@@ -684,7 +684,7 @@ impl Config {
     pub fn from_map(map: &HashMap<String, String>) -> Config {
         let mut c = Config::default();
         if let Some(v) = map.get("mode") {
-            c.mode = if v == "apply" {
+            c.mode = if v.eq_ignore_ascii_case("apply") {
                 Mode::Apply
             } else {
                 Mode::DryRun
