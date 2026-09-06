@@ -251,8 +251,19 @@ pub(crate) mod wasm {
                 },
             );
             if cfg.run_on_startup {
-                if let Err(e) = host::scheduler::schedule_one_time(15, "startup", RUN_SCHEDULE_ID) {
-                    log_warn(&format!("schedule startup run: {e}"));
+                // Enqueue walk tasks directly from init to avoid the tight
+                // scheduler callback timeout. The scheduler path (run_pass)
+                // often exceeds the callback deadline on large libraries.
+                let target_libs = target_libraries(&cfg);
+                if !target_libs.is_empty() {
+                    for &library_id in &target_libs {
+                        let _ = crate::store::kv().delete(&format!("scan.pass.{library_id}"));
+                        let _ = crate::store::kv().delete(&format!("scan.count.{library_id}"));
+                        if let Err(e) = enqueue_walk_task(library_id) {
+                            log_warn(&format!("enqueue walk for library {library_id}: {e}"));
+                        }
+                    }
+                    log_info(&format!("init: enqueued {} walk tasks", target_libs.len()));
                 }
             }
             if !cfg.schedule_cron.trim().is_empty() {
