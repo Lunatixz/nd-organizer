@@ -2,6 +2,7 @@
 // then groups files into albums by their TAGS (not folders) and plans/applies
 // the result. Only available on the wasm target (uses host services).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use nd_pdk::host;
@@ -880,7 +881,13 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 
     let prefix = format!("scan.filev2.{library_id}:");
     let keys = crate::store::kv().list(&prefix).map_err(|e| e.to_string())?;
-    let values = crate::store::kv().get_many(keys).map_err(|e| e.to_string())?;
+    // Batch KV reads to avoid one massive get_many call that exceeds the
+    // WASM deadline. Read in chunks of 1000 keys.
+    let mut values: HashMap<String, Vec<u8>> = HashMap::new();
+    for chunk in keys.chunks(1000) {
+        let batch = crate::store::kv().get_many(chunk.to_vec()).map_err(|e| e.to_string())?;
+        values.extend(batch);
+    }
     crate::wasm::log_info(&format!(
         "group_step: loaded {} indexed files from KVStore",
         values.len()
