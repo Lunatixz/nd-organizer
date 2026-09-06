@@ -122,10 +122,10 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
     let mut hit_limit = false;
     let mut last_rel: String = String::new();
     let _initial_stack = stack.len();
-    // Hard time cap: break out before the 30s WASM deadline regardless of
+    // Hard time cap: break out before the WASM deadline regardless of
     // dir/file counters. Check every 200 dirs to avoid syscall overhead.
     let scan_start = std::time::Instant::now();
-    let time_budget = std::time::Duration::from_secs(25);
+    let time_budget = std::time::Duration::from_secs(15);
     let mut dirs_since_check: usize = 0;
 
     crate::wasm::log_info(&format!(
@@ -335,7 +335,7 @@ pub fn walk_step(
         .unwrap_or_default();
 
     let scan_start = std::time::Instant::now();
-    let time_budget = std::time::Duration::from_secs(25);
+    let time_budget = std::time::Duration::from_secs(15);
     let mut dirs_since_check: usize = 0;
     let mut dirs_walked: usize = 0;
     let mut entries_since_check: usize = 0;
@@ -470,7 +470,9 @@ pub fn index_step(
         .unwrap_or(0);
 
     let scan_start = std::time::Instant::now();
-    let time_budget = std::time::Duration::from_secs(25);
+    // Conservative 15s budget — Navidrome's WASM scheduler kills at ~27s,
+    // not the full 30s. This leaves margin for tag I/O overhead.
+    let time_budget = std::time::Duration::from_secs(15);
     let mut processed = 0usize;
     let mut skipped = 0usize;
     let mut last_rel = String::new();
