@@ -417,7 +417,10 @@ pub fn walk_step(
             }
         }
         for sub in subdirs.into_iter().rev() {
-            stack.push(sub);
+            // Only push subdirs not already visited or queued.
+            if !visited_dirs.contains(&sub) && !stack.contains(&sub) {
+                stack.push(sub);
+            }
         }
         dirs_walked += 1;
         if hit_limit {
