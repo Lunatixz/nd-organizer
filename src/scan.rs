@@ -546,6 +546,32 @@ pub fn index_step(
         Ok((ScanOutcome::More, processed))
     } else {
         // All files indexed — transition to group phase.
+        // Save the complete indexed file list to a single KV entry so
+        // group_step can load it without paginated list() calls.
+        // The host KV list() is paginated and can't return all keys.
+        let indexed_key = format!("scan.indexed.{library_id}");
+        let mut indexed_files: Vec<(String, TrackTags)> = Vec::new();
+        for (rel, _mtime) in &files {
+            let key = file_key(library_id, rel);
+            if let Ok(Some(v)) = crate::store::kv().get(&key) {
+                if let Ok(val) = serde_json::from_slice::<Value>(&v) {
+                    if let Some(tags) = val.get("tags") {
+                        if !tags.is_null() {
+                            if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                                indexed_files.push((rel.clone(), t));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        crate::store::kv()
+            .set(&indexed_key, serde_json::to_vec(&indexed_files).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+        crate::wasm::log_info(&format!(
+            "index_step: saved {} indexed files to single KV entry",
+            indexed_files.len()
+        ));
         let _ = crate::store::kv().delete(&files_key);
         let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
         crate::wasm::enqueue_group_task(library_id)?;
@@ -884,57 +910,19 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         }
     }
 
-    let prefix = format!("scan.filev2.{library_id}:");
-    let keys = crate::store::kv().list(&prefix).map_err(|e| e.to_string())?;
+    let indexed_key = format!("scan.indexed.{library_id}");
+    // Load all indexed files from the single KV entry saved by index_step.
+    // This avoids paginated host KV list() calls which can't return all keys.
+    let entries: Vec<(String, TrackTags)> = crate::store::kv()
+        .get(&indexed_key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
     crate::wasm::log_info(&format!(
-        "group_step: list returned {} keys for prefix '{}'",
-        keys.len(), prefix
+        "group_step: loaded {} indexed files from single KV entry",
+        entries.len()
     ));
-    // Batch KV reads to avoid one massive get_many call that exceeds the
-    // WASM deadline. Read in chunks of 1000 keys.
-    let mut values: HashMap<String, Vec<u8>> = HashMap::new();
-    for (ci, chunk) in keys.chunks(1000).enumerate() {
-        let batch = crate::store::kv().get_many(chunk.to_vec()).map_err(|e| e.to_string())?;
-        crate::wasm::log_info(&format!(
-            "group_step: get_many batch {} returned {} entries",
-            ci, batch.len()
-        ));
-        values.extend(batch);
-    }
-    // Batch KV reads to avoid one massive get_many call that exceeds the
-    // WASM deadline. Read in chunks of 1000 keys.
-    let mut values: HashMap<String, Vec<u8>> = HashMap::new();
-    for chunk in keys.chunks(1000) {
-        let batch = crate::store::kv().get_many(chunk.to_vec()).map_err(|e| e.to_string())?;
-        values.extend(batch);
-    }
-    crate::wasm::log_info(&format!(
-        "group_step: loaded {} indexed files from KVStore",
-        values.len()
-    ));
-
-    let mut entries: Vec<(String, TrackTags)> = Vec::new();
-    for (_k, v) in values {
-        let Ok(val) = serde_json::from_slice::<Value>(&v) else {
-            continue;
-        };
-        let Some(tags) = val.get("tags") else {
-            continue;
-        };
-        if tags.is_null() {
-            continue;
-        }
-        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-            let rel = val
-                .get("rel")
-                .and_then(|r| r.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !rel.is_empty() {
-                entries.push((rel, t));
-            }
-        }
-    }
 
     // Verification: files without a reliable ID are either fingerprinted via
     // AcoustID (giving an album MBID to group by) or left unverified.
