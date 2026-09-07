@@ -911,13 +911,23 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_default();
     crate::wasm::log_info(&format!(
-        "group_step: loaded {} files from indexed key, now reading tags...",
+        "group_step: loaded {} files from indexed key, reading tags in batches...",
         file_list.len()
     ));
 
-    // Read tags from individual KV entries on demand.
+    // Read tags from individual KV entries in time-budgeted batches.
+    let scan_start = std::time::Instant::now();
+    let time_budget = std::time::Duration::from_secs(15);
     let mut entries: Vec<(String, TrackTags)> = Vec::new();
     for (rel, _mtime) in &file_list {
+        if scan_start.elapsed() >= time_budget {
+            crate::wasm::log_info(&format!(
+                "group_step: time budget hit at {}/{} entries, processing partial batch",
+                entries.len(),
+                file_list.len()
+            ));
+            break;
+        }
         let key = file_key(library_id, rel);
         if let Ok(Some(v)) = crate::store::kv().get(&key) {
             if let Ok(val) = serde_json::from_slice::<Value>(&v) {
