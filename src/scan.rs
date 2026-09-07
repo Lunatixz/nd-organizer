@@ -338,6 +338,14 @@ pub fn walk_step(
     // Deduplicate: track already-seen file paths to avoid double-counting
     // when the same directory is walked across multiple chunks.
     let mut seen: std::collections::HashSet<String> = files.iter().map(|(r, _)| r.clone()).collect();
+    // Also track visited directories to avoid re-walking the same dirs.
+    let dirs_key = format!("scan.walkdirs.{library_id}");
+    let mut visited_dirs: std::collections::HashSet<String> = crate::store::kv()
+        .get(&dirs_key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
 
     let scan_start = std::time::Instant::now();
     let time_budget = std::time::Duration::from_secs(15);
@@ -356,6 +364,10 @@ pub fn walk_step(
 
     while let Some(dir_rel) = stack.pop() {
         if crate::organizer::is_excluded(&dir_rel, &cfg.exclude_paths) {
+            continue;
+        }
+        // Skip directories already fully walked in previous chunks.
+        if !visited_dirs.insert(dir_rel.clone()) {
             continue;
         }
         dirs_since_check += 1;
@@ -421,6 +433,7 @@ pub fn walk_step(
     if stack.is_empty() {
         // Tree fully walked — save file list and transition to index phase.
         let _ = crate::store::kv().delete(&key);
+        let _ = crate::store::kv().delete(&dirs_key);
         crate::store::kv()
             .set(&files_key, serde_json::to_vec(&files).unwrap_or_default())
             .map_err(|e| e.to_string())?;
@@ -434,6 +447,9 @@ pub fn walk_step(
             .map_err(|e| e.to_string())?;
         crate::store::kv()
             .set(&files_key, serde_json::to_vec(&files).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+        crate::store::kv()
+            .set(&dirs_key, serde_json::to_vec(&visited_dirs).unwrap_or_default())
             .map_err(|e| e.to_string())?;
         crate::wasm::enqueue_walk_task(library_id)?;
         post_scan_status(cfg, library_id, 0, &format!("walking... {} files found", files.len()));
