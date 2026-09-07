@@ -335,6 +335,10 @@ pub fn walk_step(
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_default();
 
+    // Deduplicate: track already-seen file paths to avoid double-counting
+    // when the same directory is walked across multiple chunks.
+    let mut seen: std::collections::HashSet<String> = files.iter().map(|(r, _)| r.clone()).collect();
+
     let scan_start = std::time::Instant::now();
     let time_budget = std::time::Duration::from_secs(15);
     let mut dirs_since_check: usize = 0;
@@ -380,8 +384,9 @@ pub fn walk_step(
             // Check extension first to skip stat calls on non-audio files.
             if is_audio(&name) {
                 if let Ok(ft) = entry.file_type() {
-                    if ft.is_file() {
+                    if ft.is_file() && !seen.contains(&rel) {
                         let mtime = file_mtime(&entry.path());
+                        seen.insert(rel.clone());
                         files.push((rel, mtime));
                     }
                 }
@@ -881,6 +886,21 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 
     let prefix = format!("scan.filev2.{library_id}:");
     let keys = crate::store::kv().list(&prefix).map_err(|e| e.to_string())?;
+    crate::wasm::log_info(&format!(
+        "group_step: list returned {} keys for prefix '{}'",
+        keys.len(), prefix
+    ));
+    // Batch KV reads to avoid one massive get_many call that exceeds the
+    // WASM deadline. Read in chunks of 1000 keys.
+    let mut values: HashMap<String, Vec<u8>> = HashMap::new();
+    for (ci, chunk) in keys.chunks(1000).enumerate() {
+        let batch = crate::store::kv().get_many(chunk.to_vec()).map_err(|e| e.to_string())?;
+        crate::wasm::log_info(&format!(
+            "group_step: get_many batch {} returned {} entries",
+            ci, batch.len()
+        ));
+        values.extend(batch);
+    }
     // Batch KV reads to avoid one massive get_many call that exceeds the
     // WASM deadline. Read in chunks of 1000 keys.
     let mut values: HashMap<String, Vec<u8>> = HashMap::new();
