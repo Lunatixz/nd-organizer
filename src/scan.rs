@@ -562,17 +562,27 @@ pub fn index_step(
 
     let capped = cap > 0 && pass_count + processed >= cap;
 
-    if remaining == 0 {
-        // All files indexed — save complete list to single KV entry for group_step.
-        let indexed_key = format!("scan.indexed.{library_id}");
-        let mut indexed_files: Vec<(String, TrackTags)> = Vec::new();
-        for (rel, _mtime) in &files {
-            let key = file_key(library_id, rel);
-            if let Ok(Some(v)) = crate::store::kv().get(&key) {
-                if let Ok(val) = serde_json::from_slice::<Value>(&v) {
-                    if let Some(tags) = val.get("tags") {
-                        if !tags.is_null() {
-                            if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+    // Always save the indexed file list to single KV entry for group_step.
+    // Build the complete list: load tags from individual KV entries for files
+    // that were indexed in this chunk.
+    let indexed_key = format!("scan.indexed.{library_id}");
+    // Load existing indexed list (from previous chunks) if any.
+    let mut indexed_files: Vec<(String, TrackTags)> = crate::store::kv()
+        .get(&indexed_key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
+    // Add newly indexed files from individual KV entries.
+    for (rel, _mtime) in &files {
+        let key = file_key(library_id, rel);
+        if let Ok(Some(v)) = crate::store::kv().get(&key) {
+            if let Ok(val) = serde_json::from_slice::<Value>(&v) {
+                if let Some(tags) = val.get("tags") {
+                    if !tags.is_null() {
+                        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                            // Only add if not already in the list.
+                            if !indexed_files.iter().any(|(r, _)| r == rel) {
                                 indexed_files.push((rel.clone(), t));
                             }
                         }
@@ -580,13 +590,16 @@ pub fn index_step(
                 }
             }
         }
-        crate::store::kv()
-            .set(&indexed_key, serde_json::to_vec(&indexed_files).unwrap_or_default())
-            .map_err(|e| e.to_string())?;
-        crate::wasm::log_info(&format!(
-            "index_step: saved {} indexed files to single KV entry",
-            indexed_files.len()
-        ));
+    }
+    crate::store::kv()
+        .set(&indexed_key, serde_json::to_vec(&indexed_files).unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    crate::wasm::log_info(&format!(
+        "index_step: saved {} indexed files to single KV entry (remaining={})",
+        indexed_files.len(), remaining
+    ));
+
+    if remaining == 0 {
         let _ = crate::store::kv().delete(&files_key);
         let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
         crate::wasm::enqueue_group_task(library_id)?;
