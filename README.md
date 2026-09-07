@@ -301,6 +301,39 @@ metadata from the available sources with automatic fallback chains:
 - **Chords**: Essentia (primary), librosa (fallback)
 - **Structure**: Essentia (primary), librosa (fallback)
 
+### Pipeline phases
+
+The plugin processes your library in sequential phases. Each phase is visible on the webhook dashboard.
+
+| Phase | What it does | Duration |
+|-------|-------------|----------|
+| **Walk** | Discovers all audio files in the library tree. Collects file paths + mtimes. Deduplicates across chunks. | ~15-60 min (library size dependent) |
+| **Index** | Reads tags (MP3/FLAC metadata) for new/changed files. Skips unchanged files via mtime. Saves complete file list for group phase. | ~15-30 min |
+| **Group** | Loads indexed files, reads tags from KV, verifies identities via AcoustID, groups files into albums by MBID/artist/album/year. Enqueues plan tasks. | ~15-30 min (AcoustID calls) |
+| **Plan Move** | For each album batch: moves files to organized folders, writes NFO, records rollback. Dry-run generates report; apply executes moves. | Per batch |
+| **Plan Enrich** | Per-album metadata enrichment: auto-tag, ReplayGain, artwork, lyrics, genre, acoustic tags, Lidarr refresh. Network-heavy. | Per album |
+| **Cleanup** | Removes empty-of-audio folders (optional). | Fast |
+
+### Metadata caching
+
+All external metadata providers cache results in the plugin's KV store:
+
+| Provider | Cache TTL | What's cached |
+|----------|-----------|---------------|
+| MusicBrainz | 7 days | Release lookup, tracklist, genres |
+| Cover Art Archive | 7 days | Album artwork bytes |
+| Apple Music | Configurable (7d) | Artist ID, artwork, bios, similar artists |
+| TheAudioDB | 7 days | Artist/album search, artwork |
+| Discogs | 7 days | Release search, credits |
+| Genius | — | Song search, lyrics |
+| LRCLIB | 7 days | Lyrics |
+| AcoustID | 7 days | File identity |
+| Essentia | 7 days | Fingerprint |
+| AudioMuse | 7 days | Acoustic tags |
+| ReplayGain | 7 days | Loudness analysis |
+
+Circuit breakers protect all providers: Retry (5min) → Cooldown (30min) → Degraded (proceed without). Auto-recovery via throttled health probes.
+
 ### Community vs personal ratings
 
 By default, ratings are **personal** — based on your own play/skip behavior and
