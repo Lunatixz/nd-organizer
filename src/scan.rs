@@ -541,13 +541,11 @@ pub fn index_step(
         }
     }
 
-    // Remove processed files from the list.
-    files.drain(..i);
-    let remaining = files.len();
-
-    // Always save the remaining file list (even on time/cap break).
+    // Save the complete file list to indexed key for group_step.
+    // Don't drain — the full list is always saved.
+    let indexed_key = format!("scan.indexed.{library_id}");
     crate::store::kv()
-        .set(&files_key, serde_json::to_vec(&files).unwrap_or_default())
+        .set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default())
         .map_err(|e| e.to_string())?;
     let _ = crate::store::kv().set(
         &format!("scan.pass.{library_id}"),
@@ -555,37 +553,22 @@ pub fn index_step(
     );
 
     crate::wasm::log_info(&format!(
-        "index_step: chunk done, processed={}, skipped={}, remaining={}",
-        processed, skipped, remaining
+        "index_step: chunk done, processed={}, skipped={}, files_total={}",
+        processed, skipped, files.len()
     ));
 
     let capped = cap > 0 && pass_count + processed >= cap;
 
-    // Always save the indexed file list to single KV entry for group_step.
-    // Save directly from the files vector (paths + mtimes). The group_step
-    // will read tags from individual KV entries on demand.
-    let indexed_key = format!("scan.indexed.{library_id}");
-    crate::store::kv()
-        .set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default())
-        .map_err(|e| e.to_string())?;
-    crate::wasm::log_info(&format!(
-        "index_step: saved {} files to indexed key (remaining={})",
-        files.len(), remaining
-    ));
-
-    if remaining == 0 {
+    if capped {
+        post_scan_status(cfg, library_id, processed, &last_rel);
+        Ok((ScanOutcome::Paused, processed))
+    } else {
+        // All files done — save indexed key, clean up, enqueue group.
         let _ = crate::store::kv().delete(&files_key);
         let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
         crate::wasm::enqueue_group_task(library_id)?;
         post_scan_status(cfg, library_id, processed, &last_rel);
         Ok((ScanOutcome::Done, processed))
-    } else if capped {
-        post_scan_status(cfg, library_id, processed, &last_rel);
-        Ok((ScanOutcome::Paused, processed))
-    } else {
-        crate::wasm::enqueue_index_task(library_id)?;
-        post_scan_status(cfg, library_id, processed, &last_rel);
-        Ok((ScanOutcome::More, processed))
     }
 }
 
