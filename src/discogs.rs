@@ -45,6 +45,8 @@ pub mod host_discogs {
         if cfg.discogs_token.is_empty() {
             return None;
         }
+        let cache_key = format!("discogs:search:{}|{}", artist, album);
+        net::cached(&cache_key, 7 * 86400, || {
         if !net::circuit_probe(
             "discogs",
             "https://api.discogs.com",
@@ -100,6 +102,7 @@ pub mod host_discogs {
                 None
             }
         }
+        }) // end net::cached
     }
 
     /// Fetch credits for a Discogs release ID.
@@ -107,13 +110,15 @@ pub mod host_discogs {
         if cfg.discogs_token.is_empty() {
             return Vec::new();
         }
+        let cache_key = format!("discogs:credits:{}", release_id);
+        net::cached(&cache_key, 7 * 86400, || {
         if !net::circuit_probe(
             "discogs",
             "https://api.discogs.com",
             &HashMap::new(),
             10_000,
         ) {
-            return Vec::new();
+            return Some(Vec::new());
         }
         let url = format!("https://api.discogs.com/releases/{}", release_id);
         let req = host::http::HTTPRequest {
@@ -143,13 +148,14 @@ pub mod host_discogs {
                         }
                     }
                 }
-                credits
+                Some(credits)
             }
             _ => {
                 net::circuit_mark_failed("discogs");
-                Vec::new()
+                Some(Vec::new())
             }
         }
+        }).unwrap_or_default() // end net::cached
     }
 
     /// Fetch genre + style tags for an album from Discogs.

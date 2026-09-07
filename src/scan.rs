@@ -1812,7 +1812,7 @@ pub fn plan_enrich_step(
                 }
             }
             if cfg.lyrics_source == "lrclib" || cfg.lyrics_source == "genius" {
-                let n = download_lyrics_for(&root, &plan, &files, cfg.lyrics_format.as_str());
+                let n = download_lyrics_for(&root, &plan, &files, cfg.lyrics_format.as_str(), &cfg.lyrics_source, cfg);
                 if n > 0 {
                     actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
@@ -2426,15 +2426,26 @@ fn download_lyrics_for(
     plan: &crate::organizer::GroupPlan,
     files: &[(String, TrackTags)],
     format: &str,
+    lyrics_source: &str,
+    cfg: &crate::config::Config,
 ) -> usize {
     use std::collections::HashMap;
     let by_src: HashMap<&str, &TrackTags> = files.iter().map(|(r, t)| (r.as_str(), t)).collect();
     let mut written = 0usize;
     for m in &plan.moves {
         let Some(t) = by_src.get(m.from.as_str()) else { continue };
-        let Some(lyr) = crate::lyrics::fetch(&t.artist, &t.title, &t.album, 0) else {
-            continue;
-        };
+        // Try LRCLIB first (always), then Genius as fallback.
+        let lyr = crate::lyrics::fetch(&t.artist, &t.title, &t.album, 0)
+            .or_else(|| {
+                if lyrics_source == "genius" && !cfg.genius_token.is_empty() {
+                    crate::genius::host_genius::search_song(cfg, &t.artist, &t.title)
+                        .and_then(|song| crate::genius::host_genius::get_lyrics(cfg, song.id))
+                        .map(|text| crate::lyrics::Lyrics { synced: None, plain: Some(text) })
+                } else {
+                    None
+                }
+            });
+        let Some(lyr) = lyr else { continue };
         let final_path = root.join(&m.to);
         match crate::lyrics::write_sidecar(&final_path, &lyr, format) {
             Ok(()) => written += 1,

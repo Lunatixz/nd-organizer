@@ -37,6 +37,8 @@ pub mod host_theaudiodb {
         if cfg.theaudiodb_key.is_empty() || !cfg.theaudiodb_fanart {
             return None;
         }
+        let cache_key = format!("tdb:artist:{}", name);
+        net::cached(&cache_key, 7 * 86400, || {
         if !net::circuit_probe(
             "theaudiodb",
             "https://theaudiodb.com",
@@ -79,6 +81,7 @@ pub mod host_theaudiodb {
                 None
             }
         }
+        }) // end net::cached
     }
 
     /// Search for an album by artist + album name.
@@ -86,6 +89,8 @@ pub mod host_theaudiodb {
         if cfg.theaudiodb_key.is_empty() {
             return None;
         }
+        let cache_key = format!("tdb:album:{}|{}", artist, album);
+        net::cached(&cache_key, 7 * 86400, || {
         if !net::circuit_probe(
             "theaudiodb",
             "https://theaudiodb.com",
@@ -126,6 +131,7 @@ pub mod host_theaudiodb {
                 None
             }
         }
+        }) // end net::cached
     }
 
     /// Download album artwork bytes from TheAudioDB.
