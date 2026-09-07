@@ -546,7 +546,7 @@ pub fn index_step(
     files.drain(..i);
     let remaining = files.len();
 
-    // Save remaining files.
+    // Always save the remaining file list (even on time/cap break).
     crate::store::kv()
         .set(&files_key, serde_json::to_vec(&files).unwrap_or_default())
         .map_err(|e| e.to_string())?;
@@ -562,18 +562,8 @@ pub fn index_step(
 
     let capped = cap > 0 && pass_count + processed >= cap;
 
-    if capped {
-        post_scan_status(cfg, library_id, processed, &last_rel);
-        Ok((ScanOutcome::Paused, processed))
-    } else if remaining > 0 {
-        crate::wasm::enqueue_index_task(library_id)?;
-        post_scan_status(cfg, library_id, processed, &last_rel);
-        Ok((ScanOutcome::More, processed))
-    } else {
-        // All files indexed — transition to group phase.
-        // Save the complete indexed file list to a single KV entry so
-        // group_step can load it without paginated list() calls.
-        // The host KV list() is paginated and can't return all keys.
+    if remaining == 0 {
+        // All files indexed — save complete list to single KV entry for group_step.
         let indexed_key = format!("scan.indexed.{library_id}");
         let mut indexed_files: Vec<(String, TrackTags)> = Vec::new();
         for (rel, _mtime) in &files {
@@ -602,6 +592,13 @@ pub fn index_step(
         crate::wasm::enqueue_group_task(library_id)?;
         post_scan_status(cfg, library_id, processed, &last_rel);
         Ok((ScanOutcome::Done, processed))
+    } else if capped {
+        post_scan_status(cfg, library_id, processed, &last_rel);
+        Ok((ScanOutcome::Paused, processed))
+    } else {
+        crate::wasm::enqueue_index_task(library_id)?;
+        post_scan_status(cfg, library_id, processed, &last_rel);
+        Ok((ScanOutcome::More, processed))
     }
 }
 
