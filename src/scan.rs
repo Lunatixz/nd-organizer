@@ -508,6 +508,7 @@ pub fn index_step(
     ));
 
     // Process files from the front of the list.
+    // Pre-filter: skip files whose mtime hasn't changed (already indexed).
     let mut i = 0;
     while i < files.len() {
         if scan_start.elapsed() >= time_budget {
@@ -519,9 +520,16 @@ pub fn index_step(
         if processed >= files_per_task {
             break;
         }
-        let (rel, _mtime) = &files[i];
+        let (rel, stored_mtime) = &files[i];
         last_rel = rel.clone();
         let abs = root.join(rel);
+        // Fast path: skip file if mtime unchanged (already indexed).
+        let current_mtime = file_mtime(&abs);
+        if current_mtime == *stored_mtime {
+            skipped += 1;
+            i += 1;
+            continue;
+        }
         let did_work = index_file(cfg, library_id, rel, &abs)?;
         if did_work {
             processed += 1;
@@ -529,8 +537,6 @@ pub fn index_step(
             skipped += 1;
         }
         i += 1;
-        // Check time after each file — a single large file's tag read can
-        // take several seconds, so we need to break mid-iteration.
         if scan_start.elapsed() >= time_budget {
             break;
         }
