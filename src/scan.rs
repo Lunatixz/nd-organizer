@@ -952,7 +952,17 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let mut essentia_fp_cache: std::collections::HashMap<String, Vec<i32>> =
         std::collections::HashMap::new();
     if cfg.verify_identity {
+        let verify_start = std::time::Instant::now();
+        let verify_budget = std::time::Duration::from_secs(10);
         for (rel, t) in entries {
+            // Time budget: stop verifying after 10s to stay under WASM deadline.
+            if verify_start.elapsed() >= verify_budget {
+                crate::wasm::log_info(&format!(
+                    "group_step: verification time budget hit at {}/{} files",
+                    verified.len(), total_files
+                ));
+                break;
+            }
             // AcoustID dropped mid-batch: pause now; verified files still get
             // grouped, the rest resume next pass. (Degraded mode already
             // fail-fasts in identify_file, so no pause there.)
