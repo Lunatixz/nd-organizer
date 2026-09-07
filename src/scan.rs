@@ -508,7 +508,7 @@ pub fn index_step(
     ));
 
     // Process files from the front of the list.
-    // Pre-filter: skip files whose mtime hasn't changed (already indexed).
+    // Skip files whose mtime hasn't changed (already indexed).
     let mut i = 0;
     while i < files.len() {
         if scan_start.elapsed() >= time_budget {
@@ -523,7 +523,6 @@ pub fn index_step(
         let (rel, stored_mtime) = &files[i];
         last_rel = rel.clone();
         let abs = root.join(rel);
-        // Fast path: skip file if mtime unchanged (already indexed).
         let current_mtime = file_mtime(&abs);
         if current_mtime == *stored_mtime {
             skipped += 1;
@@ -563,40 +562,15 @@ pub fn index_step(
     let capped = cap > 0 && pass_count + processed >= cap;
 
     // Always save the indexed file list to single KV entry for group_step.
-    // Build the complete list: load tags from individual KV entries for files
-    // that were indexed in this chunk.
+    // Save directly from the files vector (paths + mtimes). The group_step
+    // will read tags from individual KV entries on demand.
     let indexed_key = format!("scan.indexed.{library_id}");
-    // Load existing indexed list (from previous chunks) if any.
-    let mut indexed_files: Vec<(String, TrackTags)> = crate::store::kv()
-        .get(&indexed_key)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or_default();
-    // Add newly indexed files from individual KV entries.
-    for (rel, _mtime) in &files {
-        let key = file_key(library_id, rel);
-        if let Ok(Some(v)) = crate::store::kv().get(&key) {
-            if let Ok(val) = serde_json::from_slice::<Value>(&v) {
-                if let Some(tags) = val.get("tags") {
-                    if !tags.is_null() {
-                        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-                            // Only add if not already in the list.
-                            if !indexed_files.iter().any(|(r, _)| r == rel) {
-                                indexed_files.push((rel.clone(), t));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
     crate::store::kv()
-        .set(&indexed_key, serde_json::to_vec(&indexed_files).unwrap_or_default())
+        .set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default())
         .map_err(|e| e.to_string())?;
     crate::wasm::log_info(&format!(
-        "index_step: saved {} indexed files to single KV entry (remaining={})",
-        indexed_files.len(), remaining
+        "index_step: saved {} files to indexed key (remaining={})",
+        files.len(), remaining
     ));
 
     if remaining == 0 {
@@ -946,18 +920,34 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     }
 
     let indexed_key = format!("scan.indexed.{library_id}");
-    // Load all indexed files from the single KV entry saved by index_step.
-    // This avoids paginated host KV list() calls which can't return all keys.
-    let entries: Vec<(String, TrackTags)> = crate::store::kv()
+    // Load file paths + mtimes from the single KV entry saved by index_step.
+    let file_list: Vec<(String, i64)> = crate::store::kv()
         .get(&indexed_key)
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_default();
     crate::wasm::log_info(&format!(
-        "group_step: loaded {} indexed files from single KV entry",
-        entries.len()
+        "group_step: loaded {} files from indexed key, now reading tags...",
+        file_list.len()
     ));
+
+    // Read tags from individual KV entries on demand.
+    let mut entries: Vec<(String, TrackTags)> = Vec::new();
+    for (rel, _mtime) in &file_list {
+        let key = file_key(library_id, rel);
+        if let Ok(Some(v)) = crate::store::kv().get(&key) {
+            if let Ok(val) = serde_json::from_slice::<Value>(&v) {
+                if let Some(tags) = val.get("tags") {
+                    if !tags.is_null() {
+                        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                            entries.push((rel.clone(), t));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Verification: files without a reliable ID are either fingerprinted via
     // AcoustID (giving an album MBID to group by) or left unverified.
