@@ -1084,6 +1084,10 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             "group_step: verified {}/{total_files} files (unverified: {unverified})",
             verified.len()
         ));
+    } else {
+        crate::wasm::log_info(&format!(
+            "group_step: {total_files} files loaded (verify_identity off, all accepted)"
+        ));
     }
 
     // Report files across the library that share an audio fingerprint (size +
@@ -1351,6 +1355,10 @@ pub fn plan_move_step(
     post_phase_status(cfg, library_id, "plan");
     let eff = crate::wasm::effective_config(cfg);
     let cfg = &eff;
+    crate::wasm::log_info(&format!(
+        "plan_move: batch {}/{}, {} album(s), mode={:?}",
+        batch_index + 1, batch_total, groups.len(), cfg.mode
+    ));
     let root = lib_root(library_id)?;
     let mut report_parts = Vec::new();
     let mut actions: Vec<serde_json::Value> = Vec::new();
@@ -1662,6 +1670,23 @@ pub fn plan_enrich_step(
     let eff = crate::wasm::effective_config(cfg);
     let cfg = &eff;
     let root = lib_root(library_id)?;
+
+    // Log enrichment plan for this album.
+    let mut enrichments: Vec<&str> = Vec::new();
+    if cfg.auto_tag_from_mb { enrichments.push("auto-tag"); }
+    if cfg.write_replaygain { enrichments.push("ReplayGain"); }
+    if cfg.embed_artwork || cfg.write_cover_jpg { enrichments.push("artwork"); }
+    if !cfg.lyrics_source.is_empty() { enrichments.push("lyrics"); }
+    if !cfg.genre_source.is_empty() { enrichments.push("genre"); }
+    if cfg.write_acoustic_tags && !cfg.audiomuse_url.trim().is_empty() { enrichments.push("acoustic-tags"); }
+    if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() { enrichments.push("essentia-genres"); }
+    if cfg.lidarr_mode == crate::config::LidarrMode::MetadataPlusRescan && !cfg.lidarr_url.trim().is_empty() { enrichments.push("lidarr-refresh"); }
+    if cfg.scan_after_tag_write { enrichments.push("navidrome-rescan"); }
+    if cfg.write_nfo { enrichments.push("nfo"); }
+    crate::wasm::log_info(&format!(
+        "enrich_step: batch {}/{}, {} album(s), plan: [{}]",
+        batch_index + 1, batch_total, groups.len(), enrichments.join(", ")
+    ));
     let mut report_parts = Vec::new();
     let mut actions: Vec<serde_json::Value> = Vec::new();
     let mut total_autotags = 0usize;
