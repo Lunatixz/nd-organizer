@@ -1058,6 +1058,7 @@ fn content_fingerprint(path: &std::path::Path) -> Option<u64> {
 /// path. Returns how many folders were removed (or would be, in dry-run).
 pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
     let root = lib_root(library_id)?;
+    post_phase_status(cfg, library_id, "cleanup");
     let dry = cfg.mode != crate::config::Mode::Apply;
     let mut deleted = 0usize;
     walk_cleanup(&root, &root, cfg, dry, &mut deleted);
