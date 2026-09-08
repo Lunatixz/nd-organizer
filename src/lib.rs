@@ -139,6 +139,10 @@ pub(crate) mod wasm {
         enqueue("index", library_id, "", "")
     }
 
+    pub(crate) fn enqueue_verify_task(library_id: i32) -> Result<(), String> {
+        enqueue("verify", library_id, "", "")
+    }
+
     pub(crate) fn enqueue_group_task(library_id: i32) -> Result<(), String> {
         enqueue("group", library_id, "", "")
     }
@@ -244,7 +248,7 @@ pub(crate) mod wasm {
                 QUEUE,
                 host::task::QueueConfig {
                     concurrency: 1,
-                    max_retries: 1,
+                    max_retries: 3,
                     backoff_ms: 1_000,
                     delay_ms: 0,
                     retention_ms: 3_600_000,
@@ -382,6 +386,14 @@ pub(crate) mod wasm {
                         super::scan::ScanOutcome::More => format!("index: {n} files indexed, more remain"),
                         super::scan::ScanOutcome::Done => format!("index: complete, {n} files indexed"),
                         super::scan::ScanOutcome::Paused => format!("index: paused at maxScanEntries, {n} this chunk"),
+                    }),
+                    Err(e) => Err(e),
+                },
+                "verify" => match super::scan::verify_step(&cfg, payload.library_id) {
+                    Ok((outcome, n)) => Ok(match outcome {
+                        super::scan::ScanOutcome::More => format!("verify: {n} files verified, more remain"),
+                        super::scan::ScanOutcome::Done => format!("verify: complete, {n} files verified"),
+                        super::scan::ScanOutcome::Paused => format!("verify: paused, {n} this chunk"),
                     }),
                     Err(e) => Err(e),
                 },

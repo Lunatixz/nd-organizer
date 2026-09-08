@@ -572,16 +572,165 @@ pub fn index_step(
         post_scan_status(cfg, library_id, processed, &last_rel);
         Ok((ScanOutcome::Paused, processed))
     } else {
-        // All files done — save indexed key, clean up, enqueue group.
+        // All files done — save indexed key, clean up, enqueue verify.
         post_scan_status(cfg, library_id, processed, &format!(
             "indexing complete: {} files indexed, {} skipped (unchanged)",
             processed, skipped
         ));
         let _ = crate::store::kv().delete(&files_key);
-        let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
-        crate::wasm::enqueue_group_task(library_id)?;
+        crate::wasm::enqueue_verify_task(library_id)?;
         post_scan_status(cfg, library_id, processed, &last_rel);
         Ok((ScanOutcome::Done, processed))
+    }
+}
+
+/// Phase 3: Verify file identities via AcoustID sidecar batch processing.
+/// Loads unverified files, sends them to the acoustid sidecar in batches,
+/// saves verified results to KV, and enqueues group task when complete.
+pub fn verify_step(
+    cfg: &Config,
+    library_id: i32,
+) -> Result<(ScanOutcome, usize), String> {
+    let root = lib_root(library_id)?;
+    post_phase_status(cfg, library_id, "verify");
+
+    // Load the complete indexed file list.
+    let indexed_key = format!("scan.indexed.{library_id}");
+    let file_list: Vec<(String, i64)> = crate::store::kv()
+        .get(&indexed_key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
+
+    // Filter to unverified files (no mbid_album in tags).
+    let unverified: Vec<(String, i64)> = file_list.iter().filter(|(rel, _)| {
+        let key = file_key(library_id, rel);
+        if let Ok(Some(v)) = crate::store::kv().get(&key) {
+            if let Ok(val) = serde_json::from_slice::<Value>(&v) {
+                if let Some(tags) = val.get("tags") {
+                    if !tags.is_null() {
+                        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                            return t.mbid_album.is_empty();
+                        }
+                    }
+                }
+            }
+        }
+        true // No tags or no MBID = unverified
+    }).cloned().collect();
+
+    if unverified.is_empty() {
+        crate::wasm::log_info("verify_step: all files verified, transitioning to group");
+        let _ = crate::store::kv().delete(&indexed_key);
+        let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
+        crate::wasm::enqueue_group_task(library_id)?;
+        post_scan_status(cfg, library_id, 0, "verification complete");
+        return Ok((ScanOutcome::Done, 0));
+    }
+
+    // Process in batches of 50 via acoustid sidecar.
+    let batch_size = 50;
+    let batch: Vec<&(String, i64)> = unverified.iter().take(batch_size).collect();
+    let batch_files: Vec<serde_json::Value> = batch.iter().map(|(rel, mtime)| {
+        let abs = root.join(rel);
+        serde_json::json!({"path": abs.to_string_lossy(), "mtime": mtime})
+    }).collect();
+
+    let acoustid_url = cfg.acoustid_url.trim().trim_end_matches('/');
+    let body = serde_json::json!({
+        "files": batch_files,
+        "acoustidApiKey": cfg.acoustid_api_key,
+    });
+
+    crate::wasm::log_info(&format!(
+        "verify_step: sending {} files to acoustid sidecar",
+        batch.len()
+    ));
+
+    let req = host::http::HTTPRequest {
+        method: "POST".into(),
+        url: format!("{}/batch", acoustid_url),
+        headers: std::collections::HashMap::new(),
+        no_follow_redirects: false,
+        body: body.to_string().into_bytes(),
+        timeout_ms: 300_000, // 5 minutes for batch
+    };
+
+    match host::http::send(req) {
+        Ok(Some(resp)) if resp.status_code == 200 => {
+            let result: serde_json::Value = serde_json::from_slice(&resp.body)
+                .map_err(|e| format!("bad batch response: {e}"))?;
+
+            // Save verified results to individual KV entries.
+            if let Some(results) = result.get("results").and_then(|r| r.as_array()) {
+                for r in results {
+                    if let Some(path) = r.get("path").and_then(|p| p.as_str()) {
+                        if let Some(matches) = r.get("matches").and_then(|m| m.as_array()) {
+                            if let Some(top) = matches.first() {
+                                let album_mbid = top.get("releaseGroups")
+                                    .and_then(|rg| rg.as_array())
+                                    .and_then(|a| a.first())
+                                    .and_then(|g| g.get("id"))
+                                    .and_then(|id| id.as_str())
+                                    .map(String::from)
+                                    .unwrap_or_default();
+                                let recording_mbid = top.get("id")
+                                    .and_then(|id| id.as_str())
+                                    .map(String::from)
+                                    .unwrap_or_default();
+                                // Update the file's tags in KV with the resolved MBIDs.
+                                let rel = path.trim_start_matches(&root.to_string_lossy().to_string())
+                                    .trim_start_matches('/');
+                                let key = file_key(library_id, rel);
+                                if let Ok(Some(v)) = crate::store::kv().get(&key) {
+                                    if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
+                                        if let Some(tags) = val.get_mut("tags") {
+                                            if let Some(t) = tags.as_object_mut() {
+                                                t.insert("mbid_album".into(), serde_json::Value::String(album_mbid));
+                                                t.insert("mbid_recording".into(), serde_json::Value::String(recording_mbid));
+                                            }
+                                        }
+                                        let _ = crate::store::kv().set(&key, val.to_string().into_bytes());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let processed = result.get("processed").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+            crate::wasm::log_info(&format!(
+                "verify_step: processed {}/{} files, {} remaining",
+                processed, batch.len(), unverified.len() - processed
+            ));
+
+            if unverified.len() > batch_size {
+                // More files to verify — re-enqueue.
+                crate::wasm::enqueue_verify_task(library_id)?;
+                post_scan_status(cfg, library_id, processed, &format!(
+                    "verifying... {}/{} files verified", processed, unverified.len()
+                ));
+                Ok((ScanOutcome::More, processed))
+            } else {
+                // All files verified — transition to group.
+                let _ = crate::store::kv().delete(&indexed_key);
+                let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
+                crate::wasm::enqueue_group_task(library_id)?;
+                post_scan_status(cfg, library_id, processed, "verification complete");
+                Ok((ScanOutcome::Done, processed))
+            }
+        }
+        _ => {
+            crate::wasm::log_warn("verify_step: acoustid sidecar unavailable, skipping verification");
+            // Skip verification — group with existing tags.
+            let _ = crate::store::kv().delete(&indexed_key);
+            let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
+            crate::wasm::enqueue_group_task(library_id)?;
+            post_scan_status(cfg, library_id, 0, "verification skipped (sidecar offline)");
+            Ok((ScanOutcome::Done, 0))
+        }
     }
 }
 
@@ -967,143 +1116,14 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 
     // Verification: files without a reliable ID are either fingerprinted via
     // AcoustID (giving an album MBID to group by) or left unverified.
+    // NOTE: AcoustID verification is now handled by verify_step (sidecar batch).
+    // The group_step just loads verified files from KV.
     let total_files = entries.len();
-    let mut verified: Vec<(String, TrackTags)> = Vec::new();
-    // Essentia fingerprint fallback: when AcoustID fails, compare spectral
-    // fingerprints against already-identified files. Populated lazily.
-    let use_essentia_fp = cfg.essentia_fingerprint && !cfg.essentia_url.trim().is_empty();
-    let mut essentia_fp_cache: std::collections::HashMap<String, Vec<i32>> =
-        std::collections::HashMap::new();
-    if cfg.verify_identity {
-        let verify_start = std::time::Instant::now();
-        let verify_budget = std::time::Duration::from_secs(10);
-        for (rel, t) in entries {
-            // Time budget: stop verifying after 10s to stay under WASM deadline.
-            if verify_start.elapsed() >= verify_budget {
-                crate::wasm::log_info(&format!(
-                    "group_step: verification time budget hit at {}/{} files",
-                    verified.len(), total_files
-                ));
-                break;
-            }
-            // AcoustID dropped mid-batch: pause now; verified files still get
-            // grouped, the rest resume next pass. (Degraded mode already
-            // fail-fasts in identify_file, so no pause there.)
-            if matches!(
-                circuit_stage(),
-                Some(crate::state::AcoustidStage::Retry | crate::state::AcoustidStage::Cooldown)
-            ) {
-                crate::wasm::log_info("AcoustID went offline mid-batch - pausing run; resuming on a later pass");
-                crate::wasm::post_webhook(cfg, "nd-organizer: AcoustID went offline mid-batch - run paused");
-                return Ok((0, 0));
-            }
-            if crate::identity::score(&t, None) >= cfg.min_confidence {
-                verified.push((rel, t));
-            } else {
-                let abs = format!("{real_root}/{rel}");
-                match identify_file(cfg, &abs) {
-                    Some((album_mbid, rec_mbid)) => {
-                        // Persist the resolved identity in the file's own tags
-                        // (apply mode only) so future runs skip AcoustID for it.
-                        if cfg.mode == Mode::Apply && !album_mbid.is_empty() {
-                            if crate::wasm::should_write_tags(cfg, &t.album_artist) {
-                                if cfg.backup_before_write {
-                                    let _ = crate::state::backup_tag_state(
-                                        &crate::wasm::current_run_id(library_id).unwrap_or_default(),
-                                        &abs,
-                                        &t,
-                                    );
-                                }
-                                if let Err(e) = crate::tags::write_mbids(
-                                    Path::new(&abs),
-                                    &album_mbid,
-                                    rec_mbid.as_deref(),
-                                    cfg.overwrite_existing_tags,
-                                ) {
-                                    crate::wasm::log_warn(&format!("write MBID tags {rel}: {e}"));
-                                }
-                            }
-                        }
-                        let mut t2 = t;
-                        t2.mbid_album = album_mbid;
-                        verified.push((rel, t2));
-                    }
-                    None => {
-                        // Essentia fingerprint fallback: when AcoustID fails,
-                        // compare spectral fingerprint against already-identified files.
-                        let mut matched = false;
-                        if use_essentia_fp {
-                            if let Some(fp) = essentia_fingerprint_for(cfg, &abs) {
-                                let mut compared = 0;
-                                for (crel, ct) in verified.iter().rev() {
-                                    if compared >= 100 { break; }
-                                    if ct.mbid_album.is_empty() { continue; }
-                                    compared += 1;
-                                    let cabs = format!("{real_root}/{crel}");
-                                    let cfp = if let Some(cached) = essentia_fp_cache.get(&cabs) {
-                                        cached.clone()
-                                    } else if let Some(fetched) = essentia_fingerprint_for(cfg, &cabs) {
-                                        essentia_fp_cache.insert(cabs, fetched.clone());
-                                        fetched
-                                    } else {
-                                        continue;
-                                    };
-                                    if jaccard_similarity(&fp, &cfp) >= 0.95 {
-                                        crate::wasm::log_info(&format!(
-                                            "essentia_fp: identified {rel} via fingerprint match with {crel} (album: {})",
-                                            ct.mbid_album
-                                        ));
-                                        let mut t2 = t.clone();
-                                        t2.mbid_album = ct.mbid_album.clone();
-                                        if cfg.mode == Mode::Apply
-                                            && crate::wasm::should_write_tags(cfg, &t2.album_artist)
-                                        {
-                                            if cfg.backup_before_write {
-                                                let _ = crate::state::backup_tag_state(
-                                                    &crate::wasm::current_run_id(library_id)
-                                                        .unwrap_or_default(),
-                                                    &abs,
-                                                    &t2,
-                                                );
-                                            }
-                                            if let Err(e) = crate::tags::write_mbids(
-                                                Path::new(&abs),
-                                                &ct.mbid_album,
-                                                None,
-                                                cfg.overwrite_existing_tags,
-                                            ) {
-                                                crate::wasm::log_warn(&format!(
-                                                    "write Essentia fallback MBID tags {rel}: {e}"
-                                                ));
-                                            }
-                                        }
-                                        verified.push((rel.clone(), t2));
-                                        matched = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if !matched {
-                            if cfg.skip_unverified {
-                                crate::wasm::log_info(&format!(
-                                    "skip_unverified: skipping unverified file {rel}"
-                                ));
-                            } else {
-                                verified.push((rel, t));
-                            }
-                        }
-                    }
-                }
-            }
-            // Post-file time check: break mid-iteration if budget exceeded.
-            if verify_start.elapsed() >= verify_budget {
-                break;
-            }
-        }
-    } else {
-        verified = entries;
-    }
+    let verified: Vec<(String, TrackTags)> = entries;
+
+    crate::wasm::log_info(&format!(
+        "group_step: {total_files} files loaded for grouping"
+    ));
 
     if cfg.verify_identity {
         let unverified = total_files - verified.len();

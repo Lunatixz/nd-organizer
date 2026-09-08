@@ -256,6 +256,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad request: %s" % e})
 
         path = req.get("path", "")
+        # Batch processing: process multiple files in one request.
+        if self.path.startswith("/batch"):
+            return self._handle_batch(req)
         # ReplayGain-only request: compute loudness for any file, no AcoustID.
         if self.path.startswith("/replaygain"):
             if not path or not os.path.exists(path):
