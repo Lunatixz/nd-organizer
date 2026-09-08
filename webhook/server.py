@@ -889,7 +889,7 @@ def service_cards(skip=None):
     hidden entirely (they're not running)."""
     skip = skip or set()
     now = time.time()
-    skip.update({"webhook", "proxy"})  # internal services, not user-facing
+    skip.update({"webhook", "proxy", "essentia"})  # internal/already-reported
     cards = ""
     for name in sorted(services):
         if name.lower() in skip:

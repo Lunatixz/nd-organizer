@@ -929,10 +929,12 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     ));
 
     // Read tags from individual KV entries in time-budgeted batches.
+    // Use get_many for batch reads instead of individual get() calls.
     let scan_start = std::time::Instant::now();
     let time_budget = std::time::Duration::from_secs(15);
     let mut entries: Vec<(String, TrackTags)> = Vec::new();
-    for (rel, _mtime) in &file_list {
+    let batch_size = 500;
+    for chunk in file_list.chunks(batch_size) {
         if scan_start.elapsed() >= time_budget {
             crate::wasm::log_info(&format!(
                 "group_step: time budget hit at {}/{} entries, processing partial batch",
@@ -941,13 +943,21 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             ));
             break;
         }
-        let key = file_key(library_id, rel);
-        if let Ok(Some(v)) = crate::store::kv().get(&key) {
-            if let Ok(val) = serde_json::from_slice::<Value>(&v) {
-                if let Some(tags) = val.get("tags") {
-                    if !tags.is_null() {
-                        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-                            entries.push((rel.clone(), t));
+        let keys: Vec<String> = chunk
+            .iter()
+            .map(|(rel, _)| file_key(library_id, rel))
+            .collect();
+        if let Ok(values) = crate::store::kv().get_many(keys) {
+            for (rel, _mtime) in chunk {
+                let key = file_key(library_id, rel);
+                if let Some(v) = values.get(&key) {
+                    if let Ok(val) = serde_json::from_slice::<Value>(v) {
+                        if let Some(tags) = val.get("tags") {
+                            if !tags.is_null() {
+                                if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                                    entries.push((rel.clone(), t));
+                                }
+                            }
                         }
                     }
                 }
