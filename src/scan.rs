@@ -1096,6 +1096,10 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
                     }
                 }
             }
+            // Post-file time check: break mid-iteration if budget exceeded.
+            if verify_start.elapsed() >= verify_budget {
+                break;
+            }
         }
     } else {
         verified = entries;
