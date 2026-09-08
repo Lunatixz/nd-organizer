@@ -216,7 +216,7 @@ sync and scrobble will retry automatically via the circuit breaker.
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `starTallyEnabled` | true | Master switch for the rating system |
-| `scrobbleProvider` | none | Scrobble backend: none/lastfm/librefm |
+| `scrobbleProvider` | lastfm | Scrobble backend: none/lastfm/librefm |
 | `ratingSyncWriteToLidarr` | false | Push ratings to Lidarr (track + album) |
 | `ratingSyncPullFromNavidrome` | false | Import manual ratings from Navidrome UI |
 | `favoritesSyncLastfm` | false | Bidirectional loved sync with Last.fm/Libre.fm (uses scrobbleProvider) |

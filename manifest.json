@@ -923,6 +923,12 @@
           "default": false,
           "description": "Scrobble full listens (>= starFullPlayPercent) to ListenBrainz and push track/album/artist ratings. DUPLICATE WARNING: if Navidrome's own ListenBrainz scrobbler is also running, plays will be double-counted. Disable it before enabling this. RECOMMENDATION: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage across both platforms. Uses the same token as musicbrainzToken (MusicBrainz ecosystem, same account). For deduplication across multiple sources, use multi-scrobbler (github.com/foxxmd/multi-scrobbler) instead."
         },
+        "listenbrainzUser": {
+          "type": "string",
+          "title": "ListenBrainz username",
+          "default": "",
+          "description": "ListenBrainz username. Defaults to lastfmUser if empty."
+        },
         "scrobbleProvider": {
           "type": "string",
           "title": "Scrobble provider",
@@ -938,7 +944,7 @@
           "type": "string",
           "title": "Essentia analysis URL",
           "default": "http://nd-organizer-essentia:8101",
-          "description": "Essentia genre/mood ML sidecar URL. Default is http://nd-organizer-essentia:8080 (Docker container name). Acts as fallback when AudioMuse is unreachable, or primary source when genreFrom=essentia."
+          "description": "Essentia genre/mood ML sidecar URL. Default is http://nd-organizer-essentia:8101 (Docker container name). Acts as fallback when AudioMuse is unreachable, or primary source when genreFrom=essentia."
         },
         "essentiaStructure": {
           "type": "boolean",
@@ -1451,6 +1457,11 @@
             {
               "type": "Control",
               "scope": "#/properties/listenbrainzScrobble"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/listenbrainzUser",
+              "description": "ListenBrainz username (defaults to lastfmUser if empty)"
             },
             {
               "type": "Control",

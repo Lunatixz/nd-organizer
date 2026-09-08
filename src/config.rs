@@ -602,10 +602,6 @@ impl Config {
             "backupBeforeWrite",
             "backupRetentionDays",
             "rollbackRetentionDays",
-            "illegalCharReplacement",
-            "maxNameLength",
-            "pruneEmptyDirs",
-            "skipHiddenFiles",
             "verifyIdentity",
             "minConfidence",
             "skipUnverified",
@@ -673,6 +669,7 @@ impl Config {
             "ratingSyncPullFromNavidrome",
             "useCommunityRatings",
             "listenbrainzUser",
+            "metaGateEnabled",
         ] {
             if let Ok(Some(v)) = nd_pdk::host::config::get(key) {
                 map.insert(key.to_string(), v);
