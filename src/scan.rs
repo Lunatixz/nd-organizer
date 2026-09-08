@@ -603,21 +603,32 @@ pub fn verify_step(
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_default();
 
-    // Filter to unverified files (no mbid_album in tags).
-    let unverified: Vec<(String, i64)> = file_list.iter().filter(|(rel, _)| {
-        let key = file_key(library_id, rel);
-        if let Ok(Some(v)) = crate::store::kv().get(&key) {
-            if let Ok(val) = serde_json::from_slice::<Value>(&v) {
-                if let Some(tags) = val.get("tags") {
-                    if !tags.is_null() {
-                        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-                            return t.mbid_album.is_empty();
+    // Batch-load all file entries to check which lack MBIDs.
+    let file_keys: Vec<String> = file_list.iter().map(|(rel, _)| file_key(library_id, rel)).collect();
+    let batch_size_kv = 500;
+    let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for chunk in file_keys.chunks(batch_size_kv) {
+        if let Ok(entries) = crate::store::kv().get_many(chunk.to_vec()) {
+            for (k, v) in entries {
+                if let Ok(val) = serde_json::from_slice::<Value>(&v) {
+                    if let Some(tags) = val.get("tags") {
+                        if !tags.is_null() {
+                            if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                                if !t.mbid_album.is_empty() {
+                                    // Extract relative path from key: "filev2.{lib}:{hash}"
+                                    // We need the original rel from file_list
+                                    verified_set.insert(k);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        true // No tags or no MBID = unverified
+    }
+
+    let unverified: Vec<(String, i64)> = file_list.iter().filter(|(rel, _)| {
+        !verified_set.contains(&file_key(library_id, rel))
     }).cloned().collect();
 
     if unverified.is_empty() {
