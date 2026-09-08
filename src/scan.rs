@@ -286,6 +286,12 @@ fn post_phase_status(cfg: &Config, library_id: i32, phase: &str) {
         "mode": crate::wasm::mode_label(cfg),
         "inProgress": true,
         "phase": phase,
+        "phaseDetail": match phase {
+            "group" => "Loading indexed files and reading tags from KV store...",
+            "plan" => "Moving files to organized folders and recording rollback...",
+            "enrich" => "Running metadata enrichment (artwork, lyrics, genre, etc.)...",
+            _ => "",
+        },
         "libraries": [{
             "id": library_id,
             "albumsFound": 0,
@@ -455,7 +461,10 @@ pub fn walk_step(
             .set(&dirs_key, serde_json::to_vec(&visited_dirs).unwrap_or_default())
             .map_err(|e| e.to_string())?;
         crate::wasm::enqueue_walk_task(library_id)?;
-        post_scan_status(cfg, library_id, 0, &format!("walking... {} files found", files.len()));
+        post_scan_status(cfg, library_id, 0, &format!(
+            "walking... {} files found, {} directories remaining",
+            files.len(), stack.len()
+        ));
         Ok(ScanOutcome::More)
     }
 }
@@ -564,6 +573,10 @@ pub fn index_step(
         Ok((ScanOutcome::Paused, processed))
     } else {
         // All files done — save indexed key, clean up, enqueue group.
+        post_scan_status(cfg, library_id, processed, &format!(
+            "indexing complete: {} files indexed, {} skipped (unchanged)",
+            processed, skipped
+        ));
         let _ = crate::store::kv().delete(&files_key);
         let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
         crate::wasm::enqueue_group_task(library_id)?;
@@ -1352,7 +1365,7 @@ pub fn plan_move_step(
     batch_index: i32,
     batch_total: i32,
 ) -> Result<(), String> {
-    post_phase_status(cfg, library_id, "plan");
+    post_phase_status(cfg, library_id, "enrich");
     let eff = crate::wasm::effective_config(cfg);
     let cfg = &eff;
     crate::wasm::log_info(&format!(
