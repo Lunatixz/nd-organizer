@@ -708,34 +708,38 @@ pub fn verify_step(
             if let Some(results) = result.get("results").and_then(|r| r.as_array()) {
                 for r in results {
                     if let Some(path) = r.get("path").and_then(|p| p.as_str()) {
-                        if let Some(matches) = r.get("matches").and_then(|m| m.as_array()) {
-                            if let Some(top) = matches.first() {
-                                let album_mbid = top.get("releaseGroups")
-                                    .and_then(|rg| rg.as_array())
-                                    .and_then(|a| a.first())
-                                    .and_then(|g| g.get("id"))
-                                    .and_then(|id| id.as_str())
-                                    .map(String::from)
-                                    .unwrap_or_default();
-                                let recording_mbid = top.get("id")
-                                    .and_then(|id| id.as_str())
-                                    .map(String::from)
-                                    .unwrap_or_default();
-                                // Update the file's tags in KV with the resolved MBIDs.
-                                let rel = path.trim_start_matches(&root.to_string_lossy().to_string())
-                                    .trim_start_matches('/');
-                                let key = file_key(library_id, rel);
-                                if let Ok(Some(v)) = crate::store::kv().get(&key) {
-                                    if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
-                                        if let Some(tags) = val.get_mut("tags") {
-                                            if let Some(t) = tags.as_object_mut() {
+                        // Update the file's tags in KV with the resolved MBIDs.
+                        let rel = path.trim_start_matches(&root.to_string_lossy().to_string())
+                            .trim_start_matches('/');
+                        let key = file_key(library_id, rel);
+                        if let Ok(Some(v)) = crate::store::kv().get(&key) {
+                            if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
+                                if let Some(tags) = val.get_mut("tags") {
+                                    if let Some(t) = tags.as_object_mut() {
+                                        if let Some(matches) = r.get("matches").and_then(|m| m.as_array()) {
+                                            if let Some(top) = matches.first() {
+                                                let album_mbid = top.get("releaseGroups")
+                                                    .and_then(|rg| rg.as_array())
+                                                    .and_then(|a| a.first())
+                                                    .and_then(|g| g.get("id"))
+                                                    .and_then(|id| id.as_str())
+                                                    .map(String::from)
+                                                    .unwrap_or_default();
+                                                let recording_mbid = top.get("id")
+                                                    .and_then(|id| id.as_str())
+                                                    .map(String::from)
+                                                    .unwrap_or_default();
                                                 t.insert("mbid_album".into(), serde_json::Value::String(album_mbid));
                                                 t.insert("mbid_recording".into(), serde_json::Value::String(recording_mbid));
                                             }
                                         }
-                                        let _ = crate::store::kv().set(&key, val.to_string().into_bytes());
+                                        // Mark file as verified even if no match — prevents re-sending.
+                                        if !t.contains_key("mbid_album") || t.get("mbid_album").map_or(false, |v| v.as_str().unwrap_or("").is_empty()) {
+                                            t.insert("mbid_album".into(), serde_json::Value::String("none".into()));
+                                        }
                                     }
                                 }
+                                let _ = crate::store::kv().set(&key, val.to_string().into_bytes());
                             }
                         }
                     }

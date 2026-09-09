@@ -306,6 +306,9 @@ pub(crate) mod wasm {
             req: SchedulerCallbackRequest,
         ) -> Result<(), nd_pdk::scheduler::Error> {
             let cfg = Config::load().map_err(|e| nd_pdk::scheduler::Error::new(e))?;
+            // Check webhook force-rescan signal on every timer tick (stats or cron).
+            // Without this, the signal sits forever if no scheduleCron is configured.
+            check_force_rescan(&cfg);
             if req.payload == "stats" && cfg.playback_stats_enabled {
                 if let Err(e) = enqueue("stats", 0, "", "") {
                     log_warn(&format!("enqueue stats: {e}"));
