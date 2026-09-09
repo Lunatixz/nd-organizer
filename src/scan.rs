@@ -362,6 +362,9 @@ pub fn walk_step(
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_default();
 
+    // Dedup stack against visited_dirs — removes dead entries from previous chunks.
+    stack.retain(|d| !visited_dirs.contains(d));
+
     let scan_start = std::time::Instant::now();
     let time_budget = std::time::Duration::from_secs(15);
     let mut dirs_since_check: usize = 0;
@@ -432,7 +435,8 @@ pub fn walk_step(
         }
         for sub in subdirs.into_iter().rev() {
             // Only push subdirs not already visited or queued.
-            if !visited_dirs.contains(&sub) && !stack.contains(&sub) {
+            // Use visited_dirs for O(1) lookup instead of stack.contains() which is O(n).
+            if !visited_dirs.contains(&sub) {
                 stack.push(sub);
             }
         }
