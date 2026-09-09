@@ -570,28 +570,13 @@ impl Config {
     #[cfg(target_arch = "wasm32")]
     pub fn load() -> Result<Config, String> {
         let mut map = HashMap::new();
-        // Batch-load all config keys in one KV call instead of 100+
-        // sequential host IPC round-trips. Each round-trip is ~5-10ms,
-        // so 100 calls = 500-1000ms overhead on every task/init.
-        let keys: Vec<String> = CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
-        match crate::store::kv().get_many(keys) {
-            Ok(vals) => {
-                for (k, v) in vals {
-                    if let Ok(s) = String::from_utf8(v) {
-                        if !s.is_empty() {
-                            map.insert(k, s);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                crate::wasm::log_warn(&format!("config: get_many failed ({e}), falling back to individual reads"));
-                // Fallback: individual reads (slower but reliable)
-                for key in CONFIG_KEYS {
-                    if let Ok(Some(v)) = nd_pdk::host::config::get(key) {
-                        map.insert(key.to_string(), v);
-                    }
-                }
+        // Pull every declared key from the host config service. Keys that are
+        // absent are simply not inserted; from_map applies defaults.
+        // Note: Config keys live in the host config service (nd_pdk::host::config),
+        // NOT in the regular KV store — so get_many from kv() won't work here.
+        for key in CONFIG_KEYS {
+            if let Ok(Some(v)) = nd_pdk::host::config::get(key) {
+                map.insert(key.to_string(), v);
             }
         }
         Ok(Config::from_map(&map))
