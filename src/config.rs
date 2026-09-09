@@ -518,161 +518,80 @@ impl Default for Config {
     }
 }
 
+/// All config key names, used by `Config::load()` for batch KV reads.
+const CONFIG_KEYS: &[&str] = &[
+    "mode", "libraryId", "libraries", "runOnStartup", "scheduleCron",
+    "maxAlbumsPerRun", "maxScanEntries", "albumsPerTask", "filesPerScanTask",
+    "runOnlyWhenIdle", "favoritesSyncLastfm", "favoritesSyncMax",
+    "playbackStatsEnabled", "statsPollMinutes", "topPicksCount",
+    "skipThresholdPercent", "keywordFilterEnabled", "skipContentMode",
+    "skipHeavyRatio", "filterUrl", "starTallyEnabled", "starHalfPlayPercent",
+    "starFullPlayPercent", "starIgnorePercent", "starMinSamples",
+    "lovedThresholdStars", "lastfmScrobble", "listenbrainzScrobble",
+    "scrobbleProvider", "lastfmImportPlaycount", "rollbackRunId",
+    "logWebhookUrl", "logWebhookToken", "persistenceBackend", "persistenceUrl",
+    "mysqlHost", "mysqlPort", "mysqlName", "mysqlUser", "mysqlPassword",
+    "soundtrackFolder", "variousFolder", "singlesFolder",
+    "nestBucketsUnderVarious", "incompleteAlbumMinTracks", "classifyFromMB",
+    "readNfo", "writeNfo", "folderSchema", "fileSchema", "renameSidecars",
+    "illegalCharReplacement", "maxNameLength", "pruneEmptyDirs",
+    "cleanupNoAudioFolders", "metaGateEnabled", "parseFilenames",
+    "autoTagFromMB", "detectDuplicates", "writeReplayGain", "replayGainMode",
+    "replayGainReference", "trimMissingDays", "navidromeAdminUser",
+    "navidromeAdminPassword", "skipHiddenFiles", "preserveRecordingType",
+    "singlesUnderArtist", "singlesEnabled", "fillerKeywords", "excludePaths",
+    "moveDestinationLibrary", "backupBeforeWrite", "backupRetentionDays",
+    "rollbackRetentionDays", "verifyIdentity", "minConfidence",
+    "skipUnverified", "acoustidMode", "acoustidApiKey", "acoustidUrl",
+    "primarySource", "musicbrainzToken", "lastfmApiKey", "lastfmUser",
+    "lastfmApiSecret", "lastfmPassword", "genreSource",
+    "overwriteExistingTags", "writePlaycount", "embedArtwork", "writeCoverJpg",
+    "overwriteArt", "artworkSource", "artworkFront", "artworkBack",
+    "artworkCd", "artworkBooklet", "lyricsSource", "lyricsFormat",
+    "lidarrUrl", "lidarrApiKey", "lidarrMode", "writeTagsForTracked",
+    "lidarrForceSearchIncomplete", "useLidarrNamingSchema", "audiomuseUrl",
+    "essentiaUrl", "essentiaStructure", "essentiaChords", "essentiaBpm",
+    "essentiaFingerprint", "audiomuseToken", "notifyAudiomuseAfterRun",
+    "writeAcousticTags", "scanUser", "triggerScanAfterRun", "scanAfterAlbum",
+    "scanAfterTagWrite", "scanDebounceSeconds",
+    "discogsToken", "discogsCredits", "theAudioDbKey", "theAudioDbFanart",
+    "geniusToken",
+    "appleMusicCountries", "appleMusicCacheTtl", "appleMusicArtistImages",
+    "appleMusicArtistBios", "appleMusicSimilarArtists", "appleMusicAlbumArt",
+    "appleMusicAlbumInfo",
+    "librefmScrobble",
+    "favoritesSyncBidirectional", "ratingSyncWriteToLidarr",
+    "ratingSyncPullFromNavidrome", "useCommunityRatings", "listenbrainzUser",
+];
+
 impl Config {
     /// Read config from the Navidrome host. Only available on the wasm target
     /// (host-service imports don't exist in host test builds).
     #[cfg(target_arch = "wasm32")]
     pub fn load() -> Result<Config, String> {
         let mut map = HashMap::new();
-        // Pull every declared key from the host config service. Keys that are
-        // absent are simply not inserted; from_map applies defaults.
-        for key in [
-            "mode",
-            "libraryId",
-            "libraries",
-            "runOnStartup",
-            "scheduleCron",
-            "maxAlbumsPerRun",
-            "maxScanEntries",
-            "albumsPerTask",
-            "filesPerScanTask",
-            "runOnlyWhenIdle",
-            "favoritesSyncLastfm",
-            "favoritesSyncMax",
-            "playbackStatsEnabled",
-            "statsPollMinutes",
-            "topPicksCount",
-            "skipThresholdPercent",
-            "keywordFilterEnabled",
-            "skipContentMode",
-            "skipHeavyRatio",
-            "filterUrl",
-            "starTallyEnabled",
-            "starHalfPlayPercent",
-            "starFullPlayPercent",
-            "starIgnorePercent",
-            "starMinSamples",
-            "lovedThresholdStars",
-            "lastfmScrobble",
-            "listenbrainzScrobble",
-            "scrobbleProvider",
-            "lastfmImportPlaycount",
-            "rollbackRunId",
-            "logWebhookUrl",
-            "logWebhookToken",
-            "persistenceBackend",
-            "persistenceUrl",
-            "mysqlHost",
-            "mysqlPort",
-            "mysqlName",
-            "mysqlUser",
-            "mysqlPassword",
-            "soundtrackFolder",
-            "variousFolder",
-            "singlesFolder",
-            "nestBucketsUnderVarious",
-            "incompleteAlbumMinTracks",
-            "classifyFromMB",
-            "readNfo",
-            "writeNfo",
-            "folderSchema",
-            "fileSchema",
-            "renameSidecars",
-            "illegalCharReplacement",
-            "maxNameLength",
-            "pruneEmptyDirs",
-            "cleanupNoAudioFolders",
-            "metaGateEnabled",
-            "parseFilenames",
-            "autoTagFromMB",
-            "detectDuplicates",
-            "writeReplayGain",
-            "replayGainMode",
-            "replayGainReference",
-            "trimMissingDays",
-            "navidromeAdminUser",
-            "navidromeAdminPassword",
-            "skipHiddenFiles",
-            "preserveRecordingType",
-            "singlesUnderArtist",
-            "singlesEnabled",
-            "fillerKeywords",
-            "excludePaths",
-            "moveDestinationLibrary",
-            "backupBeforeWrite",
-            "backupRetentionDays",
-            "rollbackRetentionDays",
-            "verifyIdentity",
-            "minConfidence",
-            "skipUnverified",
-            "acoustidMode",
-            "acoustidApiKey",
-            "acoustidUrl",
-            "primarySource",
-            "musicbrainzToken",
-            "lastfmApiKey",
-            "lastfmUser",
-            "lastfmApiSecret",
-            "lastfmPassword",
-            "genreSource",
-            "overwriteExistingTags",
-            "writePlaycount",
-            "embedArtwork",
-            "writeCoverJpg",
-            "overwriteArt",
-            "artworkSource",
-            "artworkFront",
-            "artworkBack",
-            "artworkCd",
-            "artworkBooklet",
-            "lyricsSource",
-            "lyricsFormat",
-            "lidarrUrl",
-            "lidarrApiKey",
-            "lidarrMode",
-            "writeTagsForTracked",
-            "lidarrForceSearchIncomplete",
-            "useLidarrNamingSchema",
-            "audiomuseUrl",
-            "essentiaUrl",
-            "essentiaStructure",
-            "essentiaChords",
-            "essentiaBpm",
-            "essentiaFingerprint",
-            "audiomuseToken",
-            "notifyAudiomuseAfterRun",
-            "writeAcousticTags",
-            "scanUser",
-            "triggerScanAfterRun",
-            "scanAfterAlbum",
-            "scanAfterTagWrite",
-            "scanDebounceSeconds",
-            // New metadata sources
-            "discogsToken",
-            "discogsCredits",
-            "theAudioDbKey",
-            "theAudioDbFanart",
-            "geniusToken",
-            // Apple Music
-            "appleMusicCountries",
-            "appleMusicCacheTtl",
-            "appleMusicArtistImages",
-            "appleMusicArtistBios",
-            "appleMusicSimilarArtists",
-            "appleMusicAlbumArt",
-            "appleMusicAlbumInfo",
-            // Libre.fm
-            "librefmScrobble",
-            // Rating sync
-            "favoritesSyncBidirectional",
-            "ratingSyncWriteToLidarr",
-            "ratingSyncPullFromNavidrome",
-            "useCommunityRatings",
-            "listenbrainzUser",
-            "metaGateEnabled",
-        ] {
-            if let Ok(Some(v)) = nd_pdk::host::config::get(key) {
-                map.insert(key.to_string(), v);
+        // Batch-load all config keys in one KV call instead of 100+
+        // sequential host IPC round-trips. Each round-trip is ~5-10ms,
+        // so 100 calls = 500-1000ms overhead on every task/init.
+        let keys: Vec<String> = CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
+        match crate::store::kv().get_many(keys) {
+            Ok(vals) => {
+                for (k, v) in vals {
+                    if let Ok(s) = String::from_utf8(v) {
+                        if !s.is_empty() {
+                            map.insert(k, s);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                crate::wasm::log_warn(&format!("config: get_many failed ({e}), falling back to individual reads"));
+                // Fallback: individual reads (slower but reliable)
+                for key in CONFIG_KEYS {
+                    if let Ok(Some(v)) = nd_pdk::host::config::get(key) {
+                        map.insert(key.to_string(), v);
+                    }
+                }
             }
         }
         Ok(Config::from_map(&map))
