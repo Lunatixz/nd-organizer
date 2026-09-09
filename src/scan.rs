@@ -634,7 +634,7 @@ pub fn verify_step(
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_default();
 
-    // Batch-load all file entries to check which lack MBIDs.
+    // Batch-load all file entries to check which lack MBIDs or haven't been checked.
     let file_keys: Vec<String> = file_list.iter().map(|(rel, _)| file_key(library_id, rel)).collect();
     let batch_size_kv = 500;
     let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -645,11 +645,15 @@ pub fn verify_step(
                     if let Some(tags) = val.get("tags") {
                         if !tags.is_null() {
                             if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                                // Already has a real MBID — no need to verify.
                                 if !t.mbid_album.is_empty() {
-                                    // Extract relative path from key: "filev2.{lib}:{hash}"
-                                    // We need the original rel from file_list
                                     verified_set.insert(k);
+                                    continue;
                                 }
+                            }
+                            // Or was already sent to AcoustID and got no match.
+                            if tags.get("_acoustid_checked").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                verified_set.insert(k);
                             }
                         }
                     }
@@ -733,10 +737,8 @@ pub fn verify_step(
                                                 t.insert("mbid_recording".into(), serde_json::Value::String(recording_mbid));
                                             }
                                         }
-                                        // Mark file as verified even if no match — prevents re-sending.
-                                        if !t.contains_key("mbid_album") || t.get("mbid_album").map_or(false, |v| v.as_str().unwrap_or("").is_empty()) {
-                                            t.insert("mbid_album".into(), serde_json::Value::String("none".into()));
-                                        }
+                                        // Mark file as checked even if no match — prevents re-sending.
+                                        t.insert("_acoustid_checked".into(), serde_json::Value::Bool(true));
                                     }
                                 }
                                 let _ = crate::store::kv().set(&key, val.to_string().into_bytes());
