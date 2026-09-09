@@ -908,8 +908,9 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let indexed_key = format!("scan.indexed.{library_id}");
     let cursor_key = format!("scan.group_cursor.{library_id}");
     let entries_key = format!("scan.group_entries.{library_id}");
+    let remaining_key = format!("scan.group_remaining.{library_id}");
 
-    // Load or initialize file list from indexed key (only on first chunk).
+    // Load or initialize file list (only on first chunk).
     let mut cursor: usize = crate::store::kv()
         .get(&cursor_key)
         .ok()
@@ -919,19 +920,25 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         .unwrap_or(0);
 
     let file_list: Vec<(String, i64)> = if cursor == 0 {
-        // First chunk — load the full file list and save entries key.
+        // First chunk — load the full file list.
         let list: Vec<(String, i64)> = crate::store::kv()
             .get(&indexed_key)
             .ok()
             .flatten()
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
-        // Save the file list size for progress tracking.
         let _ = crate::store::kv().set(&entries_key, list.len().to_string().into_bytes());
+        // Save remaining list for resume.
+        let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&list).unwrap_or_default());
         list
     } else {
-        // Resuming — we don't need the full list, just continue from cursor.
-        // Load the list length to know when we're done.
+        // Resuming — load the saved remaining list (much smaller than full list).
+        let remaining: Vec<(String, i64)> = crate::store::kv()
+            .get(&remaining_key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice(&v).ok())
+            .unwrap_or_default();
         let total: usize = crate::store::kv()
             .get(&entries_key)
             .ok()
@@ -939,22 +946,11 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             .and_then(|v| String::from_utf8(v).ok())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        if total == 0 {
-            // Entries key missing — something went wrong, restart.
-            cursor = 0;
-            Vec::new()
-        } else {
-            crate::wasm::log_info(&format!(
-                "group_step: resuming from cursor {cursor}/{total}"
-            ));
-            // We need the file list to continue. Reload it.
-            crate::store::kv()
-                .get(&indexed_key)
-                .ok()
-                .flatten()
-                .and_then(|v| serde_json::from_slice(&v).ok())
-                .unwrap_or_default()
-        }
+        crate::wasm::log_info(&format!(
+            "group_step: resuming from cursor {cursor}/{total}, {} remaining in list",
+            remaining.len()
+        ));
+        remaining
     };
 
     if file_list.is_empty() {
@@ -1009,9 +1005,11 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         cursor += chunk.len();
     }
 
-    // If we hit the time budget, save cursor and re-enqueue for next chunk.
+    // If we hit the time budget, save remaining list and re-enqueue.
     if hit_budget {
-        let _ = crate::store::kv().set(&cursor_key, cursor.to_string().into_bytes());
+        // Save only the unprocessed remaining files — much smaller than full list.
+        let remaining: Vec<(String, i64)> = file_list[cursor..].to_vec();
+        let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&remaining).unwrap_or_default());
         // Accumulate entries into the entries KV so we don't lose progress.
         let mut prev_entries: Vec<(String, TrackTags)> = crate::store::kv()
             .get(&format!("scan.group_entries.{library_id}"))
@@ -1025,8 +1023,8 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             serde_json::to_vec(&prev_entries).unwrap_or_default(),
         );
         crate::wasm::log_info(&format!(
-            "group_step: time budget hit at {cursor}/{}, saved {} entries, re-enqueueing",
-            file_list.len(), prev_entries.len()
+            "group_step: time budget hit, {} remaining files, saved {} entries, re-enqueueing",
+            remaining.len(), prev_entries.len()
         ));
         crate::wasm::enqueue_group_task(library_id)?;
         return Ok((0, 0));
@@ -1042,6 +1040,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     all_entries.extend(entries);
     let _ = crate::store::kv().delete(&cursor_key);
     let _ = crate::store::kv().delete(&entries_key);
+    let _ = crate::store::kv().delete(&remaining_key);
     let _ = crate::store::kv().delete(&format!("scan.group_entries.{library_id}"));
 
     let total_files = all_entries.len();
