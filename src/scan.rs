@@ -339,9 +339,10 @@ pub fn walk_step(
     let delta_key = format!("scan.walkdelta.{library_id}");
     let mut files: Vec<(String, i64)> = Vec::new();
 
-    // If no delta exists yet, this is the first chunk — clear stale file lists.
+    // If no delta exists yet, this is the first chunk — clear stale file lists and count.
     if crate::store::kv().get(&delta_key).ok().flatten().is_none() {
         let _ = crate::store::kv().delete(&files_key);
+        let _ = crate::store::kv().delete(&format!("scan.walkcount.{library_id}"));
     }
 
     // Load the current file count for the log message (avoid full deserialization).
