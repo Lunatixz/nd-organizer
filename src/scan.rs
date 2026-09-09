@@ -625,50 +625,62 @@ pub fn verify_step(
     let root = lib_root(library_id)?;
     post_phase_status(cfg, library_id, "verify");
 
-    // Load the complete indexed file list.
     let indexed_key = format!("scan.indexed.{library_id}");
-    let file_list: Vec<(String, i64)> = crate::store::kv()
-        .get(&indexed_key)
+    let unverified_key = format!("scan.unverified.{library_id}");
+
+    // Load cached unverified list, or recompute from indexed key.
+    let unverified: Vec<(String, i64)> = crate::store::kv()
+        .get(&unverified_key)
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            // Recompute: load full indexed list, batch-check which are unverified.
+            crate::wasm::log_info("verify_step: recomputing unverified list from indexed key");
+            let file_list: Vec<(String, i64)> = crate::store::kv()
+                .get(&indexed_key)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_slice(&v).ok())
+                .unwrap_or_default();
 
-    // Batch-load all file entries to check which lack MBIDs or haven't been checked.
-    let file_keys: Vec<String> = file_list.iter().map(|(rel, _)| file_key(library_id, rel)).collect();
-    let batch_size_kv = 500;
-    let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for chunk in file_keys.chunks(batch_size_kv) {
-        if let Ok(entries) = crate::store::kv().get_many(chunk.to_vec()) {
-            for (k, v) in entries {
-                if let Ok(val) = serde_json::from_slice::<Value>(&v) {
-                    if let Some(tags) = val.get("tags") {
-                        if !tags.is_null() {
-                            if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-                                // Already has a real MBID — no need to verify.
-                                if !t.mbid_album.is_empty() {
-                                    verified_set.insert(k);
-                                    continue;
+            let file_keys: Vec<String> = file_list.iter().map(|(rel, _)| file_key(library_id, rel)).collect();
+            let batch_size_kv = 500;
+            let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for chunk in file_keys.chunks(batch_size_kv) {
+                if let Ok(entries) = crate::store::kv().get_many(chunk.to_vec()) {
+                    for (k, v) in entries {
+                        if let Ok(val) = serde_json::from_slice::<Value>(&v) {
+                            if let Some(tags) = val.get("tags") {
+                                if !tags.is_null() {
+                                    if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                                        if !t.mbid_album.is_empty() {
+                                            verified_set.insert(k);
+                                            continue;
+                                        }
+                                    }
+                                    if tags.get("_acoustid_checked").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                        verified_set.insert(k);
+                                    }
                                 }
-                            }
-                            // Or was already sent to AcoustID and got no match.
-                            if tags.get("_acoustid_checked").and_then(|v| v.as_bool()).unwrap_or(false) {
-                                verified_set.insert(k);
                             }
                         }
                     }
                 }
             }
-        }
-    }
 
-    let unverified: Vec<(String, i64)> = file_list.iter().filter(|(rel, _)| {
-        !verified_set.contains(&file_key(library_id, rel))
-    }).cloned().collect();
+            let list: Vec<(String, i64)> = file_list.iter().filter(|(rel, _)| {
+                !verified_set.contains(&file_key(library_id, rel))
+            }).cloned().collect();
+            // Cache for next run.
+            let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&list).unwrap_or_default());
+            list
+        });
 
     if unverified.is_empty() {
         crate::wasm::log_info("verify_step: all files verified, transitioning to group");
         let _ = crate::store::kv().delete(&indexed_key);
+        let _ = crate::store::kv().delete(&unverified_key);
         let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
         crate::wasm::enqueue_group_task(library_id)?;
         post_scan_status(cfg, library_id, 0, "verification complete");
@@ -754,7 +766,15 @@ pub fn verify_step(
                 processed, batch.len(), unverified.len() - processed
             ));
 
-            if unverified.len() > batch_size {
+            // Remove processed files from the cached unverified list.
+            let remaining: Vec<(String, i64)> = unverified[processed..].to_vec();
+            if remaining.is_empty() {
+                let _ = crate::store::kv().delete(&unverified_key);
+            } else {
+                let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&remaining).unwrap_or_default());
+            }
+
+            if !remaining.is_empty() {
                 // More files to verify — re-enqueue.
                 crate::wasm::enqueue_verify_task(library_id)?;
                 post_scan_status(cfg, library_id, processed, &format!(
@@ -774,6 +794,7 @@ pub fn verify_step(
             crate::wasm::log_warn("verify_step: acoustid sidecar unavailable, skipping verification");
             // Skip verification — group with existing tags.
             let _ = crate::store::kv().delete(&indexed_key);
+            let _ = crate::store::kv().delete(&unverified_key);
             let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
             crate::wasm::enqueue_group_task(library_id)?;
             post_scan_status(cfg, library_id, 0, "verification skipped (sidecar offline)");
