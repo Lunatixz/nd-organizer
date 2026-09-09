@@ -346,11 +346,11 @@ pub fn walk_step(
 
     // Load the current file count for the log message (avoid full deserialization).
     let file_count: usize = crate::store::kv()
-        .get(&files_key)
+        .get(&format!("scan.walkcount.{library_id}"))
         .ok()
         .flatten()
-        .and_then(|v| serde_json::from_slice::<Vec<(String, i64)>>(&v).ok())
-        .map(|v| v.len())
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
     // Track visited directories to avoid re-walking the same dirs.
@@ -466,6 +466,8 @@ pub fn walk_step(
         crate::store::kv()
             .set(&files_key, serde_json::to_vec(&all_files).unwrap_or_default())
             .map_err(|e| e.to_string())?;
+        // Save file count for next walk's log message.
+        let _ = crate::store::kv().set(&format!("scan.walkcount.{library_id}"), all_files.len().to_string().into_bytes());
         crate::wasm::enqueue_index_task(library_id)?;
         post_scan_status(cfg, library_id, 0, &format!("walk complete: {} files found", all_files.len()));
         Ok(ScanOutcome::Done)
@@ -487,6 +489,8 @@ pub fn walk_step(
             crate::store::kv()
                 .set(&delta_key, serde_json::to_vec(&delta).unwrap_or_default())
                 .map_err(|e| e.to_string())?;
+            // Update file count for next chunk's log message.
+            let _ = crate::store::kv().set(&format!("scan.walkcount.{library_id}"), (file_count + delta.len()).to_string().into_bytes());
         }
         crate::store::kv()
             .set(&dirs_key, serde_json::to_vec(&visited_dirs).unwrap_or_default())
