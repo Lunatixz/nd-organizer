@@ -246,6 +246,56 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"error": "not found"})
 
+    def _handle_batch(self, req):
+        """Process multiple files: fpcalc + AcoustID lookup + replaygain."""
+        files = req.get("files", [])
+        apikey = req.get("acoustidApiKey", "")
+        if not files:
+            return self._send(400, {"error": "no files provided"})
+        if not apikey:
+            return self._send(400, {"error": "acoustidApiKey required"})
+
+        results = []
+        for entry in files:
+            path = entry.get("path", "")
+            mtime = entry.get("mtime", 0)
+            if not path or not os.path.exists(path):
+                results.append({"path": path, "ok": False, "error": "file not found"})
+                continue
+
+            STATS["lookups"] += 1
+            data, err = fpcalc(path)
+            if err or data is None:
+                STATS["errors"] += 1
+                results.append({"path": path, "ok": False, "error": err or "fingerprint failed"})
+                continue
+
+            res, err = acoustid_lookup(apikey, data.get("duration", 0), data.get("fingerprint", ""))
+            if err:
+                STATS["errors"] += 1
+                results.append({"path": path, "ok": False, "error": err})
+                continue
+            if not res or res.get("status") != "ok":
+                msg = res.get("error", {}).get("message", "lookup failed") if res else "no response"
+                STATS["errors"] += 1
+                results.append({"path": path, "ok": False, "error": msg})
+                continue
+
+            matches = top_matches(res)
+            if matches:
+                STATS["matches"] += len(matches)
+                STATS["lastMatch"] = int(time.time())
+
+            rg, rg_err = replaygain(path)
+            entry_result = {"path": path, "ok": True, "matches": matches}
+            if rg is not None:
+                entry_result["replaygain"] = rg
+            results.append(entry_result)
+
+        STATS["lastLookup"] = int(time.time())
+        log.info("batch: processed %d files", len(results))
+        return self._send(200, {"ok": True, "processed": len(results), "results": results})
+
     def do_POST(self):
         try:
             n = int(self.headers.get("Content-Length", 0))

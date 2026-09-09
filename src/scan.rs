@@ -453,20 +453,21 @@ pub fn walk_step(
         // Tree fully walked — merge delta into main file list and transition.
         let _ = crate::store::kv().delete(&key);
         let _ = crate::store::kv().delete(&dirs_key);
-        let _ = crate::store::kv().delete(&delta_key);
-        // Load existing file list, append delta, save merged result.
+        // Load accumulated delta from previous chunks, then clean it up.
         let mut all_files: Vec<(String, i64)> = crate::store::kv()
-            .get(&files_key)
+            .get(&delta_key)
             .ok()
             .flatten()
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
+        let _ = crate::store::kv().delete(&delta_key);
+        // Append files from this final chunk.
         all_files.extend(files);
         crate::store::kv()
             .set(&files_key, serde_json::to_vec(&all_files).unwrap_or_default())
             .map_err(|e| e.to_string())?;
         crate::wasm::enqueue_index_task(library_id)?;
-        post_scan_status(cfg, library_id, 0, "walk complete");
+        post_scan_status(cfg, library_id, 0, &format!("walk complete: {} files found", all_files.len()));
         Ok(ScanOutcome::Done)
     } else {
         // More directories to walk — save delta + state and re-enqueue.
