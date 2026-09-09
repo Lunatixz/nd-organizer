@@ -873,33 +873,87 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 
     // AcoustID verification is now handled by verify_step (sidecar batch).
     // The group_step just loads verified files from KV.
+    // Uses a cursor to resume across multiple task invocations.
 
     let indexed_key = format!("scan.indexed.{library_id}");
-    // Load file paths + mtimes from the single KV entry saved by index_step.
-    let file_list: Vec<(String, i64)> = crate::store::kv()
-        .get(&indexed_key)
+    let cursor_key = format!("scan.group_cursor.{library_id}");
+    let entries_key = format!("scan.group_entries.{library_id}");
+
+    // Load or initialize file list from indexed key (only on first chunk).
+    let mut cursor: usize = crate::store::kv()
+        .get(&cursor_key)
         .ok()
         .flatten()
-        .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or_default();
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let file_list: Vec<(String, i64)> = if cursor == 0 {
+        // First chunk — load the full file list and save entries key.
+        let list: Vec<(String, i64)> = crate::store::kv()
+            .get(&indexed_key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice(&v).ok())
+            .unwrap_or_default();
+        // Save the file list size for progress tracking.
+        let _ = crate::store::kv().set(&entries_key, list.len().to_string().into_bytes());
+        list
+    } else {
+        // Resuming — we don't need the full list, just continue from cursor.
+        // Load the list length to know when we're done.
+        let total: usize = crate::store::kv()
+            .get(&entries_key)
+            .ok()
+            .flatten()
+            .and_then(|v| String::from_utf8(v).ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if total == 0 {
+            // Entries key missing — something went wrong, restart.
+            cursor = 0;
+            Vec::new()
+        } else {
+            crate::wasm::log_info(&format!(
+                "group_step: resuming from cursor {cursor}/{total}"
+            ));
+            // We need the file list to continue. Reload it.
+            crate::store::kv()
+                .get(&indexed_key)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_slice(&v).ok())
+                .unwrap_or_default()
+        }
+    };
+
+    if file_list.is_empty() {
+        // No files — check if we already grouped.
+        if let Ok(Some(v)) = crate::store::kv().get(&format!("scan.donev2.{library_id}")) {
+            if v == b"1" {
+                crate::wasm::log_info("group_step: already done, skipping");
+                return Ok((0, 0));
+            }
+        }
+        crate::wasm::log_info("group_step: no files to group");
+        return Ok((0, 0));
+    }
+
     crate::wasm::log_info(&format!(
-        "group_step: loaded {} files from indexed key, reading tags in batches...",
-        file_list.len()
+        "group_step: reading tags from cursor {}/{}...",
+        cursor, file_list.len()
     ));
 
     // Read tags from individual KV entries in time-budgeted batches.
-    // Use get_many for batch reads instead of individual get() calls.
     let scan_start = std::time::Instant::now();
     let time_budget = std::time::Duration::from_secs(15);
     let mut entries: Vec<(String, TrackTags)> = Vec::new();
     let batch_size = 500;
-    for chunk in file_list.chunks(batch_size) {
+    let mut hit_budget = false;
+
+    for chunk in file_list[cursor..].chunks(batch_size) {
         if scan_start.elapsed() >= time_budget {
-            crate::wasm::log_info(&format!(
-                "group_step: time budget hit at {}/{} entries, processing partial batch",
-                entries.len(),
-                file_list.len()
-            ));
+            hit_budget = true;
             break;
         }
         let keys: Vec<String> = chunk
@@ -922,14 +976,46 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
                 }
             }
         }
+        cursor += chunk.len();
     }
 
-    // Verification: files without a reliable ID are either fingerprinted via
-    // AcoustID (giving an album MBID to group by) or left unverified.
-    // NOTE: AcoustID verification is now handled by verify_step (sidecar batch).
-    // The group_step just loads verified files from KV.
-    let total_files = entries.len();
-    let verified: Vec<(String, TrackTags)> = entries;
+    // If we hit the time budget, save cursor and re-enqueue for next chunk.
+    if hit_budget {
+        let _ = crate::store::kv().set(&cursor_key, cursor.to_string().into_bytes());
+        // Accumulate entries into the entries KV so we don't lose progress.
+        let mut prev_entries: Vec<(String, TrackTags)> = crate::store::kv()
+            .get(&format!("scan.group_entries.{library_id}"))
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice(&v).ok())
+            .unwrap_or_default();
+        prev_entries.extend(entries);
+        let _ = crate::store::kv().set(
+            &format!("scan.group_entries.{library_id}"),
+            serde_json::to_vec(&prev_entries).unwrap_or_default(),
+        );
+        crate::wasm::log_info(&format!(
+            "group_step: time budget hit at {cursor}/{}, saved {} entries, re-enqueueing",
+            file_list.len(), prev_entries.len()
+        ));
+        crate::wasm::enqueue_group_task(library_id)?;
+        return Ok((0, 0));
+    }
+
+    // All files processed — load any accumulated entries from previous chunks.
+    let mut all_entries: Vec<(String, TrackTags)> = crate::store::kv()
+        .get(&format!("scan.group_entries.{library_id}"))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
+    all_entries.extend(entries);
+    let _ = crate::store::kv().delete(&cursor_key);
+    let _ = crate::store::kv().delete(&entries_key);
+    let _ = crate::store::kv().delete(&format!("scan.group_entries.{library_id}"));
+
+    let total_files = all_entries.len();
+    let verified: Vec<(String, TrackTags)> = all_entries;
 
     crate::wasm::log_info(&format!(
         "group_step: {total_files} files loaded for grouping"
