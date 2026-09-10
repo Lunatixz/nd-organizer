@@ -255,6 +255,20 @@ pub(crate) mod wasm {
                 },
             );
             if cfg.run_on_startup {
+                // Clear stale scan state so old tasks from previous runs
+                // find no data and exit immediately instead of timing out.
+                let target_libs = target_libraries(&cfg);
+                for &library_id in &target_libs {
+                    for prefix in [
+                        "scan.walkstack.", "scan.walkfiles.", "scan.walkdelta.",
+                        "scan.walkdirs.", "scan.walkcount.", "scan.indexed.",
+                        "scan.unverified.", "scan.group_cursor.", "scan.group_entries.",
+                        "scan.group_remaining.", "scan.pass.", "scan.count.",
+                        "scan.donev2.",
+                    ] {
+                        let _ = crate::store::kv().delete(&format!("{}{}", prefix, library_id));
+                    }
+                }
                 // Enqueue walk tasks directly from init to avoid the tight
                 // scheduler callback timeout. The scheduler path (run_pass)
                 // often exceeds the callback deadline on large libraries.
