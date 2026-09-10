@@ -252,14 +252,65 @@ fn post_scan_status(cfg: &Config, library_id: i32, chunk: usize, current_file: &
         let _ = crate::store::kv().set(&key, new.to_string().into_bytes());
         new
     };
+
+    // Calculate ETA if we have a known total from phase-specific KV keys.
+    let (known_total, phase_name) = if let Some(v) = crate::store::kv()
+        .get(&format!("scan.verify_total.{library_id}"))
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        (Some(v), "verify")
+    } else if let Some(v) = crate::store::kv()
+        .get(&format!("scan.index_total.{library_id}"))
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        (Some(v), "index")
+    } else {
+        (None, "scan")
+    };
+
+    let eta = if let Some(tot) = known_total {
+        if total > 0 && tot > total {
+            let start_key = format!("scan.phase_start.{}", library_id);
+            let start_ts: i64 = crate::store::kv()
+                .get(&start_key)
+                .ok()
+                .flatten()
+                .and_then(|v| String::from_utf8(v).ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| {
+                    let now = crate::state::now_ts();
+                    let _ = crate::store::kv().set(&start_key, now.to_string().into_bytes());
+                    now
+                });
+            let elapsed = crate::state::now_ts() - start_ts;
+            if elapsed > 0 {
+                let rate = total as f64 / elapsed as f64;
+                Some(((tot - total) as f64 / rate) as u64)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let status = serde_json::json!({
         "ts": crate::state::now_ts(),
         "mode": crate::wasm::mode_label(cfg),
         "inProgress": true,
-        "phase": "scan",
+        "phase": phase_name,
         "filesScanned": total,
         "chunkSize": chunk,
         "currentFile": current_file,
+        "etaSeconds": eta,
         "libraries": [{
             "id": library_id,
             "albumsFound": 0,
@@ -280,6 +331,7 @@ fn post_scan_status(cfg: &Config, library_id: i32, chunk: usize, current_file: &
 
 /// Post a lightweight phase-only status so the dashboard pipeline stepper
 /// highlights the current phase (group, plan, etc.) during processing.
+/// Optionally includes ETA if current/total are provided.
 fn post_phase_status(cfg: &Config, library_id: i32, phase: &str) {
     let status = serde_json::json!({
         "ts": crate::state::now_ts(),
@@ -290,6 +342,7 @@ fn post_phase_status(cfg: &Config, library_id: i32, phase: &str) {
             "group" => "Loading indexed files and reading tags from KV store...",
             "plan" => "Moving files to organized folders and recording rollback...",
             "enrich" => "Running metadata enrichment (artwork, lyrics, genre, etc.)...",
+            "cleanup" => "Removing empty no-audio folders...",
             _ => "",
         },
         "libraries": [{
@@ -308,6 +361,61 @@ fn post_phase_status(cfg: &Config, library_id: i32, phase: &str) {
     .to_string();
     crate::wasm::post_webhook(cfg, &status);
 }
+
+/// Post scan status with ETA calculation.
+/// `current` = items processed so far, `total` = total items (0 if unknown).
+fn post_scan_status_with_eta(cfg: &Config, library_id: i32, phase: &str, current: usize, total: usize, current_file: &str) {
+    // Calculate ETA based on processing rate.
+    let eta_seconds = if current > 0 && total > current {
+        // Load start time for this phase from KV.
+        let start_key = format!("scan.phase_start.{}.{}", library_id, phase);
+        let start_ts: i64 = crate::store::kv()
+            .get(&start_key)
+            .ok()
+            .flatten()
+            .and_then(|v| String::from_utf8(v).ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| {
+                // First call — record start time.
+                let now = crate::state::now_ts();
+                let _ = crate::store::kv().set(&start_key, now.to_string().into_bytes());
+                now
+            });
+            let elapsed = crate::state::now_ts() - start_ts;
+            if elapsed > 0 {
+                let rate = current as f64 / elapsed as f64;
+                let remaining = (total - current) as f64 / rate;
+                Some(remaining as u64)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let status = serde_json::json!({
+            "ts": crate::state::now_ts(),
+            "mode": crate::wasm::mode_label(cfg),
+            "inProgress": true,
+            "phase": phase,
+            "phaseDetail": format!("{}/{} files {}", current, total, current_file),
+            "progress": {
+                "current": current,
+                "total": total,
+                "percent": if total > 0 { (current as f64 / total as f64 * 100.0) as u64 } else { 0 },
+                "etaSeconds": eta_seconds,
+            },
+            "libraries": [{
+                "id": library_id,
+                "filesScanned": current,
+            }],
+            "warnings": [],
+            "integrations": crate::wasm::integration_health(cfg),
+            "tasks": crate::wasm::task_log(),
+        })
+        .to_string();
+        crate::wasm::post_webhook(cfg, &status);
+    }
 
 // ---------------------------------------------------------------------------
 // Snapshot scan: two-phase walk → index
@@ -691,6 +799,9 @@ pub fn verify_step(
             list
         });
 
+    // Set total for ETA calculation.
+    let _ = crate::store::kv().set(&format!("scan.verify_total.{library_id}"), unverified.len().to_string().into_bytes());
+
     if unverified.is_empty() {
         crate::wasm::log_info("verify_step: all files verified, transitioning to group");
         // Don't delete indexed_key — group_step needs it to load the file list.
@@ -915,7 +1026,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let entries_key = format!("scan.group_entries.{library_id}");
     let remaining_key = format!("scan.group_remaining.{library_id}");
 
-    // Load or initialize file list (only on first chunk).
+    // Load or initialize file list.
     let mut cursor: usize = crate::store::kv()
         .get(&cursor_key)
         .ok()
@@ -925,8 +1036,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         .unwrap_or(0);
 
     let file_list: Vec<(String, i64)> = if cursor == 0 {
-        // First chunk — load the full file list, save it, and re-enqueue.
-        // Don't process yet — the load itself can be slow for large lists.
+        // First chunk — load from indexed_key, save to remaining_key for resume.
         let list: Vec<(String, i64)> = crate::store::kv()
             .get(&indexed_key)
             .ok()
@@ -939,16 +1049,13 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         }
         let _ = crate::store::kv().set(&entries_key, list.len().to_string().into_bytes());
         let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&list).unwrap_or_default());
-        // Set cursor to 1 so next chunk loads from remaining_key, not indexed_key.
-        let _ = crate::store::kv().set(&cursor_key, b"1".to_vec());
         crate::wasm::log_info(&format!(
-            "group_step: loaded {} files from indexed key, re-enqueueing for chunked processing",
+            "group_step: loaded {} files from indexed key, processing...",
             list.len()
         ));
-        crate::wasm::enqueue_group_task(library_id)?;
-        return Ok((0, 0));
+        list
     } else {
-        // Resuming — load the saved remaining list (much smaller than full list).
+        // Resuming — load from remaining_key.
         let remaining: Vec<(String, i64)> = crate::store::kv()
             .get(&remaining_key)
             .ok()
@@ -963,8 +1070,8 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         crate::wasm::log_info(&format!(
-            "group_step: resuming from cursor {cursor}/{total}, {} remaining in list",
-            remaining.len()
+            "group_step: resuming from remaining list, {} files, {}/{} total",
+            remaining.len(), cursor, total
         ));
         remaining
     };
@@ -1240,68 +1347,126 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
     let root = lib_root(library_id)?;
     post_phase_status(cfg, library_id, "cleanup");
     let dry = cfg.mode != crate::config::Mode::Apply;
-    let mut deleted = 0usize;
-    walk_cleanup(&root, &root, cfg, dry, &mut deleted);
-    crate::wasm::log_info(&format!(
-        "cleanup: {} no-audio folder(s) {}",
-        deleted,
-        if dry { "would be deleted (dry-run)" } else { "deleted" }
-    ));
+    let dirs_key = format!("cleanup.dirs.{library_id}");
+    let deleted_key = format!("cleanup.deleted.{library_id}");
+
+    // Load or initialize directory list.
+    let dirs: Vec<String> = crate::store::kv()
+        .get(&dirs_key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_else(|| {
+            // First chunk — collect all directories.
+            let mut all_dirs = Vec::new();
+            collect_dirs(&root, &root, cfg, &mut all_dirs);
+            all_dirs
+        });
+
+    if dirs.is_empty() {
+        let _ = crate::store::kv().delete(&dirs_key);
+        let _ = crate::store::kv().delete(&deleted_key);
+        crate::wasm::log_info("cleanup: no directories to check");
+        return Ok(0);
+    }
+
+    // Process a batch of directories.
+    let batch_size = 100;
+    let mut deleted: usize = crate::store::kv()
+        .get(&deleted_key)
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let scan_start = std::time::Instant::now();
+    let time_budget = std::time::Duration::from_secs(15);
+    let mut processed = 0;
+
+    for dir_rel in dirs.iter().take(batch_size) {
+        if scan_start.elapsed() >= time_budget {
+            break;
+        }
+        let dir_path = root.join(dir_rel);
+        if !dir_path.exists() {
+            processed += 1;
+            continue;
+        }
+        // Check if this directory has audio files.
+        let mut has_audio = false;
+        if let Ok(entries) = std::fs::read_dir(&dir_path) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Ok(ft) = e.file_type() {
+                    if ft.is_file() && crate::organizer::is_audio(&name) {
+                        has_audio = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !has_audio {
+            if dry {
+                crate::wasm::log_info(&format!("cleanup: would delete {} (no audio)", dir_rel));
+                deleted += 1;
+            } else if std::fs::remove_dir_all(&dir_path).is_ok() {
+                crate::wasm::log_info(&format!("cleanup: deleted {} (no audio)", dir_rel));
+                deleted += 1;
+            }
+        }
+        processed += 1;
+    }
+
+    // Save remaining directories and deleted count.
+    let remaining: Vec<String> = dirs[processed..].to_vec();
+    if remaining.is_empty() {
+        let _ = crate::store::kv().delete(&dirs_key);
+        let _ = crate::store::kv().delete(&deleted_key);
+        crate::wasm::log_info(&format!(
+            "cleanup: {} no-audio folder(s) {}",
+            deleted,
+            if dry { "would be deleted (dry-run)" } else { "deleted" }
+        ));
+    } else {
+        let _ = crate::store::kv().set(&dirs_key, serde_json::to_vec(&remaining).unwrap_or_default());
+        let _ = crate::store::kv().set(&deleted_key, deleted.to_string().into_bytes());
+        crate::wasm::enqueue_cleanup_task(library_id)?;
+        crate::wasm::log_info(&format!(
+            "cleanup: {} deleted so far, {} dirs remaining",
+            deleted, remaining.len()
+        ));
+    }
     Ok(deleted)
 }
 
-/// Bottom-up walk. Returns true when the subtree (still) contains audio - a
-/// deleted no-audio child returns false so empty-of-audio parents cascade up.
-fn walk_cleanup(
-    dir: &std::path::Path,
-    root: &std::path::Path,
-    cfg: &Config,
-    dry: bool,
-    deleted: &mut usize,
-) -> bool {
+/// Collect all directories recursively.
+fn collect_dirs(dir: &std::path::Path, root: &std::path::Path, cfg: &Config, dirs: &mut Vec<String>) {
     let rel = dir
         .strip_prefix(root)
         .unwrap_or(dir)
         .to_string_lossy()
         .replace('\\', "/");
     if crate::organizer::is_excluded(&rel, &cfg.exclude_paths) {
-        return true; // never inspect or delete inside excluded paths
+        return;
     }
-    let mut has_audio = false;
-    let mut children: Vec<std::path::PathBuf> = Vec::new();
+    if dir != root {
+        dirs.push(rel);
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
+        return;
     };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if cfg.skip_hidden_files && name.starts_with('.') {
             continue;
         }
-        let Ok(ft) = e.file_type() else { continue };
-        if ft.is_dir() {
-            children.push(e.path());
-        } else if ft.is_file() && crate::organizer::is_audio(&name) {
-            has_audio = true;
+        if let Ok(ft) = e.file_type() {
+            if ft.is_dir() {
+                collect_dirs(&e.path(), root, cfg, dirs);
+            }
         }
     }
-    for c in &children {
-        if walk_cleanup(c, root, cfg, dry, deleted) {
-            has_audio = true;
-        }
-    }
-    if !has_audio && dir != root {
-        if dry {
-            crate::wasm::log_info(&format!(
-                "cleanup: would delete {} (no audio files)",
-                dir.display()
-            ));
-            *deleted += 1;
-        } else if std::fs::remove_dir_all(dir).is_ok() {
-            crate::wasm::log_info(&format!("cleanup: deleted {} (no audio files)", dir.display()));
-            *deleted += 1;
-        }
-    }
-    has_audio
 }
 
 /// Cap how many albums a single scheduled pass plans (`maxAlbumsPerRun`).
