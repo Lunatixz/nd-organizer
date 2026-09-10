@@ -920,7 +920,8 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         .unwrap_or(0);
 
     let file_list: Vec<(String, i64)> = if cursor == 0 {
-        // First chunk — load the full file list.
+        // First chunk — load the full file list, save it, and re-enqueue.
+        // Don't process yet — the load itself can be slow for large lists.
         let list: Vec<(String, i64)> = crate::store::kv()
             .get(&indexed_key)
             .ok()
@@ -928,9 +929,13 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
         let _ = crate::store::kv().set(&entries_key, list.len().to_string().into_bytes());
-        // Save remaining list for resume.
         let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&list).unwrap_or_default());
-        list
+        crate::wasm::log_info(&format!(
+            "group_step: loaded {} files from indexed key, re-enqueueing for chunked processing",
+            list.len()
+        ));
+        crate::wasm::enqueue_group_task(library_id)?;
+        return Ok((0, 0));
     } else {
         // Resuming — load the saved remaining list (much smaller than full list).
         let remaining: Vec<(String, i64)> = crate::store::kv()
