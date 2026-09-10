@@ -928,6 +928,10 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             .flatten()
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
+        if list.is_empty() {
+            crate::wasm::log_info("group_step: indexed key empty, skipping (walk not complete yet)");
+            return Ok((0, 0));
+        }
         let _ = crate::store::kv().set(&entries_key, list.len().to_string().into_bytes());
         let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&list).unwrap_or_default());
         crate::wasm::log_info(&format!(
