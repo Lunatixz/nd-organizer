@@ -934,6 +934,8 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         }
         let _ = crate::store::kv().set(&entries_key, list.len().to_string().into_bytes());
         let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&list).unwrap_or_default());
+        // Set cursor to 1 so next chunk loads from remaining_key, not indexed_key.
+        let _ = crate::store::kv().set(&cursor_key, b"1".to_vec());
         crate::wasm::log_info(&format!(
             "group_step: loaded {} files from indexed key, re-enqueueing for chunked processing",
             list.len()
