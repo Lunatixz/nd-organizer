@@ -1838,6 +1838,7 @@ pub fn plan_enrich_step(
     if cfg.lidarr_mode == crate::config::LidarrMode::MetadataPlusRescan && !cfg.lidarr_url.trim().is_empty() { enrichments.push("lidarr-refresh"); }
     if cfg.scan_after_tag_write { enrichments.push("navidrome-rescan"); }
     if cfg.write_nfo { enrichments.push("nfo"); }
+    if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() { enrichments.push("instrumental-check"); }
     crate::wasm::log_info(&format!(
         "enrich_step: batch {}/{}, {} album(s), plan: [{}]",
         batch_index + 1, batch_total, groups.len(), enrichments.join(", ")
@@ -2048,6 +2049,68 @@ pub fn plan_enrich_step(
                         "ts": crate::state::now_ts(),
                         "text": format!("essentia genres: {n} track(s) tagged"),
                     }));
+                }
+            }
+            // Pass 1: Verify tracks labeled "instrumental" in title.
+            if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() {
+                for (rel, tags) in &files {
+                    let title = tags.title.clone();
+                    let stripped = crate::tags::strip_instrumental(&title);
+                    if !stripped.is_empty() && stripped != title {
+                        // Title contains "(Instrumental)" — verify via Essentia.
+                        let abs = root.join(rel);
+                        let path_str = abs.to_string_lossy().to_string();
+                        let cache_key = format!("instrumental:{}", path_str);
+                        // Check cache first.
+                        let result = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                            serde_json::from_slice::<serde_json::Value>(&v).ok()
+                        } else {
+                            // Call Essentia /instrumental-check.
+                            let base = cfg.essentia_url.trim().trim_end_matches('/');
+                            let body = serde_json::json!({"path": path_str});
+                            let req = nd_pdk::host::http::HTTPRequest {
+                                method: "POST".into(),
+                                url: format!("{}/instrumental-check", base),
+                                headers: std::collections::HashMap::new(),
+                                no_follow_redirects: false,
+                                body: body.to_string().into_bytes(),
+                                timeout_ms: 30_000,
+                            };
+                            if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
+                                if resp.status_code == 200 {
+                                    let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
+                                    // Cache result.
+                                    let _ = crate::store::kv().set(&cache_key, resp.body);
+                                    Some(val)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(val) = result {
+                            let is_instrumental = val.get("isInstrumental")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+                            if !is_instrumental {
+                                // NOT instrumental — strip from title, tags, NFO.
+                                let _ = crate::tags::write_title(&abs, &stripped);
+                                crate::wasm::log_info(&format!(
+                                    "instrumental: stripped from '{}' → '{}'",
+                                    title, stripped
+                                ));
+                                actions.push(serde_json::json!({
+                                    "ts": crate::state::now_ts(),
+                                    "text": format!("instrumental: stripped from '{}'", title),
+                                }));
+                                // Trigger rescan + Lidarr refresh.
+                                if cfg.scan_after_tag_write {
+                                    let _ = crate::wasm::trigger_navidrome_scan(cfg);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if cfg.scan_after_tag_write {
@@ -2501,8 +2564,14 @@ fn write_group_nfo(
     } else {
         vec![]
     };
+    // Strip "(Instrumental)" from album title if verifyInstrumental is enabled.
+    let album_title = if cfg.verify_instrumental {
+        crate::tags::strip_instrumental(&info.album)
+    } else {
+        info.album.clone()
+    };
     let nfo_album = crate::nfo::NfoAlbum {
-        title: info.album.clone(),
+        title: album_title,
         album_artists: if info.album_artist.is_empty() {
             vec![]
         } else {

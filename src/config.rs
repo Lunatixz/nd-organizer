@@ -331,6 +331,10 @@ pub struct Config {
     pub essentia_fingerprint: bool,
     pub notify_audiomuse_after_run: bool,
     pub write_acoustic_tags: bool,
+    /// Verify instrumental tracks — strip "(Instrumental)" from title if not truly instrumental.
+    pub verify_instrumental: bool,
+    /// Number of tracks to analyze per run for Pass 2 (gradual full-library analysis).
+    pub instrumental_batch_size: i32,
 
     // Discogs (credits, release info, community ratings)
     pub discogs_token: String,
@@ -448,7 +452,7 @@ impl Default for Config {
             preserve_recording_type: true,
             singles_under_artist: true,
             singles_enabled: true,
-            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke".into(),
+            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,interview,classical,karaoke".into(),
             exclude_paths: Vec::new(),
             move_destination_library: String::new(), // empty = disabled
             backup_before_write: true,
@@ -494,6 +498,8 @@ impl Default for Config {
             audiomuse_token: String::new(),
             notify_audiomuse_after_run: true,
             write_acoustic_tags: false,
+            verify_instrumental: false,
+            instrumental_batch_size: 100,
             discogs_token: String::new(),
             discogs_credits: false,
             theaudiodb_key: String::new(),
@@ -554,6 +560,7 @@ const CONFIG_KEYS: &[&str] = &[
     "essentiaFingerprint", "audiomuseToken", "notifyAudiomuseAfterRun",
     "writeAcousticTags", "scanUser", "triggerScanAfterRun", "scanAfterAlbum",
     "scanAfterTagWrite", "scanDebounceSeconds",
+    "verifyInstrumental", "instrumentalBatchSize",
     "discogsToken", "discogsCredits", "theAudioDbKey", "theAudioDbFanart",
     "geniusToken",
     "appleMusicCountries", "appleMusicCacheTtl", "appleMusicArtistImages",
@@ -895,6 +902,10 @@ impl Config {
         c.essentia_chords = bool(map, "essentiaChords", c.essentia_chords);
         c.essentia_bpm = bool(map, "essentiaBpm", c.essentia_bpm);
         c.essentia_fingerprint = bool(map, "essentiaFingerprint", c.essentia_fingerprint);
+        c.verify_instrumental = bool(map, "verifyInstrumental", c.verify_instrumental);
+        if let Some(v) = map.get("instrumentalBatchSize") {
+            c.instrumental_batch_size = v.parse().unwrap_or(c.instrumental_batch_size);
+        }
         if let Some(v) = map.get("audiomuseToken") {
             c.audiomuse_token = v.clone();
         }

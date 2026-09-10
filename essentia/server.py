@@ -15,6 +15,8 @@
 #       -> {"ok": true, "fingerprint": [...], "duration": 240.5}
 #   POST /compare {"path_a": "/music/a.flac", "path_b": "/music/b.flac"}
 #       -> {"ok": true, "similarity": 0.85, "is_cover": true}
+#   POST /instrumental-check {"path": "/music/song.flac"}
+#       -> {"ok": true, "isInstrumental": true, "confidence": 0.85, "vocalRatio": 0.02}
 #
 # No internet required after model download. Models are loaded at startup.
 # If Essentia is not installed, falls back to librosa for analysis.
@@ -625,6 +627,72 @@ def compare_fingerprints(fp_a, fp_b):
     return round(intersection / union, 4)
 
 
+def check_instrumental(path):
+    """Check if a track is truly instrumental using Essentia moods + librosa vocal separation.
+    Returns: {isInstrumental: bool, confidence: float, vocalRatio: float, vocalMoods: list}
+    """
+    audio, err = load_audio(path)
+    if err:
+        return None, err
+
+    # 1. Check for vocal-related moods via Essentia
+    vocal_mood_names = {"singing", "vocals", "voice", "male vocal", "female vocal",
+                        "choir", "chanting", "rap", "spoken word", "vocal"}
+    vocal_moods_found = []
+    if ESSENTIA_AVAILABLE and MOOD_MODEL is not None:
+        try:
+            import essentia.standard as es
+            pooled = es.TensorflowPredictVGGish()(audio)
+            preds = MOOD_MODEL(pooled)[0]
+            mood_labels = [
+                "happy", "sad", "angry", "fear", "tender", "excited", "energetic",
+                "dark", "boring", "calm", "cheerful", "romantic", "melancholic",
+                "aggressive", "uplifting", "inspiring", "mysterious", "playful",
+                "sentimental", "nostalgic", "epic", "dramatic", "peaceful",
+                "dreamy", "triumphant", "haunting", "ethereal", "powerful",
+                "gentle", "somber", "bittersweet", "euphoric", "anxious",
+                "relaxing", "intense", "lively", "solemn", "whimsical",
+                "reflective", "yearning", "brooding", "soothing", "stirring",
+                "gritty", "luscious", "raw", "lush", "spacious",
+                "crunchy", "shimmering", "warm", "cold", "bright",
+                "dark_harsh", "smooth",
+            ]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:10]
+            for idx, score in top:
+                if idx < len(mood_labels) and score > 0.05:
+                    if mood_labels[idx] in vocal_mood_names:
+                        vocal_moods_found.append(mood_labels[idx])
+        except Exception as e:
+            log.warning("mood check failed for %s: %s", path, e)
+
+    # 2. Librosa vocal separation — calculate vocal energy ratio
+    vocal_ratio = 0.0
+    if LIBROSA_AVAILABLE:
+        try:
+            import librosa
+            import numpy as np
+            y, sr = librosa.load(path, duration=30)
+            harmonic, percussive = librosa.effects.hpss(y)
+            vocal_energy = float(np.sum(percussive**2))
+            total_energy = float(np.sum(y**2))
+            if total_energy > 0:
+                vocal_ratio = vocal_energy / total_energy
+        except Exception as e:
+            log.warning("librosa vocal check failed for %s: %s", path, e)
+
+    # 3. Combined decision
+    has_vocal_moods = len(vocal_moods_found) > 0
+    is_instrumental = not has_vocal_moods and vocal_ratio < 0.1
+    confidence = 1.0 - vocal_ratio if not has_vocal_moods else vocal_ratio
+
+    return {
+        "isInstrumental": is_instrumental,
+        "confidence": round(confidence, 3),
+        "vocalRatio": round(vocal_ratio, 4),
+        "vocalMoods": vocal_moods_found,
+    }, None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("http %s", fmt % args)
@@ -755,6 +823,18 @@ class Handler(BaseHTTPRequestHandler):
                 "duration_a": fp_a.get("duration") if fp_a else None,
                 "duration_b": fp_b.get("duration") if fp_b else None,
             })
+            return
+        if path == "/instrumental-check":
+            req, err = self._read_body()
+            if err:
+                return self._send(400, {"error": err})
+            audio_path = req.get("path", "")
+            if not audio_path:
+                return self._send(400, {"error": "path required"})
+            result, err = check_instrumental(audio_path)
+            if err:
+                return self._send(200, {"ok": False, "error": err})
+            self._send(200, {"ok": True, **result})
             return
         self._send(404, {"error": "not found"})
 

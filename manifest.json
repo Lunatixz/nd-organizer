@@ -970,6 +970,18 @@
           "default": false,
           "description": "Compute audio fingerprints via Essentia for detecting cover songs and duplicate recordings. Requires essentiaUrl."
         },
+        "verifyInstrumental": {
+          "type": "boolean",
+          "title": "Verify instrumental tracks",
+          "default": false,
+          "description": "When enabled, tracks labeled '(Instrumental)' in the title are verified via Essentia + librosa. If not truly instrumental, the keyword is stripped from the title, tags, and NFO. Requires essentiaUrl."
+        },
+        "instrumentalBatchSize": {
+          "type": "integer",
+          "title": "Instrumental verification batch size",
+          "default": 100,
+          "description": "Number of tracks to analyze per run for gradual full-library instrumental verification (Pass 2). Only used when verifyInstrumental is enabled."
+        },
         "discogsToken": {
           "type": "string",
           "title": "Discogs personal access token",
@@ -1577,6 +1589,15 @@
                 {
                   "type": "Control",
                   "scope": "#/properties/essentiaFingerprint"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/verifyInstrumental"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/instrumentalBatchSize",
+                  "condition": { "scope": "#/properties/verifyInstrumental", "scheme": "http://json-schema.org/07/schema#", "value": true }
                 }
               ]
             }

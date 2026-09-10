@@ -389,3 +389,42 @@ pub fn write_genre(path: &Path, genres: &[String]) -> Result<(), String> {
     let _ = tagged.insert_tag(tag);
     save_tagged_atomic(&tagged, path)
 }
+
+/// Strip "(Instrumental)", "[Instrumental]", or "Instrumental" from a title string.
+pub fn strip_instrumental(title: &str) -> String {
+    let mut result = title.to_string();
+    // Remove patterns like "(Instrumental)", "[Instrumental]", "(Instrumental Version)"
+    result = result
+        .replace("(Instrumental Version)", "")
+        .replace("[Instrumental Version]", "")
+        .replace("(Instrumental)", "")
+        .replace("[Instrumental]", "")
+        .replace("(instrumental)", "")
+        .replace("[instrumental]", "");
+    // Remove trailing "Instrumental" (case-insensitive)
+    let lower = result.to_lowercase();
+    if let Some(pos) = lower.rfind("instrumental") {
+        let before = result[..pos].trim_end();
+        let after = result[pos + "instrumental".len()..].trim_start();
+        result = format!("{} {}", before, after).trim().to_string();
+    }
+    // Clean up double spaces
+    while result.contains("  ") {
+        result = result.replace("  ", " ");
+    }
+    result.trim().to_string()
+}
+
+/// Write title tag to a file, stripping instrumental patterns if configured.
+pub fn write_title(path: &Path, new_title: &str) -> Result<bool, String> {
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    let current = tag.title().map(|s| s.to_string()).unwrap_or_default();
+    if current == new_title {
+        return Ok(false);
+    }
+    tag.set_title(new_title.to_string());
+    let _ = tagged.insert_tag(tag);
+    save_tagged_atomic(&tagged, path)?;
+    Ok(true)
+}
