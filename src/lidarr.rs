@@ -284,11 +284,21 @@ pub mod host_lidarr {
         }
         match a.track_count {
             Some(tc) if tc > local_track_count as i64 => {
-                crate::log::debug(&format!(
-                    "Lidarr: '{}' - '{}' incomplete ({tc} expected vs {local_track_count} local)",
-                    artist, album
-                ));
-                Some(a.id)
+                let missing = (tc - local_track_count as i64) as usize;
+                let half = tc as usize / 2;
+                if missing > half && local_track_count >= half {
+                    crate::log::debug(&format!(
+                        "Lidarr: '{}' - '{}' incomplete ({missing} missing of {tc}, have {local_track_count})",
+                        artist, album
+                    ));
+                    Some(a.id)
+                } else {
+                    crate::log::debug(&format!(
+                        "Lidarr: '{}' - '{}' incomplete ({missing} missing of {tc}) but below threshold",
+                        artist, album
+                    ));
+                    None
+                }
             }
             Some(tc) => {
                 crate::log::debug(&format!(

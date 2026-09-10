@@ -775,10 +775,14 @@ pub fn verify_step(
                         if let Ok(val) = serde_json::from_slice::<Value>(&v) {
                             if let Some(tags) = val.get("tags") {
                                 if !tags.is_null() {
-                                    if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-                                        if !t.mbid_album.is_empty() {
-                                            verified_set.insert(k);
-                                            continue;
+                                    // When forceFingerprint is enabled, skip MBID check —
+                                    // re-fingerprint everything regardless of existing MBIDs.
+                                    if !cfg.force_fingerprint {
+                                        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                                            if !t.mbid_album.is_empty() {
+                                                verified_set.insert(k);
+                                                continue;
+                                            }
                                         }
                                     }
                                     if tags.get("_acoustid_checked").and_then(|v| v.as_bool()).unwrap_or(false) {

@@ -272,6 +272,7 @@ pub struct Config {
 
     // Identity verification
     pub verify_identity: bool,
+    pub force_fingerprint: bool,
     pub min_confidence: f64,
     pub skip_unverified: bool,
     pub acoustid_mode: AcoustIdMode,
@@ -459,6 +460,7 @@ impl Default for Config {
             backup_retention_days: 30,
             rollback_retention_days: 30,
             verify_identity: true,
+            force_fingerprint: false,
             min_confidence: 0.6,
             skip_unverified: true,
             acoustid_mode: AcoustIdMode::Fingerprint,
@@ -547,7 +549,7 @@ const CONFIG_KEYS: &[&str] = &[
     "navidromeAdminPassword", "skipHiddenFiles", "preserveRecordingType",
     "singlesUnderArtist", "singlesEnabled", "fillerKeywords", "excludePaths",
     "moveDestinationLibrary", "backupBeforeWrite", "backupRetentionDays",
-    "rollbackRetentionDays", "verifyIdentity", "minConfidence",
+    "rollbackRetentionDays",     "verifyIdentity", "forceFingerprint", "minConfidence",
     "skipUnverified", "acoustidMode", "acoustidApiKey", "acoustidUrl",
     "primarySource", "musicbrainzToken", "lastfmApiKey", "lastfmUser",
     "lastfmApiSecret", "lastfmPassword", "genreSource",
@@ -811,6 +813,7 @@ impl Config {
             c.rollback_retention_days = v.trim().parse().unwrap_or(c.rollback_retention_days);
         }
         c.verify_identity = bool(map, "verifyIdentity", c.verify_identity);
+        c.force_fingerprint = bool(map, "forceFingerprint", c.force_fingerprint);
         if let Some(v) = map.get("minConfidence") {
             c.min_confidence = v.trim().parse().unwrap_or(c.min_confidence);
         }

@@ -52,6 +52,7 @@ mod nfo;
 mod organizer;
 #[cfg(target_arch = "wasm32")]
 mod scan;
+mod metadata;
 mod state;
 #[cfg(target_arch = "wasm32")]
 mod trim;

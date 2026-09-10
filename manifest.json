@@ -970,6 +970,12 @@
           "default": false,
           "description": "Compute audio fingerprints via Essentia for detecting cover songs and duplicate recordings. Requires essentiaUrl."
         },
+        "forceFingerprint": {
+          "type": "boolean",
+          "title": "Force re-fingerprint all files",
+          "default": false,
+          "description": "Re-fingerprint ALL files via AcoustID even if they already have a MusicBrainz ID. Use this to refresh identity verification across the entire library. Requires verifyIdentity and acoustidUrl."
+        },
         "verifyInstrumental": {
           "type": "boolean",
           "title": "Verify instrumental tracks",
@@ -1589,6 +1595,10 @@
                 {
                   "type": "Control",
                   "scope": "#/properties/essentiaFingerprint"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/forceFingerprint"
                 },
                 {
                   "type": "Control",
