@@ -339,11 +339,11 @@ pub fn walk_step(
     let delta_key = format!("scan.walkdelta.{library_id}");
     let mut files: Vec<(String, i64)> = Vec::new();
 
-    // If no delta exists yet, this is the first chunk — clear stale file lists and count.
-    if crate::store::kv().get(&delta_key).ok().flatten().is_none() {
-        let _ = crate::store::kv().delete(&files_key);
-        let _ = crate::store::kv().delete(&format!("scan.walkcount.{library_id}"));
-    }
+    // Always clear stale file lists and count at walk start.
+    // The delta key from a previous run may have stale data.
+    let _ = crate::store::kv().delete(&files_key);
+    let _ = crate::store::kv().delete(&delta_key);
+    let _ = crate::store::kv().delete(&format!("scan.walkcount.{library_id}"));
 
     // Load the current file count for the log message (avoid full deserialization).
     let file_count: usize = crate::store::kv()
@@ -365,6 +365,9 @@ pub fn walk_step(
 
     // Dedup stack against visited_dirs — removes dead entries from previous chunks.
     stack.retain(|d| !visited_dirs.contains(d));
+
+    // Track seen files to avoid counting duplicates (symlinks, hardlinks).
+    let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let scan_start = std::time::Instant::now();
     let time_budget = std::time::Duration::from_secs(15);
@@ -417,7 +420,9 @@ pub fn walk_step(
                 if let Ok(ft) = entry.file_type() {
                     if ft.is_file() {
                         let mtime = file_mtime(&entry.path());
-                        files.push((rel, mtime));
+                        if seen_files.insert(rel.clone()) {
+                            files.push((rel, mtime));
+                        }
                     }
                 }
             } else if let Ok(ft) = entry.file_type() {
