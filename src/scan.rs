@@ -688,7 +688,7 @@ pub fn verify_step(
 
     if unverified.is_empty() {
         crate::wasm::log_info("verify_step: all files verified, transitioning to group");
-        let _ = crate::store::kv().delete(&indexed_key);
+        // Don't delete indexed_key — group_step needs it to load the file list.
         let _ = crate::store::kv().delete(&unverified_key);
         let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
         crate::wasm::enqueue_group_task(library_id)?;
@@ -792,7 +792,7 @@ pub fn verify_step(
                 Ok((ScanOutcome::More, processed))
             } else {
                 // All files verified — transition to group.
-                let _ = crate::store::kv().delete(&indexed_key);
+                // Don't delete indexed_key — group_step needs it.
                 let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
                 crate::wasm::enqueue_group_task(library_id)?;
                 post_scan_status(cfg, library_id, processed, "verification complete");
@@ -802,7 +802,7 @@ pub fn verify_step(
         _ => {
             crate::wasm::log_warn("verify_step: acoustid sidecar unavailable, skipping verification");
             // Skip verification — group with existing tags.
-            let _ = crate::store::kv().delete(&indexed_key);
+            // Don't delete indexed_key — group_step needs it.
             let _ = crate::store::kv().delete(&unverified_key);
             let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
             crate::wasm::enqueue_group_task(library_id)?;
@@ -1047,6 +1047,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let _ = crate::store::kv().delete(&entries_key);
     let _ = crate::store::kv().delete(&remaining_key);
     let _ = crate::store::kv().delete(&format!("scan.group_entries.{library_id}"));
+    let _ = crate::store::kv().delete(&indexed_key);
 
     let total_files = all_entries.len();
     let verified: Vec<(String, TrackTags)> = all_entries;
