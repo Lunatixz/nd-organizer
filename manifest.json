@@ -230,7 +230,7 @@
           "title": "Stats poll interval (minutes)",
           "minimum": 1,
           "maximum": 60,
-          "default": 5,
+          "default": 30,
           "description": "How often the plugin updates play/skip stats."
         },
         "skipThresholdPercent": {
@@ -540,6 +540,13 @@
           "minimum": 10,
           "default": 500,
           "description": "Maximum number of favorites to process per sync pass (a safety cap)."
+        },
+        "favoritesSyncMinutes": {
+          "type": "integer",
+          "title": "Favorites sync interval (minutes)",
+          "minimum": 5,
+          "default": 30,
+          "description": "How often to sync favorites between Navidrome and Last.fm/Libre.fm. Independent of the main organize schedule."
         },
         "favoritesSyncBidirectional": {
           "type": "boolean",
@@ -1079,6 +1086,107 @@
       "elements": [
         {
           "type": "Group",
+          "label": "Prerequisites (API keys & sidecar URLs)",
+          "elements": [
+            {
+              "type": "Label",
+              "text": "Configure API keys, tokens, and sidecar URLs below. Only set the ones you use — unused features are automatically disabled."
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/acoustidUrl"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/acoustidApiKey"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/lastfmApiKey"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/lastfmUser"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/lidarrUrl"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/lidarrApiKey"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/essentiaUrl"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/audiomuseUrl"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/filterUrl"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/logWebhookUrl"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/discogsToken"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/theAudioDbKey"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/geniusToken"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/musicbrainzToken"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Group",
           "label": "General & run scheduling",
           "elements": [
             {
@@ -1403,6 +1511,10 @@
             },
             {
               "type": "Control",
+              "scope": "#/properties/forceFingerprint"
+            },
+            {
+              "type": "Control",
               "scope": "#/properties/minConfidence",
               "rule": {
                 "effect": "SHOW",
@@ -1492,6 +1604,10 @@
             {
               "type": "Control",
               "scope": "#/properties/favoritesSyncMax"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/favoritesSyncMinutes"
             },
             {
               "type": "Control",

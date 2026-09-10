@@ -1718,13 +1718,6 @@ pub fn plan_move_step(
                     crate::wasm::log_warn(&format!("record apply {}: {e}", m.from));
                 }
             }
-            if cfg.write_nfo {
-                write_group_nfo(&root, cfg, &plan, &files);
-                actions.push(serde_json::json!({
-                    "ts": crate::state::now_ts(),
-                    "text": "wrote album.nfo".to_string(),
-                }));
-            }
         } else if cfg.mode != Mode::Apply {
             for m in &plan.moves {
                 actions.push(serde_json::json!({
@@ -2187,6 +2180,15 @@ pub fn plan_enrich_step(
                 }
             }
         }
+        // Write NFO at the end — after ALL metadata sources have been queried.
+        // This ensures the NFO contains the most complete metadata possible.
+        if cfg.write_nfo && !plan.moves.is_empty() {
+            write_group_nfo(&root, cfg, &plan, &files);
+            actions.push(serde_json::json!({
+                "ts": crate::state::now_ts(),
+                "text": "wrote album.nfo (unified metadata)".to_string(),
+            }));
+        }
     }
 
     let mut report_text = if report_parts.is_empty() {
@@ -2613,6 +2615,17 @@ fn write_group_nfo(
                 None
             }
             .unwrap_or_default();
+            // Fetch Apple Music artist bio (gated by appleMusicArtistBios).
+            let artist_bio = if cfg.apple_music_artist_bios {
+                crate::apple_music::host_apple_music::fetch_artist_bio(
+                    cfg,
+                    &info.album_artist,
+                    &countries,
+                )
+            } else {
+                None
+            }
+            .unwrap_or_default();
             // Read existing artist.nfo if present to preserve other fields.
             let a_path = root.join(artist_dir).join("artist.nfo");
             let existing_nfo = if let Ok(xml) = std::fs::read_to_string(&a_path) {
@@ -2624,6 +2637,7 @@ fn write_group_nfo(
                 name: info.album_artist.clone(),
                 genres: genre.clone(),
                 similar_artists,
+                biography: artist_bio,
                 ..existing_nfo.unwrap_or_default()
             };
             if let Some(p) = a_path.parent() {

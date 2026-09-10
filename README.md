@@ -76,6 +76,36 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
 - **Bidirectional sync**: ratings, loved/hearts, and playcounts sync across
   Navidrome, Last.fm, ListenBrainz, and Lidarr. Album, artist, and track level
   where supported. See [Rating & Favorites Sync](#rating--favorites-sync) below.
+- **Favorites sync (independent)**: Navidrome ↔ Last.fm/Libre.fm loved tracks
+  sync on its own schedule (default: every 30 minutes), independent of the main
+  organize pass. Bidirectional when `favoritesSyncBidirectional` is enabled.
+- **Force fingerprint**: Re-fingerprint ALL files via AcoustID even if they
+  already have a MusicBrainz ID (`forceFingerprint`). Useful for refreshing
+  identity verification across the entire library.
+- **Verify instrumental**: Hybrid Essentia + librosa vocal detection for tracks
+  labeled "(Instrumental)". If not truly instrumental, strips the keyword from
+  title, tags, and NFO files.
+- **Unified metadata writing**: All metadata sources are queried first, gaps are
+  filled with priority logic, then written once (tags + NFO) at the end.
+
+## Prerequisites
+
+Before enabling features, configure the required API keys and sidecar URLs:
+
+| Feature | Required | Config Keys |
+|---------|----------|-------------|
+| **Identity verification** | AcoustID sidecar | `acoustidUrl` + `acoustidApiKey` |
+| **Favorites sync** | Last.fm/Libre.fm account | `lastfmApiKey` + `lastfmUser` + `lastfmApiSecret` + `lastfmPassword` |
+| **Scrobbling** | Last.fm/Libre.fm OR ListenBrainz | `scrobbleProvider` + provider credentials |
+| **Lidarr integration** | Lidarr instance | `lidarrUrl` + `lidarrApiKey` |
+| **Filter proxy** | nd-organizer-proxy sidecar | `filterUrl` |
+| **Webhook dashboard** | nd-organizer-webhook sidecar | `logWebhookUrl` |
+| **ML analysis** | nd-organizer-essentia sidecar | `essentiaUrl` |
+| **Acoustic tags** | AudioMuse-AI sidecar | `audiomuseUrl` + `audiomuseToken` |
+| **Credits** | Discogs account | `discogsToken` |
+| **Fanart/bios** | TheAudioDB account | `theAudioDbKey` |
+| **Lyrics** | Genius account | `geniusToken` |
+| **MySQL persistence** | MariaDB + MySQL sidecar | `persistenceBackend=mysql` + MySQL credentials |
 
 ## How it works (pipeline)
 
@@ -206,6 +236,8 @@ sync and scrobble will retry automatically via the circuit breaker.
 
 ### Favorites sync (Navidrome ↔ Last.fm/Libre.fm)
 
+- **Independent schedule**: Runs every `favoritesSyncMinutes` (default: 30 min),
+  separate from the main organize pass. No need to wait for a full scan.
 - **Bidirectional**: Navidrome stars ↔ Last.fm/Libre.fm loved tracks
 - **Provider selection**: uses `scrobbleProvider` — same credentials for both
 - **Unstar/unlove propagation**: when `favoritesSyncBidirectional` is enabled
@@ -220,12 +252,16 @@ sync and scrobble will retry automatically via the circuit breaker.
 | `ratingSyncWriteToLidarr` | false | Push ratings to Lidarr (track + album) |
 | `ratingSyncPullFromNavidrome` | false | Import manual ratings from Navidrome UI |
 | `favoritesSyncLastfm` | false | Bidirectional loved sync with Last.fm/Libre.fm (uses scrobbleProvider) |
+| `favoritesSyncMinutes` | 30 | Favorites sync interval (independent of main pass) |
 | `favoritesSyncBidirectional` | false | Propagate unstar/unlove (not just add) |
 | `favoritesSyncMax` | 500 | Max favorites per sync pass |
 | `lastfmImportPlaycount` | false | Seed playcount from Last.fm on first sight |
 | `useCommunityRatings` | false | Seed ratings from Discogs community |
 | `listenbrainzScrobble` | false | Scrobble + push ratings to ListenBrainz |
 | `listenbrainzUser` | (empty) | ListenBrainz username (defaults to lastfmUser) |
+| `forceFingerprint` | false | Re-fingerprint ALL files via AcoustID (ignores existing MBIDs) |
+| `verifyInstrumental` | false | Verify instrumental tracks via Essentia + librosa |
+| `instrumentalBatchSize` | 100 | Tracks per batch for Pass 2 (gradual analysis) |
 
 ### Conflict resolution
 

@@ -309,6 +309,15 @@ pub(crate) mod wasm {
                     log_warn(&format!("schedule stats: {e}"));
                 }
             }
+            // Independent favorites sync (Navidrome ↔ Last.fm/Libre.fm).
+            if cfg.favorites_sync_lastfm && cfg.favorites_sync_minutes > 0 {
+                let cron = format!("*/{} * * * *", cfg.favorites_sync_minutes.min(60));
+                if let Err(e) =
+                    host::scheduler::schedule_recurring(&cron, "favsync", "nd-organizer-favsync")
+                {
+                    log_warn(&format!("schedule favsync: {e}"));
+                }
+            }
             // Self-trim Navidrome's missing-files list on a schedule.
             if cfg.trim_missing_days > 0 {
                 let cron = format!("0 4 */{} * *", cfg.trim_missing_days.min(30));
@@ -1456,11 +1465,6 @@ pub(crate) mod wasm {
         // MusicBrainz connectivity is checked per-task; no blocking check here
         // to avoid blowing the 30s scheduler callback deadline.
         store::write_status(&status_json(cfg, true, &[], None, None));
-        if cfg.favorites_sync_lastfm {
-            if let Err(e) = enqueue("favsync", 0, "", "") {
-                log_warn(&format!("enqueue favsync: {e}"));
-            }
-        }
         if cfg.mode == Mode::Apply {
             for &library_id in &target_libs {
                 let _ = current_run_id(library_id);

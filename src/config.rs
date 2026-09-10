@@ -97,6 +97,7 @@ pub struct Config {
     /// that schedule; an empty cron makes this startup run the only automatic run.
     pub run_on_startup: bool,
     pub schedule_cron: String,
+    /// Max albums to process per scheduled run (0 = unlimited).
     pub max_albums_per_run: usize,
     /// Max directory entries a single pass scans before giving up (0 = unlimited).
     pub max_scan_entries: usize,
@@ -108,16 +109,24 @@ pub struct Config {
     pub run_only_when_idle: bool,
 
     // Favorites sync (Navidrome hub <-> Last.fm loved tracks)
+    /// Enable favorites sync with Last.fm/Libre.fm.
     pub favorites_sync_lastfm: bool,
+    /// Max favorites to process per sync pass (safety cap).
     pub favorites_sync_max: usize,
+    /// Favorites sync interval in minutes (independent of main pass).
+    pub favorites_sync_minutes: i32,
     /// When true, unstar in Navidrome propagates to unlove on Last.fm (and
     /// vice versa). When false, sync is additive-only (never removes).
     pub favorites_sync_bidirectional: bool,
 
     // Playback stats (plays/skips weighting + Top Picks playlist)
+    /// Enable playback stats observation (plays/skips/Top Picks).
     pub playback_stats_enabled: bool,
+    /// How often to poll getNowPlaying for play/skip detection (minutes).
     pub stats_poll_minutes: i32,
+    /// Number of tracks in the "Top Picks" Navidrome playlist.
     pub top_picks_count: usize,
+    /// Skip percentage threshold for skip-heavy detection.
     pub skip_threshold_percent: i32,
     /// Drop filler-keyword tracks (fillerKeywords) from auto-queues via the
     /// Subsonic proxy. Explicit user searches still return them.
@@ -393,9 +402,10 @@ impl Default for Config {
             run_only_when_idle: true,
             favorites_sync_lastfm: false,
             favorites_sync_max: 500,
+            favorites_sync_minutes: 30,
             favorites_sync_bidirectional: false,
             playback_stats_enabled: false,
-            stats_poll_minutes: 5,
+            stats_poll_minutes: 30,
             top_picks_count: 50,
             skip_threshold_percent: 30,
             keyword_filter_enabled: true,
@@ -569,7 +579,7 @@ const CONFIG_KEYS: &[&str] = &[
     "appleMusicArtistBios", "appleMusicSimilarArtists", "appleMusicAlbumArt",
     "appleMusicAlbumInfo",
     "librefmScrobble",
-    "favoritesSyncBidirectional", "ratingSyncWriteToLidarr",
+    "favoritesSyncBidirectional", "favoritesSyncMinutes", "ratingSyncWriteToLidarr",
     "ratingSyncPullFromNavidrome", "useCommunityRatings", "listenbrainzUser",
 ];
 
@@ -667,6 +677,9 @@ impl Config {
         c.favorites_sync_lastfm = bool(map, "favoritesSyncLastfm", c.favorites_sync_lastfm);
         if let Some(v) = map.get("favoritesSyncMax") {
             c.favorites_sync_max = v.trim().parse().unwrap_or(c.favorites_sync_max);
+        }
+        if let Some(v) = map.get("favoritesSyncMinutes") {
+            c.favorites_sync_minutes = v.trim().parse().unwrap_or(c.favorites_sync_minutes);
         }
         c.favorites_sync_bidirectional = bool(map, "favoritesSyncBidirectional", c.favorites_sync_bidirectional);
         c.playback_stats_enabled = bool(map, "playbackStatsEnabled", c.playback_stats_enabled);
