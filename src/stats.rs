@@ -1138,9 +1138,7 @@ pub mod host_stats {
     pub fn publish_filters(cfg: &Config) -> Result<usize, String> {
         use crate::config::Mode;
         use std::collections::HashMap;
-        if cfg.mode != Mode::Apply {
-            return Ok(0);
-        }
+        // Always push filters — dry-run only affects organizer, not proxy.
         let base = cfg.filter_url.trim().trim_end_matches('/');
         if base.is_empty() {
             return Ok(0);
