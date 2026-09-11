@@ -1714,10 +1714,6 @@
                 },
                 {
                   "type": "Control",
-                  "scope": "#/properties/forceFingerprint"
-                },
-                {
-                  "type": "Control",
                   "scope": "#/properties/verifyInstrumental"
                 },
                 {
