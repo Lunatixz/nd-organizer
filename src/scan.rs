@@ -608,7 +608,7 @@ pub fn walk_step(
                 .set(&delta_key, serde_json::to_vec(&delta).unwrap_or_default())
                 .map_err(|e| e.to_string())?;
             // Update file count for next chunk's log message.
-            let _ = crate::store::kv().set(&format!("scan.walkcount.{library_id}"), (file_count + delta.len()).to_string().into_bytes());
+            let _ = crate::store::kv().set(&format!("scan.walkcount.{library_id}"), delta.len().to_string().into_bytes());
         }
         crate::store::kv()
             .set(&dirs_key, serde_json::to_vec(&visited_dirs).unwrap_or_default())
