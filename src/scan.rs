@@ -715,17 +715,17 @@ pub fn index_step(
         }
     }
 
+    let finished = i >= files.len();
     let capped = cap > 0 && pass_count + processed >= cap;
     let pass_key = format!("scan.pass.{library_id}");
 
     crate::wasm::log_info(&format!(
-        "index_step: chunk done, processed={}, skipped={}, files_total={}",
-        processed, skipped, files.len()
+        "index_step: chunk done, processed={}, skipped={}, cursor={}/{}, pass={}",
+        processed, skipped, i, files.len(), pass_count + processed
     ));
 
-    if capped {
-        // Intermediate chunk — save cursor for resume.
-        // Don't touch scan.indexed; group_step reads that after index completes.
+    if !finished || capped {
+        // Not done yet — save cursor for resume.
         let _ = crate::store::kv().set(&cursor_key, i.to_string().into_bytes());
         let _ = crate::store::kv().set(
             &pass_key,
