@@ -776,6 +776,7 @@ pub fn verify_step(
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_else(|| {
             // Recompute: load full indexed list, batch-check which are unverified.
+            // Chunk the KV reads with a time budget to avoid WASM timeout.
             crate::wasm::log_info("verify_step: recomputing unverified list from indexed key");
             let file_list: Vec<(String, i64)> = crate::store::kv()
                 .get(&indexed_key)
@@ -786,15 +787,18 @@ pub fn verify_step(
 
             let file_keys: Vec<String> = file_list.iter().map(|(rel, _)| file_key(library_id, rel)).collect();
             let batch_size_kv = 500;
+            let recompute_start = std::time::Instant::now();
+            let recompute_budget = std::time::Duration::from_secs(12);
             let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
             for chunk in file_keys.chunks(batch_size_kv) {
+                if recompute_start.elapsed() >= recompute_budget {
+                    break;
+                }
                 if let Ok(entries) = crate::store::kv().get_many(chunk.to_vec()) {
                     for (k, v) in entries {
                         if let Ok(val) = serde_json::from_slice::<Value>(&v) {
                             if let Some(tags) = val.get("tags") {
                                 if !tags.is_null() {
-                                    // When forceFingerprint is enabled, skip MBID check —
-                                    // re-fingerprint everything regardless of existing MBIDs.
                                     if !cfg.force_fingerprint {
                                         if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
                                             if !t.mbid_album.is_empty() {
