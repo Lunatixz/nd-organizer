@@ -657,9 +657,10 @@ pub fn index_step(
         .unwrap_or(0);
 
     let scan_start = std::time::Instant::now();
-    // Conservative 15s budget — Navidrome's WASM scheduler kills at ~27s,
-    // not the full 30s. This leaves margin for tag I/O overhead.
-    let time_budget = std::time::Duration::from_secs(15);
+    // Conservative 10s budget — Navidrome's WASM scheduler kills at ~27s.
+    // Tag I/O + KV save of the full file list eats ~5-10s of overhead;
+    // 10s leaves comfortable margin for both.
+    let time_budget = std::time::Duration::from_secs(10);
     let mut processed = 0usize;
     let mut skipped = 0usize;
     let mut last_rel = String::new();
