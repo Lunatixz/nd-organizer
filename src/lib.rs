@@ -269,13 +269,6 @@ pub(crate) mod wasm {
                     ] {
                         let _ = crate::store::kv().delete(&format!("{}{}", prefix, library_id));
                     }
-                    // Clear filev2 entries so index re-reads tags for all files.
-                    // This ensures group has fresh tag data.
-                    if let Ok(keys) = crate::store::kv().list(&format!("scan.filev2.{}:", library_id)) {
-                        for k in keys {
-                            let _ = crate::store::kv().delete(&k);
-                        }
-                    }
                 }
                 // Enqueue walk tasks directly from init to avoid the tight
                 // scheduler callback timeout. The scheduler path (run_pass)
