@@ -42,6 +42,10 @@ pub enum Kv {
     Mysql { url: String, db: MysqlDb },
 }
 
+/// Track whether we're in MySQL fallback mode (MySQL was down, using Host KV).
+/// When MySQL comes back, re-migrate Host data to MySQL.
+static MYSQL_FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Clone)]
 pub struct MysqlDb {
     pub host: String,
@@ -131,6 +135,11 @@ impl Kv {
                 // Try MySQL first; fall back to Host if MySQL fails.
                 match self.mysql_op("get", json!({ "key": key })) {
                     Ok(r) => {
+                        // MySQL is back — re-migrate if we were in fallback mode.
+                        if MYSQL_FALLBACK.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            crate::wasm::log_info("mysql: reconnected, re-seeding from local store");
+                            let _ = reseed_mysql();
+                        }
                         let v = r.get("value").cloned().unwrap_or_default();
                         if let Some(b64) = v.as_str() {
                             Ok(Some(BASE64.decode(b64).map_err(|e| e.to_string())?))
@@ -140,6 +149,7 @@ impl Kv {
                     }
                     Err(e) => {
                         crate::wasm::log_warn(&format!("mysql get failed ({e}), falling back to host"));
+                        MYSQL_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
                         host::kvstore::get(key).map_err(|e| e.to_string())
                     }
                 }
@@ -342,6 +352,38 @@ pub fn mysql_migration_needed(cfg: &crate::config::Config) -> bool {
     match kv.mysql_op("has", json!({ "key": MIGRATED_MARKER })) {
         Ok(r) => !r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false),
         Err(_) => false, // sidecar unreachable - don't loop forever
+    }
+}
+
+/// Re-seed MySQL with data from Host KV after a fallback period.
+/// Copies all keys from Host to MySQL, preserving existing MySQL data.
+fn reseed_mysql() -> Result<(), String> {
+    let cfg = crate::config::Config::load().map_err(|e| e.to_string())?;
+    let kv = build_backend(&cfg);
+    match kv {
+        Kv::Mysql { .. } => {
+            // List all keys in Host KVStore.
+            let keys = host::kvstore::list("").map_err(|e| e.to_string())?;
+            let mut migrated = 0usize;
+            for key in &keys {
+                // Skip the migrated marker itself.
+                if key == MIGRATED_MARKER {
+                    continue;
+                }
+                // Read from Host.
+                if let Ok(Some(value)) = host::kvstore::get(key) {
+                    // Write to MySQL.
+                    if kv.mysql_op("set", json!({ "key": key, "value": BASE64.encode(&value), "ttlSeconds": 0 })).is_ok() {
+                        migrated += 1;
+                    }
+                }
+            }
+            // Mark migration complete.
+            let _ = kv.mysql_op("set", json!({ "key": MIGRATED_MARKER, "value": BASE64.encode(b"1"), "ttlSeconds": 0 }));
+            crate::wasm::log_info(&format!("reseed: migrated {} keys from local store to MySQL", migrated));
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
