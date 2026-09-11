@@ -657,10 +657,8 @@ pub fn index_step(
         .unwrap_or(0);
 
     let scan_start = std::time::Instant::now();
-    // Conservative 10s budget — Navidrome's WASM scheduler kills at ~27s.
-    // Tag I/O + KV save of the full file list eats ~5-10s of overhead;
-    // 10s leaves comfortable margin for both.
-    let time_budget = std::time::Duration::from_secs(10);
+    // 15s budget — Navidrome's WASM scheduler kills at ~27s.
+    let time_budget = std::time::Duration::from_secs(15);
     let mut processed = 0usize;
     let mut skipped = 0usize;
     let mut last_rel = String::new();
@@ -704,34 +702,42 @@ pub fn index_step(
         }
     }
 
-    // Save the complete file list to indexed key for group_step.
-    // Don't drain — the full list is always saved.
-    let indexed_key = format!("scan.indexed.{library_id}");
-    crate::store::kv()
-        .set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default())
-        .map_err(|e| e.to_string())?;
-    let _ = crate::store::kv().set(
-        &format!("scan.pass.{library_id}"),
-        (pass_count + processed).to_string().into_bytes(),
-    );
+    let capped = cap > 0 && pass_count + processed >= cap;
+    let pass_key = format!("scan.pass.{library_id}");
 
     crate::wasm::log_info(&format!(
         "index_step: chunk done, processed={}, skipped={}, files_total={}",
         processed, skipped, files.len()
     ));
 
-    let capped = cap > 0 && pass_count + processed >= cap;
-
     if capped {
+        // Intermediate chunk — save only remaining files for resume.
+        // Don't touch scan.indexed; group_step reads that after index completes.
+        let remaining: Vec<_> = files[i..].to_vec();
+        crate::store::kv()
+            .set(&files_key, serde_json::to_vec(&remaining).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+        let _ = crate::store::kv().set(
+            &pass_key,
+            (pass_count + processed).to_string().into_bytes(),
+        );
         post_scan_status(cfg, library_id, processed, &last_rel);
         Ok((ScanOutcome::Paused, processed))
     } else {
-        // All files done — save indexed key, clean up, enqueue verify.
+        // All files done — save full list to indexed key for group_step.
+        let indexed_key = format!("scan.indexed.{library_id}");
+        crate::store::kv()
+            .set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+        let _ = crate::store::kv().set(
+            &pass_key,
+            (pass_count + processed).to_string().into_bytes(),
+        );
+        let _ = crate::store::kv().delete(&files_key);
         post_scan_status(cfg, library_id, processed, &format!(
             "indexing complete: {} files indexed, {} skipped (unchanged)",
             processed, skipped
         ));
-        let _ = crate::store::kv().delete(&files_key);
         crate::wasm::enqueue_verify_task(library_id)?;
         post_scan_status(cfg, library_id, processed, &last_rel);
         Ok((ScanOutcome::Done, processed))
@@ -1138,34 +1144,32 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         // Save only the unprocessed remaining files — much smaller than full list.
         let remaining: Vec<(String, i64)> = file_list[cursor..].to_vec();
         let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&remaining).unwrap_or_default());
-        // Accumulate entries into the entries KV so we don't lose progress.
-        let mut prev_entries: Vec<(String, TrackTags)> = crate::store::kv()
-            .get(&format!("scan.group_entries.{library_id}"))
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_slice(&v).ok())
-            .unwrap_or_default();
-        prev_entries.extend(entries);
-        let _ = crate::store::kv().set(
-            &format!("scan.group_entries.{library_id}"),
-            serde_json::to_vec(&prev_entries).unwrap_or_default(),
-        );
+        // Save this chunk's entries to a numbered key to avoid O(n²)
+        // reload-extend-save on every chunk. Merge at the end.
+        let chunk_entries_key = format!("scan.group_entries.{library_id}.{}", entries.len());
+        let _ = crate::store::kv().set(&chunk_entries_key, serde_json::to_vec(&entries).unwrap_or_default());
         crate::wasm::log_info(&format!(
-            "group_step: time budget hit, {} remaining files, saved {} entries, re-enqueueing",
-            remaining.len(), prev_entries.len()
+            "group_step: time budget hit, {} remaining files, {} entries this chunk, re-enqueueing",
+            remaining.len(), entries.len()
         ));
         crate::wasm::enqueue_group_task(library_id)?;
         return Ok((0, 0));
     }
 
-    // All files processed — load any accumulated entries from previous chunks.
-    let mut all_entries: Vec<(String, TrackTags)> = crate::store::kv()
-        .get(&format!("scan.group_entries.{library_id}"))
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or_default();
-    all_entries.extend(entries);
+    // All files processed — load accumulated entries from previous chunks.
+    // Previous chunks saved their entries under scan.group_entries.{id}.{count}.
+    let mut all_entries: Vec<(String, TrackTags)> = entries;
+    // Scan for any chunk entry keys from previous invocations.
+    if let Ok(keys) = crate::store::kv().list(&format!("scan.group_entries.{library_id}.")) {
+        for k in keys {
+            if let Ok(Some(v)) = crate::store::kv().get(&k) {
+                if let Ok(mut prev) = serde_json::from_slice::<Vec<(String, TrackTags)>>(&v) {
+                    all_entries.append(&mut prev);
+                }
+            }
+            let _ = crate::store::kv().delete(&k);
+        }
+    }
     let _ = crate::store::kv().delete(&cursor_key);
     let _ = crate::store::kv().delete(&entries_key);
     let _ = crate::store::kv().delete(&remaining_key);
