@@ -89,11 +89,16 @@ REORDER_CONTAINERS = {
     "similarSongs", "similarSongs2", "songsByGenre", "topSongs",
 }
 
+# sonicMatch containers (findSonicPath / getSonicSimilarTracks): each item is
+# {"entry": <song dict>, "similarity": <float>}.  Keyword filtering applies to
+# the entry dict inside each match, same as song/entry lists.
+SONIC_MATCH_KEYS = ("sonicMatch",)
+
 # Filler-keyword tracks are dropped from EVERY media response the proxy returns
-# (albums, playlists, queues, genre/similar/top, starred, ...) - see filter_json.
-# Only explicit user searches (searchResult*) keep their keyword tracks because
-# the user asked for those. Reordering by weight is limited to REORDER_CONTAINERS
-# (auto-queue sources) so album track order is preserved.
+# (albums, playlists, queues, genre/similar/top, starred, sonicMatch, ...) - see
+# filter_json.  Only explicit user searches (searchResult*) keep their keyword
+# tracks because the user asked for those.  Reordering by weight is limited to
+# REORDER_CONTAINERS (auto-queue sources) so album track order is preserved.
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -174,15 +179,14 @@ def filter_json(obj, own_key=None):
     """
     if isinstance(obj, dict):
         new = {k: filter_json(v, k) for k, v in obj.items()}
+        is_search = own_key in ("searchResult", "searchResult2", "searchResult3")
+        drop_keyword = not is_search and KEYWORD_FILTER_ENABLED
+        # --- song/entry list containers (standard Subsonic) ---
         for ck in ("song", "entry"):
             lst = new.get(ck)
             if not isinstance(lst, list):
                 continue
             reorder = own_key in REORDER_CONTAINERS
-            # Explicit user searches (searchResult*) keep keyword tracks; every
-            # other media response drops them.
-            is_search = own_key in ("searchResult", "searchResult2", "searchResult3")
-            drop_keyword = not is_search and KEYWORD_FILTER_ENABLED
             kept = []
             for it in lst:
                 if not is_song(it):
@@ -200,6 +204,37 @@ def filter_json(obj, own_key=None):
                 kept = _limit_skip_heavy(kept)
                 kept = sorted(kept, key=weight_of, reverse=True)
             new[ck] = kept
+        # --- sonicMatch containers (findSonicPath / getSonicSimilarTracks) ---
+        # Each item is {"entry": <song dict>, "similarity": <float>}.
+        # Filter keyword/skip-heavy on the inner entry; reorder by
+        # weight * similarity so liked tracks rise and filler sinks.
+        for mk in SONIC_MATCH_KEYS:
+            matches = new.get(mk)
+            if not isinstance(matches, list):
+                continue
+            kept = []
+            for item in matches:
+                if not isinstance(item, dict):
+                    kept.append(item)
+                    continue
+                entry = item.get("entry")
+                if not isinstance(entry, dict) or not is_song(entry):
+                    kept.append(item)
+                    continue
+                if is_skip_heavy(entry) and SKIP_MODE == "exclude":
+                    _record_drop(entry, "excluded")
+                    continue
+                if drop_keyword and is_filler_title(entry.get("title", "")):
+                    _record_drop(entry, "keyword")
+                    continue
+                kept.append(item)
+            # Reorder by weight * similarity so best tracks surface first.
+            def _match_sort(m):
+                e = m.get("entry") if isinstance(m, dict) else None
+                sim = m.get("similarity", 1.0) if isinstance(m, dict) else 1.0
+                return weight_of(e) * sim if isinstance(e, dict) else 0.0
+            kept.sort(key=_match_sort, reverse=True)
+            new[mk] = kept
         return new
     if isinstance(obj, list):
         return [filter_json(it, None) for it in obj]
@@ -416,6 +451,9 @@ class Handler(BaseHTTPRequestHandler):
 def _count_songs(obj):
     n = 0
     if isinstance(obj, dict):
+        # sonicMatch items have "entry" dicts, not top-level song dicts
+        if "entry" in obj and isinstance(obj["entry"], dict) and is_song(obj["entry"]):
+            n += 1
         for v in obj.values():
             n += _count_songs(v)
     elif isinstance(obj, list):
@@ -460,6 +498,7 @@ if __name__ == "__main__":
     log.info("filter keywords: %s", KEYWORDS or "(none)")
     log.info("POST /filters {'excluded':[ids], 'weights':[[id,w,plays,skips],...], 'skipMode':..., 'keywordFilter':...} to flag/reorder")
     log.info("queue containers (weight re-sort): %s", ", ".join(sorted(REORDER_CONTAINERS)))
+    log.info("sonicMatch containers (findSonicPath): keyword filter + weight*similarity sort")
     log.info("filler-keyword tracks dropped from all media responses except explicit user search")
     log.info("skip-heavy limit mode: %s (exclude/third/lessThanHalf/half/none)", SKIP_MODE)
     log.info("keywords ignored from the queue; albums stay whole")
