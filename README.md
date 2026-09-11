@@ -8,6 +8,12 @@
 [![Docker](https://img.shields.io/badge/Docker-Sidecars-blue.svg)](docker-compose.yml)
 [![GitHub release](https://img.shields.io/github/v/release/lunatixz/nd-organizer)](https://github.com/lunatixz/nd-organizer/releases)
 
+> **Optimized for [Navidrome](https://www.navidrome.org/) +
+> [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) +
+> [Symfonium](https://symfonium.app/).**
+> The proxy filter, similar-songs routing, and playlist handling are tuned for
+> this stack. Other Subsonic servers work, but this trio is the primary target.
+
 A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged as
 `.ndp`) that organizes your music library — slowly and accurately:
 
