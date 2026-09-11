@@ -128,12 +128,20 @@ impl Kv {
         match self {
             Kv::Host => host::kvstore::get(key).map_err(|e| e.to_string()),
             Kv::Mysql { .. } => {
-                let r = self.mysql_op("get", json!({ "key": key }))?;
-                if r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false) {
-                    let b64 = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                    BASE64.decode(b64).map(Some).map_err(|e| e.to_string())
-                } else {
-                    Ok(None)
+                // Try MySQL first; fall back to Host if MySQL fails.
+                match self.mysql_op("get", json!({ "key": key })) {
+                    Ok(r) => {
+                        let v = r.get("value").cloned().unwrap_or_default();
+                        if let Some(b64) = v.as_str() {
+                            Ok(Some(BASE64.decode(b64).map_err(|e| e.to_string())?))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    Err(e) => {
+                        crate::wasm::log_warn(&format!("mysql get failed ({e}), falling back to host"));
+                        host::kvstore::get(key).map_err(|e| e.to_string())
+                    }
                 }
             }
         }
@@ -151,9 +159,15 @@ impl Kv {
     pub fn set(&self, key: &str, value: Vec<u8>) -> Result<(), String> {
         match self {
             Kv::Host => host::kvstore::set(key, value).map_err(|e| e.to_string()),
-            Kv::Mysql { .. } => self
-                .mysql_op("set", json!({ "key": key, "value": BASE64.encode(value), "ttlSeconds": 0 }))
-                .map(|_| ()),
+            Kv::Mysql { .. } => {
+                match self.mysql_op("set", json!({ "key": key, "value": BASE64.encode(&value), "ttlSeconds": 0 })) {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        crate::wasm::log_warn(&format!("mysql set failed ({e}), falling back to host"));
+                        host::kvstore::set(key, value).map_err(|e| e.to_string())
+                    }
+                }
+            }
         }
     }
 
@@ -172,7 +186,15 @@ impl Kv {
     pub fn delete(&self, key: &str) -> Result<(), String> {
         match self {
             Kv::Host => host::kvstore::delete(key).map_err(|e| e.to_string()),
-            Kv::Mysql { .. } => self.mysql_op("delete", json!({ "key": key })).map(|_| ()),
+            Kv::Mysql { .. } => {
+                match self.mysql_op("delete", json!({ "key": key })) {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        crate::wasm::log_warn(&format!("mysql delete failed ({e}), falling back to host"));
+                        host::kvstore::delete(key).map_err(|e| e.to_string())
+                    }
+                }
+            }
         }
     }
 
