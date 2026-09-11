@@ -1368,15 +1368,19 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
     let deleted_key = format!("cleanup.deleted.{library_id}");
 
     // Load or initialize directory list.
+    // First-chunk collect_dirs can be slow on large libraries, so we pass
+    // a time budget to avoid exceeding the WASM deadline.
     let dirs: Vec<String> = crate::store::kv()
         .get(&dirs_key)
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_else(|| {
-            // First chunk — collect all directories.
+            // First chunk — collect directories with a time budget.
+            let start = std::time::Instant::now();
+            let budget = std::time::Duration::from_secs(12);
             let mut all_dirs = Vec::new();
-            collect_dirs(&root, &root, cfg, &mut all_dirs);
+            collect_dirs_bounded(&root, &root, cfg, &mut all_dirs, &start, &budget);
             all_dirs
         });
 
@@ -1457,8 +1461,18 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
     Ok(deleted)
 }
 
-/// Collect all directories recursively.
-fn collect_dirs(dir: &std::path::Path, root: &std::path::Path, cfg: &Config, dirs: &mut Vec<String>) {
+/// Collect all directories recursively, with a time budget to avoid WASM timeout.
+fn collect_dirs_bounded(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    cfg: &Config,
+    dirs: &mut Vec<String>,
+    start: &std::time::Instant,
+    budget: &std::time::Duration,
+) {
+    if start.elapsed() >= *budget {
+        return;
+    }
     let rel = dir
         .strip_prefix(root)
         .unwrap_or(dir)
@@ -1474,13 +1488,16 @@ fn collect_dirs(dir: &std::path::Path, root: &std::path::Path, cfg: &Config, dir
         return;
     };
     for e in entries.flatten() {
+        if start.elapsed() >= *budget {
+            return;
+        }
         let name = e.file_name().to_string_lossy().to_string();
         if cfg.skip_hidden_files && name.starts_with('.') {
             continue;
         }
         if let Ok(ft) = e.file_type() {
             if ft.is_dir() {
-                collect_dirs(&e.path(), root, cfg, dirs);
+                collect_dirs_bounded(&e.path(), root, cfg, dirs, start, budget);
             }
         }
     }
@@ -1538,8 +1555,22 @@ pub fn plan_move_step(
     let mut total_dupes = 0usize;
     let mut total_to_move = 0usize;
     let mut plans: Vec<serde_json::Value> = Vec::new();
+    let move_start = std::time::Instant::now();
+    let move_budget = std::time::Duration::from_secs(15);
 
-    for group in groups {
+    for (gi, group) in groups.iter().enumerate() {
+        if move_start.elapsed() >= move_budget {
+            // Re-enqueue remaining groups.
+            let remaining = &groups[gi..];
+            crate::wasm::log_info(&format!(
+                "plan_move: time budget hit after {} albums, re-enqueueing {} remaining",
+                gi, remaining.len()
+            ));
+            if let Err(e) = crate::wasm::enqueue_plan_tasks(cfg, library_id, remaining.to_vec()) {
+                crate::wasm::log_warn(&format!("plan_move: re-enqueue failed: {e}"));
+            }
+            break;
+        }
         let mut files: Vec<(String, TrackTags)> = Vec::new();
         for rel in group {
             let key = file_key(library_id, rel);
@@ -1857,8 +1888,16 @@ pub fn plan_enrich_step(
     let mut actions: Vec<serde_json::Value> = Vec::new();
     let mut total_autotags = 0usize;
     let mut total_replaygains = 0usize;
+    let enrich_start = std::time::Instant::now();
+    let enrich_budget = std::time::Duration::from_secs(15);
 
     for group in groups {
+        // Check time budget before starting each album.
+        // Cached sidecar results make re-processing fast on resume.
+        if enrich_start.elapsed() >= enrich_budget {
+            crate::wasm::log_info("enrich_step: time budget hit, pausing (cached results on resume)");
+            break;
+        }
         let mut files: Vec<(String, TrackTags)> = Vec::new();
         for rel in group {
             let key = file_key(library_id, rel);
@@ -1915,6 +1954,7 @@ pub fn plan_enrich_step(
             if cfg.write_replaygain {
                 let mut rg_entries: Vec<(std::path::PathBuf, f64, Option<f64>)> = Vec::new();
                 for (rel, _) in &files {
+                    if enrich_start.elapsed() >= enrich_budget { break; }
                     let abs = root.join(rel);
                     if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
                         if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
@@ -1934,6 +1974,7 @@ pub fn plan_enrich_step(
                             .filter_map(|(_, _, p)| *p)
                             .fold(f64::NEG_INFINITY, f64::max);
                         for (abs, _, _) in &rg_entries {
+                            if enrich_start.elapsed() >= enrich_budget { break; }
                             let peak = if album_peak.is_finite() { Some(album_peak) } else { None };
                             if crate::tags::write_replaygain_album(
                                 abs,
@@ -1979,6 +2020,7 @@ pub fn plan_enrich_step(
                         let first = files.first().map(|(r, _)| root.join(r)).unwrap_or_default();
                         if cfg.overwrite_art || !crate::artwork::has_embedded(&first) {
                             for (rel, _) in files.iter() {
+                                if enrich_start.elapsed() >= enrich_budget { break; }
                                 let path = root.join(rel);
                                 if crate::artwork::embed(&path, bytes.clone(), crate::artwork::ArtKind::Front).is_ok() {
                                     embedded += 1;
@@ -2034,6 +2076,7 @@ pub fn plan_enrich_step(
                     &nfo_genres,
                 ) {
                     for (rel, _tags) in files.iter() {
+                        if enrich_start.elapsed() >= enrich_budget { break; }
                         let path = root.join(rel);
                         let _ = crate::tags::write_genre(&path, &genres);
                     }
@@ -2064,6 +2107,7 @@ pub fn plan_enrich_step(
             // Pass 1: Verify tracks labeled "instrumental" in title.
             if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() {
                 for (rel, tags) in &files {
+                    if enrich_start.elapsed() >= enrich_budget { break; }
                     let title = tags.title.clone();
                     let stripped = crate::tags::strip_instrumental(&title);
                     if !stripped.is_empty() && stripped != title {
