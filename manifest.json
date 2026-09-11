@@ -546,7 +546,7 @@
           "title": "Favorites sync interval (minutes)",
           "minimum": 5,
           "default": 30,
-          "description": "How often to sync favorites between Navidrome and Last.fm/Libre.fm. Independent of the main organize schedule."
+          "description": "How often to sync favorites between Navidrome and Last.fm/Libre.fm. This runs independently of the main organize schedule — set it to whatever frequency you want."
         },
         "favoritesSyncBidirectional": {
           "type": "boolean",
