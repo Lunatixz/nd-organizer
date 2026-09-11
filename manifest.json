@@ -382,9 +382,9 @@
         },
         "renameSidecars": {
           "type": "boolean",
-          "title": "Rename sidecar files too",
+          "title": "Move only relevant files",
           "default": true,
-          "description": "Move .lrc/.jpg/.nfo files alongside renamed audio files."
+          "description": "When enabled, only sidecar files (.lrc, .jpg, .nfo) that belong to the audio file are moved alongside it. When disabled, all files in the directory are moved regardless."
         },
         "pruneEmptyDirs": {
           "type": "boolean",
