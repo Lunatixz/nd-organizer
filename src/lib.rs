@@ -263,9 +263,9 @@ pub(crate) mod wasm {
                     for prefix in [
                         "scan.walkstack.", "scan.walkfiles.", "scan.walkdelta.",
                         "scan.walkdirs.", "scan.walkcount.", "scan.indexed.",
-                        "scan.unverified.", "scan.group_cursor.", "scan.group_entries.",
-                        "scan.group_remaining.", "scan.pass.", "scan.count.",
-                        "scan.donev2.",
+                        "scan.index_cursor.", "scan.unverified.", "scan.group_cursor.",
+                        "scan.group_entries.", "scan.group_remaining.",
+                        "scan.pass.", "scan.count.", "scan.donev2.",
                     ] {
                         let _ = crate::store::kv().delete(&format!("{}{}", prefix, library_id));
                     }

@@ -631,6 +631,7 @@ pub fn index_step(
 ) -> Result<(ScanOutcome, usize), String> {
     let root = lib_root(library_id)?;
     let files_key = walk_files_key(library_id);
+    let cursor_key = format!("scan.index_cursor.{library_id}");
     let mut files: Vec<(String, i64)> = crate::store::kv()
         .get(&files_key)
         .ok()
@@ -641,10 +642,23 @@ pub fn index_step(
     if files.is_empty() {
         // Nothing to index — transition to group phase.
         let _ = crate::store::kv().delete(&files_key);
+        let _ = crate::store::kv().delete(&cursor_key);
         let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
         crate::wasm::enqueue_group_task(library_id)?;
         post_scan_status(cfg, library_id, 0, "index complete");
         return Ok((ScanOutcome::Done, 0));
+    }
+
+    // Resume from cursor — skip files already checked in previous chunks.
+    let mut i: usize = crate::store::kv()
+        .get(&cursor_key)
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if i > files.len() {
+        i = 0;
     }
 
     let files_per_task = cfg.files_per_scan_task.max(1);
@@ -664,13 +678,12 @@ pub fn index_step(
     let mut last_rel = String::new();
 
     crate::wasm::log_info(&format!(
-        "index_step: starting chunk, files_remaining={}, pass_count={}",
-        files.len(), pass_count
+        "index_step: starting chunk, cursor={}, files_total={}, pass_count={}",
+        i, files.len(), pass_count
     ));
 
-    // Process files from the front of the list.
+    // Process files from cursor position.
     // Skip files whose mtime hasn't changed (already indexed).
-    let mut i = 0;
     while i < files.len() {
         if scan_start.elapsed() >= time_budget {
             break;
@@ -711,12 +724,9 @@ pub fn index_step(
     ));
 
     if capped {
-        // Intermediate chunk — save only remaining files for resume.
+        // Intermediate chunk — save cursor for resume.
         // Don't touch scan.indexed; group_step reads that after index completes.
-        let remaining: Vec<_> = files[i..].to_vec();
-        crate::store::kv()
-            .set(&files_key, serde_json::to_vec(&remaining).unwrap_or_default())
-            .map_err(|e| e.to_string())?;
+        let _ = crate::store::kv().set(&cursor_key, i.to_string().into_bytes());
         let _ = crate::store::kv().set(
             &pass_key,
             (pass_count + processed).to_string().into_bytes(),
@@ -734,6 +744,7 @@ pub fn index_step(
             (pass_count + processed).to_string().into_bytes(),
         );
         let _ = crate::store::kv().delete(&files_key);
+        let _ = crate::store::kv().delete(&cursor_key);
         post_scan_status(cfg, library_id, processed, &format!(
             "indexing complete: {} files indexed, {} skipped (unchanged)",
             processed, skipped
@@ -1046,8 +1057,25 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let file_list: Vec<(String, i64)> = if cursor == 0 {
-        // First chunk — load from indexed_key, save to remaining_key for resume.
+    // Always prefer remaining_key (set by previous chunks) over indexed_key.
+    // Loading from indexed_key (full list) is slow for large libraries.
+    let has_remaining = crate::store::kv().get(&remaining_key).ok().flatten().is_some();
+
+    let file_list: Vec<(String, i64)> = if has_remaining {
+        // Resuming — load from remaining_key (smaller, already truncated).
+        let remaining: Vec<(String, i64)> = crate::store::kv()
+            .get(&remaining_key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice(&v).ok())
+            .unwrap_or_default();
+        crate::wasm::log_info(&format!(
+            "group_step: resuming from remaining list, {} files, cursor={}",
+            remaining.len(), cursor
+        ));
+        remaining
+    } else {
+        // First chunk — load from indexed_key.
         let list: Vec<(String, i64)> = crate::store::kv()
             .get(&indexed_key)
             .ok()
@@ -1059,32 +1087,11 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             return Ok((0, 0));
         }
         let _ = crate::store::kv().set(&entries_key, list.len().to_string().into_bytes());
-        let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&list).unwrap_or_default());
         crate::wasm::log_info(&format!(
             "group_step: loaded {} files from indexed key, processing...",
             list.len()
         ));
         list
-    } else {
-        // Resuming — load from remaining_key.
-        let remaining: Vec<(String, i64)> = crate::store::kv()
-            .get(&remaining_key)
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_slice(&v).ok())
-            .unwrap_or_default();
-        let total: usize = crate::store::kv()
-            .get(&entries_key)
-            .ok()
-            .flatten()
-            .and_then(|v| String::from_utf8(v).ok())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        crate::wasm::log_info(&format!(
-            "group_step: resuming from remaining list, {} files, {}/{} total",
-            remaining.len(), cursor, total
-        ));
-        remaining
     };
 
     if file_list.is_empty() {
@@ -1144,6 +1151,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         // Save only the unprocessed remaining files — much smaller than full list.
         let remaining: Vec<(String, i64)> = file_list[cursor..].to_vec();
         let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&remaining).unwrap_or_default());
+        let _ = crate::store::kv().set(&cursor_key, cursor.to_string().into_bytes());
         // Save this chunk's entries to a numbered key to avoid O(n²)
         // reload-extend-save on every chunk. Merge at the end.
         let chunk_entries_key = format!("scan.group_entries.{library_id}.{}", entries.len());
