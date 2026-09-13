@@ -124,7 +124,9 @@ def load_audio(path, duration=120):
     if ESSENTIA_AVAILABLE:
         try:
             import essentia.standard as es
-            audio = es.MonoLoader(filename=path, sampleRate=44100, endTime=duration)()
+            # MonoLoader: endTime removed — not supported in all Essentia versions.
+            # Load full file; duration parameter is only used for librosa fallback.
+            audio = es.MonoLoader(filename=path, sampleRate=44100)()
             return audio, None
         except Exception as e:
             log.error("Essentia audio load failed for %s: %s", path, e)
