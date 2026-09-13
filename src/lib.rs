@@ -152,6 +152,10 @@ pub(crate) mod wasm {
         enqueue("cleanup", library_id, "", "")
     }
 
+    pub(crate) fn enqueue_stats_heavy() -> Result<(), String> {
+        enqueue("stats_heavy", 0, "", "")
+    }
+
     pub(crate) fn enqueue_plan_tasks(
         cfg: &Config,
         library_id: i32,
@@ -497,11 +501,12 @@ pub(crate) mod wasm {
                 },
                 "stats" => match crate::stats::host_stats::poll(&cfg) {
                     Ok(report) => {
-                        // Lightweight callback — only poll + publish filters.
-                        // Heavy operations (top picks, ratings, meta tags) happen
-                        // in dedicated tasks to avoid blocking the 30s scheduler.
+                        // Lightweight callback — poll + filters + enqueue heavy ops.
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
-                        let _picks = crate::stats::host_stats::top_rated(12).len();
+                        // Enqueue heavy stats operations as a background task.
+                        if let Err(e) = enqueue_stats_heavy() {
+                            log_warn(&format!("enqueue stats_heavy: {e}"));
+                        }
                         let heartbeat = serde_json::json!({
                             "ts": state::now_ts(),
                             "mode": mode_label(&cfg),
@@ -520,6 +525,34 @@ pub(crate) mod wasm {
                     }
                     Err(e) => Err(e),
                 },
+                "stats_heavy" => {
+                    // Heavy stats operations: top picks, ratings, meta tags.
+                    // Runs in its own background task to avoid blocking the
+                    // 30s scheduler callback. Each operation has a per-pass cap.
+                    let stats_start = std::time::Instant::now();
+                    let budget = std::time::Duration::from_secs(22);
+                    let mut picks = 0usize;
+                    let mut pulled = 0usize;
+                    let mut ratings = 0usize;
+                    let mut meta_writes = 0usize;
+
+                    if cfg.top_picks_count > 0 && stats_start.elapsed() < budget {
+                        picks = crate::stats::host_stats::refresh_top_picks(&cfg, cfg.top_picks_count)
+                            .unwrap_or(0);
+                    }
+                    if stats_start.elapsed() < budget {
+                        pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
+                    }
+                    if stats_start.elapsed() < budget {
+                        ratings = crate::stats::host_stats::publish_star_ratings(&cfg).unwrap_or(0);
+                    }
+                    if stats_start.elapsed() < budget {
+                        meta_writes = crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0);
+                    }
+                    Ok(format!(
+                        "stats_heavy: picks={picks}, pulled={pulled}, ratings={ratings}, meta={meta_writes}"
+                    ))
+                }
                 other => Err(format!("unknown task kind {other}")),
             };
             match &r {
