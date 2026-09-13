@@ -498,50 +498,48 @@ pub(crate) mod wasm {
                 "stats" => match crate::stats::host_stats::poll(&cfg) {
                     Ok(report) => {
                         let stats_start = std::time::Instant::now();
-                        let stats_budget = std::time::Duration::from_secs(20);
-                        let picks = if cfg.top_picks_count > 0 && stats_start.elapsed() < stats_budget {
-                            crate::stats::host_stats::refresh_top_picks(&cfg, cfg.top_picks_count)
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
+                        let stats_budget = std::time::Duration::from_secs(22);
+                        let mut picks = 0usize;
+                        let mut _pulled = 0usize;
+                        let mut ratings = 0usize;
+                        let mut meta_writes = 0usize;
+
+                        // Always publish filters (fast, needed by proxy).
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
-                        if stats_start.elapsed() >= stats_budget {
-                            // Bail early — remaining operations on next pass.
-                            let heartbeat = serde_json::json!({
-                                "ts": state::now_ts(),
-                                "mode": mode_label(&cfg),
-                                "inProgress": false,
-                                "phase": "stats",
-                                "plays": report.plays,
-                                "skips": report.skips,
-                                "topPicks": picks,
-                                "filtered": filtered,
-                                "ratings": 0,
-                                "metaWrites": 0,
-                                "nowPlaying": report.now_playing,
-                                "topRated": [],
-                                "warnings": collect_warnings(&cfg),
-                                "integrations": integration_health(&cfg),
-                                "tasks": task_log(),
-                            })
-                            .to_string();
-                            post_webhook(&cfg, &heartbeat);
-                            return Ok(crate::stats::describe(&report, picks, filtered, 0, 0));
+
+                        // Refresh top picks (playlist HTTP call).
+                        if cfg.top_picks_count > 0 && stats_start.elapsed() < stats_budget {
+                            picks = crate::stats::host_stats::refresh_top_picks(&cfg, cfg.top_picks_count)
+                                .unwrap_or(0);
                         }
-                        let _pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
-                        let ratings = crate::stats::host_stats::publish_star_ratings(&cfg).unwrap_or(0);
-                        let meta_writes = if stats_start.elapsed() < stats_budget {
-                            crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0)
+
+                        // Pull ratings FROM Navidrome (per-pass cap: 50).
+                        if stats_start.elapsed() < stats_budget {
+                            _pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
+                        }
+
+                        // Publish ratings TO Navidrome + Lidarr (per-pass cap: 50).
+                        if stats_start.elapsed() < stats_budget {
+                            ratings = crate::stats::host_stats::publish_star_ratings(&cfg).unwrap_or(0);
+                        }
+
+                        // Write playback meta tags.
+                        if stats_start.elapsed() < stats_budget {
+                            meta_writes = crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0);
+                        }
+
+                        // Top rated + integration health (fast, cached).
+                        let top_rated: Vec<serde_json::Value> = if stats_start.elapsed() < stats_budget {
+                            crate::stats::host_stats::top_rated(12)
+                                .into_iter()
+                                .map(|(name, path, stars, plays)| {
+                                    serde_json::json!({"name": name, "path": path, "stars": stars, "plays": plays})
+                                })
+                                .collect()
                         } else {
-                            0
+                            vec![]
                         };
-                        let top_rated: Vec<serde_json::Value> = crate::stats::host_stats::top_rated(12)
-                            .into_iter()
-                            .map(|(name, path, stars, plays)| {
-                                serde_json::json!({"name": name, "path": path, "stars": stars, "plays": plays})
-                            })
-                            .collect();
+
                         let heartbeat = serde_json::json!({
                             "ts": state::now_ts(),
                             "mode": mode_label(&cfg),

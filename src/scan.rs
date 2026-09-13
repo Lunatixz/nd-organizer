@@ -725,13 +725,14 @@ pub fn index_step(
     ));
 
     if !finished || capped {
-        // Not done yet — save cursor for resume.
+        // Not done yet — save cursor for resume and re-enqueue.
         let _ = crate::store::kv().set(&cursor_key, i.to_string().into_bytes());
         let _ = crate::store::kv().set(
             &pass_key,
             (pass_count + processed).to_string().into_bytes(),
         );
         post_scan_status(cfg, library_id, processed, &last_rel);
+        crate::wasm::enqueue_index_task(library_id)?;
         Ok((ScanOutcome::Paused, processed))
     } else {
         // All files done — save full list to indexed key for group_step.
