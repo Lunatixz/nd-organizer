@@ -497,27 +497,51 @@ pub(crate) mod wasm {
                 },
                 "stats" => match crate::stats::host_stats::poll(&cfg) {
                     Ok(report) => {
-                        let picks = if cfg.top_picks_count > 0 {
+                        let stats_start = std::time::Instant::now();
+                        let stats_budget = std::time::Duration::from_secs(20);
+                        let picks = if cfg.top_picks_count > 0 && stats_start.elapsed() < stats_budget {
                             crate::stats::host_stats::refresh_top_picks(&cfg, cfg.top_picks_count)
                                 .unwrap_or(0)
                         } else {
                             0
                         };
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
-                        // Pull star ratings from Navidrome before publishing
-                        // outward, so manually-set ratings in the UI are
-                        // captured into the plugin DB first.
+                        if stats_start.elapsed() >= stats_budget {
+                            // Bail early — remaining operations on next pass.
+                            let heartbeat = serde_json::json!({
+                                "ts": state::now_ts(),
+                                "mode": mode_label(&cfg),
+                                "inProgress": false,
+                                "phase": "stats",
+                                "plays": report.plays,
+                                "skips": report.skips,
+                                "topPicks": picks,
+                                "filtered": filtered,
+                                "ratings": 0,
+                                "metaWrites": 0,
+                                "nowPlaying": report.now_playing,
+                                "topRated": [],
+                                "warnings": collect_warnings(&cfg),
+                                "integrations": integration_health(&cfg),
+                                "tasks": task_log(),
+                            })
+                            .to_string();
+                            post_webhook(&cfg, &heartbeat);
+                            return Ok(crate::stats::describe(&report, picks, filtered, 0, 0));
+                        }
                         let _pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
                         let ratings = crate::stats::host_stats::publish_star_ratings(&cfg).unwrap_or(0);
-                        let meta_writes = crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0);
+                        let meta_writes = if stats_start.elapsed() < stats_budget {
+                            crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0)
+                        } else {
+                            0
+                        };
                         let top_rated: Vec<serde_json::Value> = crate::stats::host_stats::top_rated(12)
                             .into_iter()
                             .map(|(name, path, stars, plays)| {
                                 serde_json::json!({"name": name, "path": path, "stars": stars, "plays": plays})
                             })
                             .collect();
-                        // Heartbeat: keep the webhook dashboard alive between runs
-                        // (scan/batch status only posts on run events).
                         let heartbeat = serde_json::json!({
                             "ts": state::now_ts(),
                             "mode": mode_label(&cfg),
