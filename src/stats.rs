@@ -618,9 +618,11 @@ pub mod host_stats {
         }
         let mut published = 0usize;
         let mut loved_ops = 0usize;
+        let stats_start = std::time::Instant::now();
+        let stats_budget = std::time::Duration::from_secs(12);
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
-                if published >= 250 {
+                if published >= 50 || stats_start.elapsed() >= stats_budget {
                     break; // cap per pass; the rest publish on later passes
                 }
                 let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
@@ -682,9 +684,11 @@ pub mod host_stats {
         {
             let mut lidarr_album_ops = 0usize;
             let mut lidarr_track_ops = 0usize;
+            let lidarr_start = std::time::Instant::now();
+            let lidarr_budget = std::time::Duration::from_secs(12);
             if let Ok(keys) = crate::store::kv().list("star.tally.") {
                 for k in keys {
-                    if lidarr_track_ops >= 250 {
+                    if lidarr_track_ops >= 50 || lidarr_start.elapsed() >= lidarr_budget {
                         break;
                     }
                     let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
@@ -762,9 +766,11 @@ pub mod host_stats {
         if cfg.listenbrainz_scrobble && !cfg.musicbrainz_token.trim().is_empty() {
             let mut lb_ops = 0usize;
             let mut artist_ratings: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
+            let lb_start = std::time::Instant::now();
+            let lb_budget = std::time::Duration::from_secs(10);
             if let Ok(keys) = crate::store::kv().list("star.tally.") {
                 for k in keys {
-                    if lb_ops >= 250 {
+                    if lb_ops >= 50 || lb_start.elapsed() >= lb_budget {
                         break;
                     }
                     let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
