@@ -67,6 +67,12 @@ LIBROSA_AVAILABLE = False
 GENRE_MODEL = None
 MOOD_MODEL = None
 VOICE_MODEL = None
+DANCE_MODEL = None
+GENDER_MODEL = None
+DEAM_MODEL = None
+APPROACH_MODEL = None
+ENGAGE_MODEL = None
+TIMBRE_MODEL = None
 
 # Full Discogs-400 taxonomy (loaded from model at startup, fallback to top classes).
 GENRE_LABELS = [
@@ -83,18 +89,22 @@ CHORD_LABELS = [
 ]
 
 
-def download_model(url, dest):
-    """Download a model file if it doesn't exist."""
+def download_model(url, dest, max_retries=3, retry_delay=5):
+    """Download a model file if it doesn't exist, with retries."""
     if os.path.exists(dest):
         return True
-    try:
-        log.info("Downloading model from %s...", url)
-        urllib.request.urlretrieve(url, dest)
-        log.info("Downloaded %s (%d bytes)", os.path.basename(dest), os.path.getsize(dest))
-        return True
-    except Exception as e:
-        log.warning("Failed to download %s: %s", url, e)
-        return False
+    for attempt in range(max_retries):
+        try:
+            log.info("Downloading model (attempt %d/%d): %s", attempt + 1, max_retries, url)
+            urllib.request.urlretrieve(url, dest)
+            log.info("Downloaded %s (%d bytes)", os.path.basename(dest), os.path.getsize(dest))
+            return True
+        except Exception as e:
+            log.warning("Download failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+    log.warning("Failed to download %s after %d attempts", url, max_retries)
+    return False
 
 
 def load_models():
@@ -198,6 +208,96 @@ def load_models():
             log.warning("Voice model load failed: %s", e)
     else:
         log.warning("Voice models not available - voice/instrumental classification disabled")
+
+    # Danceability model: EffNetDiscogs + binary classifier (danceable/not_danceable)
+    DANCE_URL = "https://essentia.upf.edu/models/classification-heads/danceability/danceability-discogs-effnet-1.pb"
+    dance_path = os.path.join(model_dir, "danceability-discogs-effnet-1.pb")
+    download_model(DANCE_URL, dance_path)
+    if os.path.exists(dance_path) and os.path.exists(embedding_path):
+        try:
+            import essentia.standard as es
+            DANCE_MODEL = {
+                "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                "classifier": es.TensorflowPredict2D(graphFilename=dance_path, input="model/Placeholder", output="model/Softmax"),
+            }
+            log.info("Danceability model loaded")
+        except Exception as e:
+            log.warning("Danceability model load failed: %s", e)
+
+    # Voice gender model: EffNetDiscogs + binary classifier (female/male)
+    GENDER_URL = "https://essentia.upf.edu/models/classification-heads/gender/gender-discogs-effnet-1.pb"
+    gender_path = os.path.join(model_dir, "gender-discogs-effnet-1.pb")
+    download_model(GENDER_URL, gender_path)
+    if os.path.exists(gender_path) and os.path.exists(embedding_path):
+        try:
+            import essentia.standard as es
+            GENDER_MODEL = {
+                "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                "classifier": es.TensorflowPredict2D(graphFilename=gender_path, input="model/Placeholder", output="model/Softmax"),
+            }
+            log.info("Gender model loaded")
+        except Exception as e:
+            log.warning("Gender model load failed: %s", e)
+
+    # Arousal/valence model: MusiCNN + regression (valence, arousal 1-9)
+    DEAM_URL = "https://essentia.upf.edu/models/classification-heads/deam/deam-msd-musicnn-2.pb"
+    deam_path = os.path.join(model_dir, "deam-msd-musicnn-2.pb")
+    download_model(DEAM_URL, deam_path)
+    if os.path.exists(deam_path) and os.path.exists(musicnn_path):
+        try:
+            import essentia.standard as es
+            DEAM_MODEL = {
+                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/Placeholder"),
+                "classifier": es.TensorflowPredict2D(graphFilename=deam_path, input="model/Placeholder", output="model/Identity"),
+            }
+            log.info("Arousal/valence model loaded (DEAM)")
+        except Exception as e:
+            log.warning("Arousal/valence model load failed: %s", e)
+
+    # Approachability model: EffNetDiscogs + binary classifier (not_approachable/approachable)
+    APPROACH_URL = "https://essentia.upf.edu/models/classification-heads/approachability/approachability_2c-discogs-effnet-1.pb"
+    approach_path = os.path.join(model_dir, "approachability_2c-discogs-effnet-1.pb")
+    download_model(APPROACH_URL, approach_path)
+    if os.path.exists(approach_path) and os.path.exists(embedding_path):
+        try:
+            import essentia.standard as es
+            APPROACH_MODEL = {
+                "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                "classifier": es.TensorflowPredict2D(graphFilename=approach_path, input="model/Placeholder", output="model/Softmax"),
+            }
+            log.info("Approachability model loaded")
+        except Exception as e:
+            log.warning("Approachability model load failed: %s", e)
+
+    # Engagement model: EffNetDiscogs + binary classifier (not_engaging/engaging)
+    ENGAGE_URL = "https://essentia.upf.edu/models/classification-heads/engagement/engagement_2c-discogs-effnet-1.pb"
+    engage_path = os.path.join(model_dir, "engagement_2c-discogs-effnet-1.pb")
+    download_model(ENGAGE_URL, engage_path)
+    if os.path.exists(engage_path) and os.path.exists(embedding_path):
+        try:
+            import essentia.standard as es
+            ENGAGE_MODEL = {
+                "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                "classifier": es.TensorflowPredict2D(graphFilename=engage_path, input="model/Placeholder", output="model/Softmax"),
+            }
+            log.info("Engagement model loaded")
+        except Exception as e:
+            log.warning("Engagement model load failed: %s", e)
+
+    # Timbre model: EffNetDiscogs + binary classifier (bright/dark)
+    TIMBRE_URL = "https://essentia.upf.edu/models/classification-heads/timbre/timbre-discogs-effnet-1.pb"
+    timbre_path = os.path.join(model_dir, "timbre-discogs-effnet-1.pb")
+    download_model(TIMBRE_URL, timbre_path)
+    if os.path.exists(timbre_path) and os.path.exists(embedding_path):
+        try:
+            import essentia.standard as es
+            TIMBRE_MODEL = {
+                "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                "classifier": es.TensorflowPredict2D(graphFilename=timbre_path, input="model/Placeholder", output="model/Softmax"),
+            }
+            log.info("Timbre model loaded")
+        except Exception as e:
+            log.warning("Timbre model load failed: %s", e)
 
 
 def load_audio(path, duration=120):
@@ -344,6 +444,92 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
                     result["voice_score"] = round(float(score), 4)
         except Exception as e:
             log.warning("voice prediction failed for %s: %s", path, e)
+
+    # Danceability prediction: EffNetDiscogs → classifier (danceable/not_danceable)
+    if DANCE_MODEL is not None:
+        try:
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = DANCE_MODEL["embedding"](audio_16k)
+            preds = DANCE_MODEL["classifier"](embeddings)[0]
+            dance_labels = ["danceable", "not_danceable"]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
+            for idx, score in top:
+                if idx < len(dance_labels) and score > 0.05:
+                    result["danceability"] = dance_labels[idx]
+                    result["danceability_score"] = round(float(score), 4)
+        except Exception as e:
+            log.warning("danceability prediction failed for %s: %s", path, e)
+
+    # Voice gender prediction: EffNetDiscogs → classifier (female/male)
+    if GENDER_MODEL is not None:
+        try:
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = GENDER_MODEL["embedding"](audio_16k)
+            preds = GENDER_MODEL["classifier"](embeddings)[0]
+            gender_labels = ["female", "male"]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
+            for idx, score in top:
+                if idx < len(gender_labels) and score > 0.05:
+                    result["gender"] = gender_labels[idx]
+                    result["gender_score"] = round(float(score), 4)
+        except Exception as e:
+            log.warning("gender prediction failed for %s: %s", path, e)
+
+    # Arousal/valence prediction: MusiCNN → regression (valence, arousal 1-9)
+    if DEAM_MODEL is not None:
+        try:
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = DEAM_MODEL["embedding"](audio_16k)
+            preds = DEAM_MODEL["classifier"](embeddings)[0]
+            result["valence"] = round(float(preds[0]), 2)
+            result["arousal"] = round(float(preds[1]), 2)
+        except Exception as e:
+            log.warning("arousal/valence prediction failed for %s: %s", path, e)
+
+    # Approachability prediction: EffNetDiscogs → classifier (not_approachable/approachable)
+    if APPROACH_MODEL is not None:
+        try:
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = APPROACH_MODEL["embedding"](audio_16k)
+            preds = APPROACH_MODEL["classifier"](embeddings)[0]
+            approach_labels = ["not_approachable", "approachable"]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
+            for idx, score in top:
+                if idx < len(approach_labels) and score > 0.05:
+                    result["approachability"] = approach_labels[idx]
+                    result["approachability_score"] = round(float(score), 4)
+        except Exception as e:
+            log.warning("approachability prediction failed for %s: %s", path, e)
+
+    # Engagement prediction: EffNetDiscogs → classifier (not_engaging/engaging)
+    if ENGAGE_MODEL is not None:
+        try:
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = ENGAGE_MODEL["embedding"](audio_16k)
+            preds = ENGAGE_MODEL["classifier"](embeddings)[0]
+            engage_labels = ["not_engaging", "engaging"]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
+            for idx, score in top:
+                if idx < len(engage_labels) and score > 0.05:
+                    result["engagement"] = engage_labels[idx]
+                    result["engagement_score"] = round(float(score), 4)
+        except Exception as e:
+            log.warning("engagement prediction failed for %s: %s", path, e)
+
+    # Timbre prediction: EffNetDiscogs → classifier (bright/dark)
+    if TIMBRE_MODEL is not None:
+        try:
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = TIMBRE_MODEL["embedding"](audio_16k)
+            preds = TIMBRE_MODEL["classifier"](embeddings)[0]
+            timbre_labels = ["bright", "dark"]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
+            for idx, score in top:
+                if idx < len(timbre_labels) and score > 0.05:
+                    result["timbre"] = timbre_labels[idx]
+                    result["timbre_score"] = round(float(score), 4)
+        except Exception as e:
+            log.warning("timbre prediction failed for %s: %s", path, e)
 
     if bpm:
         try:
@@ -819,6 +1005,12 @@ class Handler(BaseHTTPRequestHandler):
                 "genre_model": GENRE_MODEL is not None,
                 "mood_model": MOOD_MODEL is not None,
                 "voice_model": VOICE_MODEL is not None,
+                "dance_model": DANCE_MODEL is not None,
+                "gender_model": GENDER_MODEL is not None,
+                "deam_model": DEAM_MODEL is not None,
+                "approach_model": APPROACH_MODEL is not None,
+                "engage_model": ENGAGE_MODEL is not None,
+                "timbre_model": TIMBRE_MODEL is not None,
                 "uptime": int(time.time() - STARTED),
             })
             return
@@ -956,7 +1148,10 @@ if __name__ == "__main__":
     log.info("%s starting (backend: %s)", SERVICE, backend)
     log.info("listening on 0.0.0.0:%d", PORT)
     log.info("Essentia: %s, librosa: %s", ESSENTIA_AVAILABLE, LIBROSA_AVAILABLE)
-    log.info("Genre model: %s, Mood model: %s, Voice model: %s", GENRE_MODEL is not None, MOOD_MODEL is not None, VOICE_MODEL is not None)
+    log.info("Models: genre=%s mood=%s voice=%s dance=%s gender=%s deam=%s approach=%s engage=%s timbre=%s",
+             GENRE_MODEL is not None, MOOD_MODEL is not None, VOICE_MODEL is not None,
+             DANCE_MODEL is not None, GENDER_MODEL is not None, DEAM_MODEL is not None,
+             APPROACH_MODEL is not None, ENGAGE_MODEL is not None, TIMBRE_MODEL is not None)
     log.info("Features: structure, chords, fingerprint, compare, caching")
     log.info("=" * 60)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

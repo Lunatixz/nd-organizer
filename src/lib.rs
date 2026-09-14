@@ -156,6 +156,10 @@ pub(crate) mod wasm {
         enqueue("stats_heavy", 0, "", "")
     }
 
+    pub(crate) fn enqueue_meta_refresh(library_id: i32) -> Result<(), String> {
+        enqueue("meta_refresh", library_id, "", "")
+    }
+
     pub(crate) fn enqueue_plan_tasks(
         cfg: &Config,
         library_id: i32,
@@ -322,6 +326,14 @@ pub(crate) mod wasm {
                     host::scheduler::schedule_recurring(&cron, "trim", "nd-organizer-trim")
                 {
                     log_warn(&format!("schedule trim-missing: {e}"));
+                }
+            }
+            // Background metadata refresh (enrich files without organizing).
+            if cfg.meta_refresh_enabled {
+                if let Err(e) =
+                    host::scheduler::schedule_recurring(&cfg.meta_refresh_cron, "meta_refresh", "nd-organizer-meta-refresh")
+                {
+                    log_warn(&format!("schedule meta-refresh: {e}"));
                 }
             }
             Ok(())
@@ -552,6 +564,11 @@ pub(crate) mod wasm {
                     Ok(format!(
                         "stats_heavy: picks={picks}, pulled={pulled}, ratings={ratings}, meta={meta_writes}"
                     ))
+                }
+                "meta_refresh" => {
+                    // Background metadata refresh: enrich files in all libraries
+                    // without organizing. Runs when organize pipeline is idle.
+                    crate::scan::meta_refresh_step(&cfg, payload.library_id)
                 }
                 other => Err(format!("unknown task kind {other}")),
             };

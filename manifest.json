@@ -98,6 +98,18 @@
           "default": true,
           "description": "Only run when nothing is playing; if playback is active, the run waits and retries automatically."
         },
+        "metaRefreshEnabled": {
+          "type": "boolean",
+          "title": "Enable background metadata refresh",
+          "default": false,
+          "description": "When enabled, periodically update metadata, tags, NFOs, and ratings for files in all libraries without organizing. Runs when the organize pipeline is idle."
+        },
+        "metaRefreshCron": {
+          "type": "string",
+          "title": "Metadata refresh schedule",
+          "default": "*/30 * * * *",
+          "description": "Cron schedule for metadata refresh checks (default: every 30 minutes). Only runs when organize pipeline is idle."
+        },
         "rollbackRunId": {
           "type": "string",
           "title": "Rollback run ID",

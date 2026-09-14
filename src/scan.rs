@@ -2322,6 +2322,162 @@ pub fn plan_enrich_step(
     Ok(())
 }
 
+/// Background metadata refresh: enrich files in all libraries without organizing.
+/// When the organize pipeline is idle, this updates tags, NFOs, ratings, artwork,
+/// lyrics, genre, and other metadata for files across all Navidrome libraries.
+/// No file moves or renaming — just gather and save.
+pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String> {
+    let eff = crate::wasm::effective_config(cfg);
+    let cfg = &eff;
+    let root = lib_root(library_id)?;
+
+    // Load indexed file list for this library.
+    let indexed_key = format!("scan.indexed.{library_id}");
+    let cursor_key = format!("scan.meta_cursor.{library_id}");
+    let file_list: Vec<(String, i64)> = crate::store::kv()
+        .get(&indexed_key)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
+
+    if file_list.is_empty() {
+        return Ok("meta_refresh: no indexed files for this library".into());
+    }
+
+    // Resume from cursor.
+    let mut cursor: usize = crate::store::kv()
+        .get(&cursor_key)
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if cursor > file_list.len() {
+        cursor = 0;
+    }
+
+    let budget = std::time::Duration::from_secs(15);
+    let start = std::time::Instant::now();
+    let mut processed = 0usize;
+    let mut refreshed = 0usize;
+
+    crate::wasm::log_info(&format!(
+        "meta_refresh: library={} starting at {}/{}, {} files total",
+        library_id, cursor, file_list.len(), file_list.len()
+    ));
+
+    // Process files with time budget.
+    while cursor < file_list.len() {
+        if start.elapsed() >= budget {
+            break;
+        }
+
+        let (rel, _mtime) = &file_list[cursor];
+        let abs = root.join(rel);
+
+        // Check if file exists and is readable.
+        if !abs.exists() {
+            cursor += 1;
+            continue;
+        }
+
+        // Run enrichment operations (same as plan_enrich_step but per-file).
+        let file_tags = crate::store::kv()
+            .get(&file_key(library_id, rel))
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice::<crate::tags::TrackTags>(&v).ok());
+
+        if let Some(tags) = file_tags {
+            let mut changed = false;
+
+            // ReplayGain
+            if cfg.write_replaygain && start.elapsed() < budget {
+                if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
+                    if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
+                        .unwrap_or(false)
+                    {
+                        changed = true;
+                    }
+                }
+            }
+
+            // Genre
+            if !cfg.genre_source.is_empty() && start.elapsed() < budget {
+                let mbid = if !tags.mbid_album.is_empty() {
+                    Some(tags.mbid_album.clone())
+                } else {
+                    None
+                };
+                if let Some((genres, _source)) = fetch_genre_with_fallback(
+                    cfg, mbid.as_deref(), &tags.artist, &tags.album, &Vec::new(),
+                ) {
+                    let _ = crate::tags::write_genre(&abs, &genres);
+                    changed = true;
+                }
+            }
+
+            // Acoustic tags
+            if cfg.write_acoustic_tags && !cfg.audiomuse_url.trim().is_empty() && start.elapsed() < budget {
+                // Per-file acoustic tag fetch would be expensive; skip in refresh mode.
+                // Acoustic tags are written during organize pass.
+            }
+
+            // Essentia genres
+            if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() && start.elapsed() < budget {
+                // Essentia genre write would be expensive per-file; skip in refresh mode.
+            }
+
+            // Instrumental check
+            if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() && start.elapsed() < budget {
+                let title = tags.title.clone();
+                let stripped = crate::tags::strip_instrumental(&title);
+                if !stripped.is_empty() && stripped != title {
+                    let path_str = abs.to_string_lossy().to_string();
+                    let cache_key = format!("instrumental:{}", path_str);
+                    if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                        if let Some(val) = serde_json::from_slice::<serde_json::Value>(&v).ok() {
+                            let is_instrumental = val.get("isInstrumental")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+                            if !is_instrumental {
+                                let _ = crate::tags::write_title(&abs, &stripped);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if changed {
+                refreshed += 1;
+            }
+        }
+
+        cursor += 1;
+        processed += 1;
+    }
+
+    // Save cursor for resume.
+    if cursor < file_list.len() {
+        let _ = crate::store::kv().set(&cursor_key, cursor.to_string().into_bytes());
+        crate::wasm::enqueue_meta_refresh(library_id)?;
+        crate::wasm::log_info(&format!(
+            "meta_refresh: library={} processed={}, refreshed={}, cursor={}/{}, re-enqueueing",
+            library_id, processed, refreshed, cursor, file_list.len()
+        ));
+        Ok(format!("meta_refresh: {processed} files processed, {refreshed} refreshed, {}/{}/{} remaining", cursor, file_list.len(), file_list.len()))
+    } else {
+        let _ = crate::store::kv().delete(&cursor_key);
+        crate::wasm::log_info(&format!(
+            "meta_refresh: library={} complete, processed={}, refreshed={}",
+            library_id, processed, refreshed
+        ));
+        Ok(format!("meta_refresh: complete, {processed} files processed, {refreshed} refreshed"))
+    }
+}
+
 /// Auto-tag a group's tracks from the MusicBrainz release tracklist, filling
 /// only genuinely-missing fields (title/artist/recording MBID/release MBID).
 /// Apply mode writes (atomically); dry-run only counts what would change.

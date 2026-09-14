@@ -108,6 +108,13 @@ pub struct Config {
     /// Only run when nothing is playing (player resources come first).
     pub run_only_when_idle: bool,
 
+    // Background metadata refresh (enrich files without organizing)
+    /// Enable background metadata refresh when organize pipeline is idle.
+    /// Updates tags, NFOs, ratings for files in all libraries without moving/renaming.
+    pub meta_refresh_enabled: bool,
+    /// Cron schedule for metadata refresh checks (default: every 30 minutes).
+    pub meta_refresh_cron: String,
+
     // Favorites sync (Navidrome hub <-> Last.fm loved tracks)
     /// Enable favorites sync with Last.fm/Libre.fm.
     pub favorites_sync_lastfm: bool,
@@ -400,6 +407,8 @@ impl Default for Config {
             albums_per_task: 5,
             files_per_scan_task: 200,
             run_only_when_idle: true,
+            meta_refresh_enabled: false,
+            meta_refresh_cron: "*/30 * * * *".to_string(),
             favorites_sync_lastfm: false,
             favorites_sync_max: 500,
             favorites_sync_minutes: 30,
@@ -674,6 +683,10 @@ impl Config {
             c.files_per_scan_task = v.trim().parse().unwrap_or(c.files_per_scan_task);
         }
         c.run_only_when_idle = bool(map, "runOnlyWhenIdle", c.run_only_when_idle);
+        c.meta_refresh_enabled = bool(map, "metaRefreshEnabled", c.meta_refresh_enabled);
+        if let Some(v) = map.get("metaRefreshCron") {
+            c.meta_refresh_cron = v.clone();
+        }
         c.favorites_sync_lastfm = bool(map, "favoritesSyncLastfm", c.favorites_sync_lastfm);
         if let Some(v) = map.get("favoritesSyncMax") {
             c.favorites_sync_max = v.trim().parse().unwrap_or(c.favorites_sync_max);
