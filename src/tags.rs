@@ -415,6 +415,30 @@ pub fn strip_instrumental(title: &str) -> String {
     result.trim().to_string()
 }
 
+pub fn strip_acoustic(title: &str) -> String {
+    let mut result = title.to_string();
+    // Remove patterns like "(Acoustic)", "[Acoustic]", "(Acoustic Version)"
+    result = result
+        .replace("(Acoustic Version)", "")
+        .replace("[Acoustic Version]", "")
+        .replace("(Acoustic)", "")
+        .replace("[Acoustic]", "")
+        .replace("(acoustic)", "")
+        .replace("[acoustic]", "");
+    // Remove trailing "Acoustic" (case-insensitive)
+    let lower = result.to_lowercase();
+    if let Some(pos) = lower.rfind("acoustic") {
+        let before = result[..pos].trim_end();
+        let after = result[pos + "acoustic".len()..].trim_start();
+        result = format!("{} {}", before, after).trim().to_string();
+    }
+    // Clean up double spaces
+    while result.contains("  ") {
+        result = result.replace("  ", " ");
+    }
+    result.trim().to_string()
+}
+
 /// Write title tag to a file, stripping instrumental patterns if configured.
 pub fn write_title(path: &Path, new_title: &str) -> Result<bool, String> {
     let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;

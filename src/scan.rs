@@ -1885,6 +1885,7 @@ pub fn plan_enrich_step(
     if cfg.scan_after_tag_write { enrichments.push("navidrome-rescan"); }
     if cfg.write_nfo { enrichments.push("nfo"); }
     if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() { enrichments.push("instrumental-check"); }
+    if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() { enrichments.push("acoustic-check"); }
     crate::wasm::log_info(&format!(
         "enrich_step: batch {}/{}, {} album(s), plan: [{}]",
         batch_index + 1, batch_total, groups.len(), enrichments.join(", ")
@@ -2109,65 +2110,170 @@ pub fn plan_enrich_step(
                     }));
                 }
             }
-            // Pass 1: Verify tracks labeled "instrumental" in title.
+            // Pass 1: Verify instrumental performance — trust but verify.
+            // If labeled "(Instrumental)", verify and strip if not instrumental.
+            // If not labeled but IS instrumental, append "(Instrumental)".
             if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() {
                 for (rel, tags) in &files {
                     if enrich_start.elapsed() >= enrich_budget { break; }
                     let title = tags.title.clone();
-                    let stripped = crate::tags::strip_instrumental(&title);
-                    if !stripped.is_empty() && stripped != title {
-                        // Title contains "(Instrumental)" — verify via Essentia.
-                        let abs = root.join(rel);
-                        let path_str = abs.to_string_lossy().to_string();
-                        let cache_key = format!("instrumental:{}", path_str);
-                        // Check cache first.
-                        let result = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
-                            serde_json::from_slice::<serde_json::Value>(&v).ok()
-                        } else {
-                            // Call Essentia /instrumental-check.
-                            let base = cfg.essentia_url.trim().trim_end_matches('/');
-                            let body = serde_json::json!({"path": path_str});
-                            let req = nd_pdk::host::http::HTTPRequest {
-                                method: "POST".into(),
-                                url: format!("{}/instrumental-check", base),
-                                headers: std::collections::HashMap::new(),
-                                no_follow_redirects: false,
-                                body: body.to_string().into_bytes(),
-                                timeout_ms: 30_000,
-                            };
-                            if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
-                                if resp.status_code == 200 {
-                                    let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
-                                    // Cache result.
-                                    let _ = crate::store::kv().set(&cache_key, resp.body);
-                                    Some(val)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
+                    let abs = root.join(rel);
+                    let path_str = abs.to_string_lossy().to_string();
+                    let cache_key = format!("instrumental:{}", path_str);
+
+                    // Check cache first.
+                    let is_instrumental = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                        serde_json::from_slice::<serde_json::Value>(&v)
+                            .ok()
+                            .and_then(|v| v.get("isInstrumental").and_then(|v| v.as_bool()))
+                            .unwrap_or(true)
+                    } else {
+                        // Call Essentia /instrumental-check.
+                        let base = cfg.essentia_url.trim().trim_end_matches('/');
+                        let body = serde_json::json!({"path": path_str});
+                        let req = nd_pdk::host::http::HTTPRequest {
+                            method: "POST".into(),
+                            url: format!("{}/instrumental-check", base),
+                            headers: std::collections::HashMap::new(),
+                            no_follow_redirects: false,
+                            body: body.to_string().into_bytes(),
+                            timeout_ms: 30_000,
                         };
-                        if let Some(val) = result {
-                            let is_instrumental = val.get("isInstrumental")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(true);
-                            if !is_instrumental {
-                                // NOT instrumental — strip from title, tags, NFO.
-                                let _ = crate::tags::write_title(&abs, &stripped);
-                                crate::wasm::log_info(&format!(
-                                    "instrumental: stripped from '{}' → '{}'",
-                                    title, stripped
-                                ));
-                                actions.push(serde_json::json!({
-                                    "ts": crate::state::now_ts(),
-                                    "text": format!("instrumental: stripped from '{}'", title),
-                                }));
-                                // Trigger rescan + Lidarr refresh.
-                                if cfg.scan_after_tag_write {
-                                    let _ = crate::wasm::trigger_navidrome_scan(cfg);
-                                }
+                        if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
+                            if resp.status_code == 200 {
+                                let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
+                                let _ = crate::store::kv().set(&cache_key, resp.body);
+                                val.get("isInstrumental")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true)
+                            } else {
+                                true
                             }
+                        } else {
+                            true
+                        }
+                    };
+
+                    let lower_title = title.to_lowercase();
+                    let has_instrumental_label = lower_title.contains("instrumental");
+
+                    if has_instrumental_label && !is_instrumental {
+                        // Labeled instrumental but NOT actually instrumental — strip the label.
+                        let stripped = crate::tags::strip_instrumental(&title);
+                        if stripped != title {
+                            let _ = crate::tags::write_title(&abs, &stripped);
+                            crate::wasm::log_info(&format!(
+                                "instrumental: stripped from '{}' -> '{}' (not truly instrumental)",
+                                title, stripped
+                            ));
+                            actions.push(serde_json::json!({
+                                "ts": crate::state::now_ts(),
+                                "text": format!("instrumental: stripped from '{}' (not truly instrumental)", title),
+                            }));
+                            if cfg.scan_after_tag_write {
+                                let _ = crate::wasm::trigger_navidrome_scan(cfg);
+                            }
+                        }
+                    } else if is_instrumental && !has_instrumental_label {
+                        // Instrumental but not labeled — append "(Instrumental)".
+                        let new_title = format!("{} (Instrumental)", title);
+                        let _ = crate::tags::write_title(&abs, &new_title);
+                        crate::wasm::log_info(&format!(
+                            "instrumental: appended to '{}' -> '{}'",
+                            title, new_title
+                        ));
+                        actions.push(serde_json::json!({
+                            "ts": crate::state::now_ts(),
+                            "text": format!("instrumental: appended to '{}'", title),
+                        }));
+                        if cfg.scan_after_tag_write {
+                            let _ = crate::wasm::trigger_navidrome_scan(cfg);
+                        }
+                    }
+                }
+            }
+            // Pass 2: Verify acoustic performance — trust but verify.
+            // If labeled "(Acoustic)", verify via Essentia and strip if not acoustic.
+            // If not labeled but IS acoustic, append "(Acoustic)" to title.
+            if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() {
+                for (rel, tags) in &files {
+                    if enrich_start.elapsed() >= enrich_budget { break; }
+                    let title = tags.title.clone();
+                    let abs = root.join(rel);
+                    let path_str = abs.to_string_lossy().to_string();
+                    let cache_key = format!("acoustic:{}", path_str);
+
+                    // Check cache first.
+                    let is_acoustic = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                        serde_json::from_slice::<serde_json::Value>(&v)
+                            .ok()
+                            .and_then(|v| v.get("isAcoustic").and_then(|v| v.as_bool()))
+                            .unwrap_or(false)
+                    } else {
+                        // Call Essentia /analyze with mood_acoustic model.
+                        let base = cfg.essentia_url.trim().trim_end_matches('/');
+                        let body = serde_json::json!({"path": path_str, "genres": false, "moods": true, "structure": false, "chroma": false, "bpm": false});
+                        let req = nd_pdk::host::http::HTTPRequest {
+                            method: "POST".into(),
+                            url: format!("{}/analyze", base),
+                            headers: std::collections::HashMap::new(),
+                            no_follow_redirects: false,
+                            body: body.to_string().into_bytes(),
+                            timeout_ms: 30_000,
+                        };
+                        if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
+                            if resp.status_code == 200 {
+                                let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
+                                let _ = crate::store::kv().set(&cache_key, resp.body);
+                                val.get("moods")
+                                    .and_then(|m| m.as_array())
+                                    .map(|arr| arr.iter().any(|m| {
+                                        m.get("name").and_then(|n| n.as_str()).map(|n| n.contains("acoustic")).unwrap_or(false)
+                                            && m.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) > 0.3
+                                    }))
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    let lower_title = title.to_lowercase();
+                    let has_acoustic_label = lower_title.contains("acoustic");
+
+                    if has_acoustic_label && !is_acoustic {
+                        // Labeled acoustic but NOT actually acoustic — strip the label.
+                        let stripped = crate::tags::strip_acoustic(&title);
+                        if stripped != title {
+                            let _ = crate::tags::write_title(&abs, &stripped);
+                            crate::wasm::log_info(&format!(
+                                "acoustic: stripped from '{}' -> '{}' (not truly acoustic)",
+                                title, stripped
+                            ));
+                            actions.push(serde_json::json!({
+                                "ts": crate::state::now_ts(),
+                                "text": format!("acoustic: stripped from '{}' (not truly acoustic)", title),
+                            }));
+                            if cfg.scan_after_tag_write {
+                                let _ = crate::wasm::trigger_navidrome_scan(cfg);
+                            }
+                        }
+                    } else if is_acoustic && !has_acoustic_label {
+                        // Acoustic but not labeled — append "(Acoustic)".
+                        let new_title = format!("{} (Acoustic)", title);
+                        let _ = crate::tags::write_title(&abs, &new_title);
+                        crate::wasm::log_info(&format!(
+                            "acoustic: appended to '{}' -> '{}'",
+                            title, new_title
+                        ));
+                        actions.push(serde_json::json!({
+                            "ts": crate::state::now_ts(),
+                            "text": format!("acoustic: appended to '{}'", title),
+                        }));
+                        if cfg.scan_after_tag_write {
+                            let _ = crate::wasm::trigger_navidrome_scan(cfg);
                         }
                     }
                 }
@@ -2429,24 +2535,113 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 // Essentia genre write would be expensive per-file; skip in refresh mode.
             }
 
-            // Instrumental check
+            // Instrumental check — trust but verify.
+            // If labeled "(Instrumental)", verify and strip if not instrumental.
+            // If not labeled but IS instrumental, append "(Instrumental)".
             if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() && start.elapsed() < budget {
                 let title = tags.title.clone();
-                let stripped = crate::tags::strip_instrumental(&title);
-                if !stripped.is_empty() && stripped != title {
-                    let path_str = abs.to_string_lossy().to_string();
-                    let cache_key = format!("instrumental:{}", path_str);
-                    if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
-                        if let Some(val) = serde_json::from_slice::<serde_json::Value>(&v).ok() {
-                            let is_instrumental = val.get("isInstrumental")
+                let abs = root.join(rel);
+                let path_str = abs.to_string_lossy().to_string();
+                let cache_key = format!("instrumental:{}", path_str);
+                let is_instrumental = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                    serde_json::from_slice::<serde_json::Value>(&v)
+                        .ok()
+                        .and_then(|v| v.get("isInstrumental").and_then(|v| v.as_bool()))
+                        .unwrap_or(true)
+                } else {
+                    let base = cfg.essentia_url.trim().trim_end_matches('/');
+                    let body = serde_json::json!({"path": path_str});
+                    let req = nd_pdk::host::http::HTTPRequest {
+                        method: "POST".into(),
+                        url: format!("{}/instrumental-check", base),
+                        headers: std::collections::HashMap::new(),
+                        no_follow_redirects: false,
+                        body: body.to_string().into_bytes(),
+                        timeout_ms: 30_000,
+                    };
+                    if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
+                        if resp.status_code == 200 {
+                            let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
+                            let _ = crate::store::kv().set(&cache_key, resp.body);
+                            val.get("isInstrumental")
                                 .and_then(|v| v.as_bool())
-                                .unwrap_or(true);
-                            if !is_instrumental {
-                                let _ = crate::tags::write_title(&abs, &stripped);
-                                changed = true;
-                            }
+                                .unwrap_or(true)
+                        } else {
+                            true
                         }
+                    } else {
+                        true
                     }
+                };
+                let lower_title = title.to_lowercase();
+                let has_instrumental_label = lower_title.contains("instrumental");
+                if has_instrumental_label && !is_instrumental {
+                    let stripped = crate::tags::strip_instrumental(&title);
+                    if stripped != title {
+                        let _ = crate::tags::write_title(&abs, &stripped);
+                        changed = true;
+                    }
+                } else if is_instrumental && !has_instrumental_label {
+                    let new_title = format!("{} (Instrumental)", title);
+                    let _ = crate::tags::write_title(&abs, &new_title);
+                    changed = true;
+                }
+            }
+
+            // Acoustic check — trust but verify.
+            // If labeled "(Acoustic)", verify and strip if not acoustic.
+            // If not labeled but IS acoustic, append "(Acoustic)".
+            if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() && start.elapsed() < budget {
+                let title = tags.title.clone();
+                let abs = root.join(rel);
+                let path_str = abs.to_string_lossy().to_string();
+                let cache_key = format!("acoustic:{}", path_str);
+                let is_acoustic = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                    serde_json::from_slice::<serde_json::Value>(&v)
+                        .ok()
+                        .and_then(|v| v.get("isAcoustic").and_then(|v| v.as_bool()))
+                        .unwrap_or(false)
+                } else {
+                    let base = cfg.essentia_url.trim().trim_end_matches('/');
+                    let body = serde_json::json!({"path": path_str, "genres": false, "moods": true, "structure": false, "chroma": false, "bpm": false});
+                    let req = nd_pdk::host::http::HTTPRequest {
+                        method: "POST".into(),
+                        url: format!("{}/analyze", base),
+                        headers: std::collections::HashMap::new(),
+                        no_follow_redirects: false,
+                        body: body.to_string().into_bytes(),
+                        timeout_ms: 30_000,
+                    };
+                    if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
+                        if resp.status_code == 200 {
+                            let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
+                            let _ = crate::store::kv().set(&cache_key, resp.body);
+                            val.get("moods")
+                                .and_then(|m| m.as_array())
+                                .map(|arr| arr.iter().any(|m| {
+                                    m.get("name").and_then(|n| n.as_str()).map(|n| n.contains("acoustic")).unwrap_or(false)
+                                        && m.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) > 0.3
+                                }))
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+                let lower_title = title.to_lowercase();
+                let has_acoustic_label = lower_title.contains("acoustic");
+                if has_acoustic_label && !is_acoustic {
+                    let stripped = crate::tags::strip_acoustic(&title);
+                    if stripped != title {
+                        let _ = crate::tags::write_title(&abs, &stripped);
+                        changed = true;
+                    }
+                } else if is_acoustic && !has_acoustic_label {
+                    let new_title = format!("{} (Acoustic)", title);
+                    let _ = crate::tags::write_title(&abs, &new_title);
+                    changed = true;
                 }
             }
 

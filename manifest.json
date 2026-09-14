@@ -1001,6 +1001,12 @@
           "default": false,
           "description": "When enabled, tracks labeled '(Instrumental)' in the title are verified via Essentia + librosa. If not truly instrumental, the keyword is stripped from the title, tags, and NFO. Requires essentiaUrl."
         },
+        "verifyAcoustic": {
+          "type": "boolean",
+          "title": "Verify acoustic tracks",
+          "default": false,
+          "description": "When enabled, tracks are checked for acoustic performance via Essentia mood_acoustic model. If a track is acoustic but not labeled, '(Acoustic)' is appended to the title. Requires essentiaUrl."
+        },
         "instrumentalBatchSize": {
           "type": "integer",
           "title": "Instrumental verification batch size",
@@ -1727,6 +1733,10 @@
                 {
                   "type": "Control",
                   "scope": "#/properties/verifyInstrumental"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/verifyAcoustic"
                 },
                 {
                   "type": "Control",

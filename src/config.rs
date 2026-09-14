@@ -350,6 +350,8 @@ pub struct Config {
     pub write_acoustic_tags: bool,
     /// Verify instrumental tracks — strip "(Instrumental)" from title if not truly instrumental.
     pub verify_instrumental: bool,
+    /// Verify acoustic performance — append "(Acoustic)" to title if track is acoustic but not labeled.
+    pub verify_acoustic: bool,
     /// Number of tracks to analyze per run for Pass 2 (gradual full-library analysis).
     pub instrumental_batch_size: i32,
 
@@ -520,6 +522,7 @@ impl Default for Config {
             notify_audiomuse_after_run: true,
             write_acoustic_tags: false,
             verify_instrumental: false,
+            verify_acoustic: false,
             instrumental_batch_size: 100,
             discogs_token: String::new(),
             discogs_credits: false,
@@ -932,6 +935,7 @@ impl Config {
         c.essentia_bpm = bool(map, "essentiaBpm", c.essentia_bpm);
         c.essentia_fingerprint = bool(map, "essentiaFingerprint", c.essentia_fingerprint);
         c.verify_instrumental = bool(map, "verifyInstrumental", c.verify_instrumental);
+        c.verify_acoustic = bool(map, "verifyAcoustic", c.verify_acoustic);
         if let Some(v) = map.get("instrumentalBatchSize") {
             c.instrumental_batch_size = v.parse().unwrap_or(c.instrumental_batch_size);
         }
