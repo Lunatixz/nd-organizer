@@ -109,6 +109,7 @@ def download_model(url, dest, max_retries=3, retry_delay=5):
 
 def load_models():
     global ESSENTIA_AVAILABLE, LIBROSA_AVAILABLE, GENRE_MODEL, MOOD_MODEL, VOICE_MODEL, GENRE_LABELS
+    global DANCE_MODEL, GENDER_MODEL, DEAM_MODEL, APPROACH_MODEL, ENGAGE_MODEL, TIMBRE_MODEL
     try:
         import essentia
         import essentia.standard as es
