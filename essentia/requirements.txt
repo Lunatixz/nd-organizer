@@ -1,5 +1,5 @@
 --pre
 tensorflow==2.15.0
-essentia-tensorflow==2.1b6.dev1438
+essentia-tensorflow==2.1b6.dev1389
 numpy==1.26.4
 librosa==0.10.2
