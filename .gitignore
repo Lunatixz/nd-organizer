@@ -10,3 +10,5 @@ plain-*.md
 plan-*.md
 BUILD
 nd-organizer.ndp
+*.pb
+essentia/models/
