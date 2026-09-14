@@ -82,6 +82,20 @@ CHORD_LABELS = [
 ]
 
 
+def download_model(url, dest):
+    """Download a model file if it doesn't exist."""
+    if os.path.exists(dest):
+        return True
+    try:
+        log.info("Downloading model from %s...", url)
+        urllib.request.urlretrieve(url, dest)
+        log.info("Downloaded %s (%d bytes)", os.path.basename(dest), os.path.getsize(dest))
+        return True
+    except Exception as e:
+        log.warning("Failed to download %s: %s", url, e)
+        return False
+
+
 def load_models():
     global ESSENTIA_AVAILABLE, LIBROSA_AVAILABLE, GENRE_MODEL, MOOD_MODEL, GENRE_LABELS
     try:
@@ -100,39 +114,47 @@ def load_models():
             log.warning("Neither Essentia nor librosa available - returning empty predictions")
             return
     model_dir = os.environ.get("MODEL_DIR", os.path.expanduser("~/essentia_models"))
+    os.makedirs(model_dir, exist_ok=True)
 
-    # Genre model: needs embedding model (EffNetDiscogs) + classification head (TensorflowPredict2D)
+    # Auto-download models if not present
+    EMB_URL = "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb"
+    GENRE_URL = "https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.pb"
+
     embedding_path = os.path.join(model_dir, "discogs-effnet-bs64-1.pb")
     genre_path = os.path.join(model_dir, "discogs_400_epCNN_discogs-hard_256.pb")
-    if os.path.exists(genre_path):
+
+    # Download models (blocks startup until available)
+    download_model(EMB_URL, embedding_path)
+    download_model(GENRE_URL, genre_path)
+
+    # Genre model: needs embedding model (EffNetDiscogs) + classification head (TensorflowPredict2D)
+    if os.path.exists(genre_path) and os.path.exists(embedding_path):
         try:
             import essentia.standard as es
-            if os.path.exists(embedding_path):
-                GENRE_MODEL = {
-                    "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
-                    "classifier": es.TensorflowPredict2D(graphFilename=genre_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
-                }
-                log.info("Genre model loaded (EffNetDiscogs + Discogs400 classifier)")
-            else:
-                log.warning("Genre embedding model not found at %s - genre classification disabled", embedding_path)
+            GENRE_MODEL = {
+                "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                "classifier": es.TensorflowPredict2D(graphFilename=genre_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
+            }
+            log.info("Genre model loaded (EffNetDiscogs + Discogs400 classifier)")
         except Exception as e:
             log.warning("Genre model load failed: %s", e)
+    else:
+        log.warning("Genre models not available - genre classification disabled")
 
     # Mood model: needs embedding model + classification head
     mood_path = os.path.join(model_dir, "mtg_jamendo_mood_256.pb")
-    if os.path.exists(mood_path):
+    if os.path.exists(mood_path) and os.path.exists(embedding_path):
         try:
             import essentia.standard as es
-            if os.path.exists(embedding_path):
-                MOOD_MODEL = {
-                    "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
-                    "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
-                }
-                log.info("Mood model loaded (EffNetDiscogs + Jamendo classifier)")
-            else:
-                log.warning("Mood embedding model not found at %s - mood classification disabled", embedding_path)
+            MOOD_MODEL = {
+                "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
+            }
+            log.info("Mood model loaded (EffNetDiscogs + Jamendo classifier)")
         except Exception as e:
             log.warning("Mood model load failed: %s", e)
+    else:
+        log.warning("Mood models not available - mood classification disabled")
 
 
 def load_audio(path, duration=120):

@@ -14,10 +14,10 @@ RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt 
     python -c "import essentia.standard as es; print([x for x in dir(es) if 'Tensorflow' in x])" && \
     echo "TensorFlow models verified OK"
 
-# Download EffNetDiscogs embedding model (needed for genre/mood classification)
-RUN mkdir -p /root/essentia_models && \
-    python -c "import urllib.request; urllib.request.urlretrieve('https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb', '/root/essentia_models/discogs-effnet-bs64-1.pb')" && \
-    echo "Embedding model downloaded"
+# Models are auto-downloaded on first startup (no pre-download needed)
+# Genre: discogs_400_epCNN_discogs-hard_256.pb (~2MB)
+# Embedding: discogs-effnet-bs64-1.pb (~18MB)
+# Mood: mtg_jamendo_mood_256.pb (optional, user-configurable)
 
 COPY server.py /app/server.py
 COPY VERSION /app/VERSION
