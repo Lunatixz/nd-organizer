@@ -154,16 +154,27 @@ def load_models():
     else:
         log.warning("Genre models not available - genre classification disabled")
 
-    # Mood model: needs embedding model + classification head
-    mood_path = os.path.join(model_dir, "mtg_jamendo_mood_256.pb")
-    if os.path.exists(mood_path) and os.path.exists(embedding_path):
+    # Mood model: needs MusiCNN embedding + Moods MIREX classifier (5 mood clusters)
+    MOOD_URL = "https://essentia.upf.edu/models/classification-heads/moods_mirex/moods_mirex-msd-musicnn-1.pb"
+    MOOD_JSON_URL = "https://essentia.upf.edu/models/classification-heads/moods_mirex/moods_mirex-msd-musicnn-1.json"
+    MUSICNN_URL = "https://essentia.upf.edu/models/feature-extractors/musicnn/msd-musicnn-1.pb"
+
+    mood_path = os.path.join(model_dir, "moods_mirex-msd-musicnn-1.pb")
+    mood_json_path = os.path.join(model_dir, "moods_mirex-msd-musicnn-1.json")
+    musicnn_path = os.path.join(model_dir, "msd-musicnn-1.pb")
+
+    download_model(MOOD_URL, mood_path)
+    download_model(MOOD_JSON_URL, mood_json_path)
+    download_model(MUSICNN_URL, musicnn_path)
+
+    if os.path.exists(mood_path) and os.path.exists(musicnn_path):
         try:
             import essentia.standard as es
             MOOD_MODEL = {
-                "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
-                "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
+                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/Placeholder"),
+                "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="PartitionedCall"),
             }
-            log.info("Mood model loaded (EffNetDiscogs + Jamendo classifier)")
+            log.info("Mood model loaded (MusiCNN + Moods MIREX classifier)")
         except Exception as e:
             log.warning("Mood model load failed: %s", e)
     else:
@@ -279,30 +290,23 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         except Exception as e:
             log.warning("genre prediction failed for %s: %s", path, e)
 
-    # Mood prediction: EffNetDiscogs embeddings → TensorflowPredict2D classifier
+    # Mood prediction: MusiCNN embeddings → TensorflowPredict2D classifier (5 mood clusters)
     if moods and MOOD_MODEL is not None:
         try:
-            if 'embeddings' not in dir() or embeddings is None:
-                audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-                embeddings = MOOD_MODEL["embedding"](audio_16k)
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = MOOD_MODEL["embedding"](audio_16k)
             preds = MOOD_MODEL["classifier"](embeddings)[0]
-            # Full MTG-Jamendo mood taxonomy (56 classes).
+            # 5 Moods MIREX classes from the model metadata
             mood_labels = [
-                "happy", "sad", "angry", "fear", "tender", "excited", "energetic",
-                "dark", "boring", "calm", "cheerful", "romantic", "melancholic",
-                "aggressive", "uplifting", "inspiring", "mysterious", "playful",
-                "sentimental", "nostalgic", "epic", "dramatic", "peaceful",
-                "dreamy", "triumphant", "haunting", "ethereal", "powerful",
-                "gentle", "somber", "bittersweet", "euphoric", "anxious",
-                "relaxing", "intense", "lively", "solemn", "whimsical",
-                "reflective", "yearning", "brooding", "soothing", "stirring",
-                "gritty", "luscious", "raw", "lush", "spacious",
-                "crunchy", "shimmering", "warm", "cold", "bright",
-                "dark_harsh", "smooth",
+                "passionate, rousing, confident, boisterous, rowdy",
+                "rollicking, cheerful, fun, sweet, amiable/good natured",
+                "literate, poignant, wistful, bittersweet, autumnal, brooding",
+                "humorous, silly, campy, quirky, whimsical, witty, wry",
+                "aggressive, fiery, tense/anxious, intense, volatile, visceral",
             ]
-            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:10]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:5]
             for idx, score in top:
-                if idx < len(mood_labels) and score > 0.005:
+                if idx < len(mood_labels) and score > 0.05:
                     result["moods"].append({"name": mood_labels[idx], "score": round(float(score), 4)})
         except Exception as e:
             log.warning("mood prediction failed for %s: %s", path, e)
