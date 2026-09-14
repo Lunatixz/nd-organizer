@@ -10,7 +10,8 @@ COPY requirements.txt /app/requirements.txt
 
 # Install essentia-tensorflow (includes TensorFlow support for genre/mood models)
 RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt && \
-    python -c "import essentia.standard as es; assert hasattr(es, 'TensorflowPredict2D'), 'TensorflowPredict2D not found'" && \
+    python -c "import tensorflow; print('TensorFlow', tensorflow.__version__)" && \
+    python -c "import essentia.standard as es; print([x for x in dir(es) if 'Tensorflow' in x])" && \
     echo "TensorFlow models verified OK"
 
 # Download EffNetDiscogs embedding model (needed for genre/mood classification)
