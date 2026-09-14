@@ -119,13 +119,26 @@ def load_models():
     # Auto-download models if not present
     EMB_URL = "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb"
     GENRE_URL = "https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.pb"
+    GENRE_JSON_URL = "https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.json"
 
     embedding_path = os.path.join(model_dir, "discogs-effnet-bs64-1.pb")
     genre_path = os.path.join(model_dir, "discogs_400_epCNN_discogs-hard_256.pb")
+    genre_json_path = os.path.join(model_dir, "genre_discogs400-discogs-effnet-1.json")
 
     # Download models (blocks startup until available)
     download_model(EMB_URL, embedding_path)
     download_model(GENRE_URL, genre_path)
+    download_model(GENRE_JSON_URL, genre_json_path)
+
+    # Load full 400-class label list from JSON metadata
+    if os.path.exists(genre_json_path):
+        try:
+            with open(genre_json_path) as f:
+                meta = json.load(f)
+            GENRE_LABELS = meta.get("classes", GENRE_LABELS)
+            log.info("Loaded %d genre labels from metadata", len(GENRE_LABELS))
+        except Exception as e:
+            log.warning("Failed to load genre labels: %s", e)
 
     # Genre model: needs embedding model (EffNetDiscogs) + classification head (TensorflowPredict2D)
     if os.path.exists(genre_path) and os.path.exists(embedding_path):
