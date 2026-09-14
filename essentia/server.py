@@ -102,7 +102,7 @@ def load_models():
     model_dir = os.environ.get("MODEL_DIR", os.path.expanduser("~/essentia_models"))
 
     # Genre model: needs embedding model (EffNetDiscogs) + classification head (TensorflowPredict2D)
-    embedding_path = os.path.join(model_dir, "discogs_track_embeddings-effnet-bs64-1.pb")
+    embedding_path = os.path.join(model_dir, "discogs-effnet-bs64-1.pb")
     genre_path = os.path.join(model_dir, "discogs_400_epCNN_discogs-hard_256.pb")
     if os.path.exists(genre_path):
         try:
@@ -110,7 +110,7 @@ def load_models():
             if os.path.exists(embedding_path):
                 GENRE_MODEL = {
                     "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
-                    "classifier": es.TensorflowPredict2D(graphFilename=genre_path, input="serving_default_model_Placeholder", output="StatefulPartitionedCall"),
+                    "classifier": es.TensorflowPredict2D(graphFilename=genre_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
                 }
                 log.info("Genre model loaded (EffNetDiscogs + Discogs400 classifier)")
             else:
@@ -126,7 +126,7 @@ def load_models():
             if os.path.exists(embedding_path):
                 MOOD_MODEL = {
                     "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
-                    "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="StatefulPartitionedCall"),
+                    "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
                 }
                 log.info("Mood model loaded (EffNetDiscogs + Jamendo classifier)")
             else:

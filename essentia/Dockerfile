@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt 
 
 # Download EffNetDiscogs embedding model (needed for genre/mood classification)
 RUN mkdir -p /root/essentia_models && \
-    python -c "import urllib.request; urllib.request.urlretrieve('https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs_track_embeddings-effnet-bs64-1.pb', '/root/essentia_models/discogs_track_embeddings-effnet-bs64-1.pb')" && \
+    python -c "import urllib.request; urllib.request.urlretrieve('https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb', '/root/essentia_models/discogs-effnet-bs64-1.pb')" && \
     echo "Embedding model downloaded"
 
 COPY server.py /app/server.py
