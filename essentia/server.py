@@ -66,6 +66,7 @@ ESSENTIA_AVAILABLE = False
 LIBROSA_AVAILABLE = False
 GENRE_MODEL = None
 MOOD_MODEL = None
+VOICE_MODEL = None
 
 # Full Discogs-400 taxonomy (loaded from model at startup, fallback to top classes).
 GENRE_LABELS = [
@@ -97,7 +98,7 @@ def download_model(url, dest):
 
 
 def load_models():
-    global ESSENTIA_AVAILABLE, LIBROSA_AVAILABLE, GENRE_MODEL, MOOD_MODEL, GENRE_LABELS
+    global ESSENTIA_AVAILABLE, LIBROSA_AVAILABLE, GENRE_MODEL, MOOD_MODEL, VOICE_MODEL, GENRE_LABELS
     try:
         import essentia
         import essentia.standard as es
@@ -179,6 +180,24 @@ def load_models():
             log.warning("Mood model load failed: %s", e)
     else:
         log.warning("Mood models not available - mood classification disabled")
+
+    # Voice/instrumental model: needs MusiCNN embedding + voice classifier (instrumental/voice)
+    VOICE_URL = "https://essentia.upf.edu/models/classification-heads/voice_instrumental/voice_instrumental-msd-musicnn-1.pb"
+    voice_path = os.path.join(model_dir, "voice_instrumental-msd-musicnn-1.pb")
+    download_model(VOICE_URL, voice_path)
+
+    if os.path.exists(voice_path) and os.path.exists(musicnn_path):
+        try:
+            import essentia.standard as es
+            VOICE_MODEL = {
+                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/Placeholder"),
+                "classifier": es.TensorflowPredict2D(graphFilename=voice_path, input="model/Placeholder", output="model/Softmax"),
+            }
+            log.info("Voice model loaded (MusiCNN + voice/instrumental classifier)")
+        except Exception as e:
+            log.warning("Voice model load failed: %s", e)
+    else:
+        log.warning("Voice models not available - voice/instrumental classification disabled")
 
 
 def load_audio(path, duration=120):
@@ -310,6 +329,22 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
                     result["moods"].append({"name": mood_labels[idx], "score": round(float(score), 4)})
         except Exception as e:
             log.warning("mood prediction failed for %s: %s", path, e)
+
+    # Voice/instrumental prediction: MusiCNN embeddings → classifier (instrumental/voice)
+    if VOICE_MODEL is not None:
+        try:
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = VOICE_MODEL["embedding"](audio_16k)
+            preds = VOICE_MODEL["classifier"](embeddings)[0]
+            voice_labels = ["instrumental", "voice"]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
+            for idx, score in top:
+                if idx < len(voice_labels) and score > 0.05:
+                    result["voice"] = voice_labels[idx]
+                    result["voice_score"] = round(float(score), 4)
+        except Exception as e:
+            log.warning("voice prediction failed for %s: %s", path, e)
+
     if bpm:
         try:
             rhythm_extractor = es.RhythmExtractor2013(method="multifeature")
@@ -688,42 +723,29 @@ def compare_fingerprints(fp_a, fp_b):
 
 
 def check_instrumental(path):
-    """Check if a track is truly instrumental using Essentia moods + librosa vocal separation.
-    Returns: {isInstrumental: bool, confidence: float, vocalRatio: float, vocalMoods: list}
+    """Check if a track is truly instrumental using voice/instrumental classifier + librosa vocal separation.
+    Returns: {isInstrumental: bool, confidence: float, vocalRatio: float, voicePrediction: str}
     """
     audio, err = load_audio(path)
     if err:
         return None, err
 
-    # 1. Check for vocal-related moods via Essentia
-    vocal_mood_names = {"singing", "vocals", "voice", "male vocal", "female vocal",
-                        "choir", "chanting", "rap", "spoken word", "vocal"}
-    vocal_moods_found = []
-    if ESSENTIA_AVAILABLE and MOOD_MODEL is not None:
+    # 1. Voice/instrumental classifier (primary method - most accurate)
+    voice_prediction = None
+    voice_score = 0.0
+    if ESSENTIA_AVAILABLE and VOICE_MODEL is not None:
         try:
             import essentia.standard as es
-            pooled = es.TensorflowPredictVGGish()(audio)
-            preds = MOOD_MODEL(pooled)[0]
-            mood_labels = [
-                "happy", "sad", "angry", "fear", "tender", "excited", "energetic",
-                "dark", "boring", "calm", "cheerful", "romantic", "melancholic",
-                "aggressive", "uplifting", "inspiring", "mysterious", "playful",
-                "sentimental", "nostalgic", "epic", "dramatic", "peaceful",
-                "dreamy", "triumphant", "haunting", "ethereal", "powerful",
-                "gentle", "somber", "bittersweet", "euphoric", "anxious",
-                "relaxing", "intense", "lively", "solemn", "whimsical",
-                "reflective", "yearning", "brooding", "soothing", "stirring",
-                "gritty", "luscious", "raw", "lush", "spacious",
-                "crunchy", "shimmering", "warm", "cold", "bright",
-                "dark_harsh", "smooth",
-            ]
-            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:10]
-            for idx, score in top:
-                if idx < len(mood_labels) and score > 0.05:
-                    if mood_labels[idx] in vocal_mood_names:
-                        vocal_moods_found.append(mood_labels[idx])
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = VOICE_MODEL["embedding"](audio_16k)
+            preds = VOICE_MODEL["classifier"](embeddings)[0]
+            voice_labels = ["instrumental", "voice"]
+            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
+            if top:
+                voice_prediction = voice_labels[top[0][0]]
+                voice_score = float(top[0][1])
         except Exception as e:
-            log.warning("mood check failed for %s: %s", path, e)
+            log.warning("voice check failed for %s: %s", path, e)
 
     # 2. Librosa vocal separation — calculate vocal energy ratio
     vocal_ratio = 0.0
@@ -741,15 +763,21 @@ def check_instrumental(path):
             log.warning("librosa vocal check failed for %s: %s", path, e)
 
     # 3. Combined decision
-    has_vocal_moods = len(vocal_moods_found) > 0
-    is_instrumental = not has_vocal_moods and vocal_ratio < 0.1
-    confidence = 1.0 - vocal_ratio if not has_vocal_moods else vocal_ratio
+    if voice_prediction is not None:
+        # Use voice/instrumental classifier (most accurate)
+        is_instrumental = voice_prediction == "instrumental"
+        confidence = voice_score if is_instrumental else 1.0 - voice_score
+    else:
+        # Fallback to librosa vocal ratio
+        is_instrumental = vocal_ratio < 0.1
+        confidence = 1.0 - vocal_ratio
 
     return {
         "isInstrumental": is_instrumental,
         "confidence": round(confidence, 3),
         "vocalRatio": round(vocal_ratio, 4),
-        "vocalMoods": vocal_moods_found,
+        "voicePrediction": voice_prediction,
+        "voiceScore": round(voice_score, 4) if voice_prediction else None,
     }, None
 
 
@@ -790,6 +818,7 @@ class Handler(BaseHTTPRequestHandler):
                 "librosa": LIBROSA_AVAILABLE,
                 "genre_model": GENRE_MODEL is not None,
                 "mood_model": MOOD_MODEL is not None,
+                "voice_model": VOICE_MODEL is not None,
                 "uptime": int(time.time() - STARTED),
             })
             return
@@ -927,7 +956,7 @@ if __name__ == "__main__":
     log.info("%s starting (backend: %s)", SERVICE, backend)
     log.info("listening on 0.0.0.0:%d", PORT)
     log.info("Essentia: %s, librosa: %s", ESSENTIA_AVAILABLE, LIBROSA_AVAILABLE)
-    log.info("Genre model: %s, Mood model: %s", GENRE_MODEL is not None, MOOD_MODEL is not None)
+    log.info("Genre model: %s, Mood model: %s, Voice model: %s", GENRE_MODEL is not None, MOOD_MODEL is not None, VOICE_MODEL is not None)
     log.info("Features: structure, chords, fingerprint, compare, caching")
     log.info("=" * 60)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
