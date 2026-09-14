@@ -1354,27 +1354,6 @@
             {
               "type": "Control",
               "scope": "#/properties/artworkSource"
-            },
-            {
-              "type": "HorizontalLayout",
-              "elements": [
-                {
-                  "type": "Control",
-                  "scope": "#/properties/artworkFront"
-                },
-                {
-                  "type": "Control",
-                  "scope": "#/properties/artworkBack"
-                },
-                {
-                  "type": "Control",
-                  "scope": "#/properties/artworkCd"
-                },
-                {
-                  "type": "Control",
-                  "scope": "#/properties/artworkBooklet"
-                }
-              ]
             }
           ]
         },
