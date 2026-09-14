@@ -100,20 +100,37 @@ def load_models():
             log.warning("Neither Essentia nor librosa available - returning empty predictions")
             return
     model_dir = os.environ.get("MODEL_DIR", os.path.expanduser("~/essentia_models"))
+
+    # Genre model: needs embedding model (EffNetDiscogs) + classification head (TensorflowPredict2D)
+    embedding_path = os.path.join(model_dir, "discogs_track_embeddings-effnet-bs64-1.pb")
     genre_path = os.path.join(model_dir, "discogs_400_epCNN_discogs-hard_256.pb")
     if os.path.exists(genre_path):
         try:
             import essentia.standard as es
-            GENRE_MODEL = es.TensorflowPredictCNN(model=genre_path)
-            log.info("Genre model loaded from %s", genre_path)
+            if os.path.exists(embedding_path):
+                GENRE_MODEL = {
+                    "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                    "classifier": es.TensorflowPredict2D(graphFilename=genre_path),
+                }
+                log.info("Genre model loaded (EffNetDiscogs + Discogs400 classifier)")
+            else:
+                log.warning("Genre embedding model not found at %s - genre classification disabled", embedding_path)
         except Exception as e:
             log.warning("Genre model load failed: %s", e)
+
+    # Mood model: needs embedding model + classification head
     mood_path = os.path.join(model_dir, "mtg_jamendo_mood_256.pb")
     if os.path.exists(mood_path):
         try:
             import essentia.standard as es
-            MOOD_MODEL = es.TensorflowPredictCNN(model=mood_path)
-            log.info("Mood model loaded from %s", mood_path)
+            if os.path.exists(embedding_path):
+                MOOD_MODEL = {
+                    "embedding": es.TensorflowPredictEffnetDiscogs(graphFilename=embedding_path, output="PartitionedCall:1"),
+                    "classifier": es.TensorflowPredict2D(graphFilename=mood_path),
+                }
+                log.info("Mood model loaded (EffNetDiscogs + Jamendo classifier)")
+            else:
+                log.warning("Mood embedding model not found at %s - mood classification disabled", embedding_path)
         except Exception as e:
             log.warning("Mood model load failed: %s", e)
 
@@ -213,25 +230,27 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         import numpy as np
     except ImportError:
         return result, "Essentia import failed"
-    # VGGish pooled features: compute once, reuse for both genre and mood.
-    pooled = None
-    if (genres and GENRE_MODEL is not None) or (moods and MOOD_MODEL is not None):
+
+    # Genre prediction: EffNetDiscogs embeddings → TensorflowPredict2D classifier
+    if genres and GENRE_MODEL is not None:
         try:
-            pooled = es.TensorflowPredictVGGish()(audio)
-        except Exception as e:
-            log.warning("VGGish pooling failed for %s: %s", path, e)
-    if genres and GENRE_MODEL is not None and pooled is not None:
-        try:
-            preds = GENRE_MODEL(pooled)[0]
+            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+            embeddings = GENRE_MODEL["embedding"](audio_16k)
+            preds = GENRE_MODEL["classifier"](embeddings)[0]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:10]
             for idx, score in top:
                 if idx < len(GENRE_LABELS) and score > 0.05:
                     result["genres"].append({"name": GENRE_LABELS[idx], "score": round(float(score), 4)})
         except Exception as e:
             log.warning("genre prediction failed for %s: %s", path, e)
-    if moods and MOOD_MODEL is not None and pooled is not None:
+
+    # Mood prediction: EffNetDiscogs embeddings → TensorflowPredict2D classifier
+    if moods and MOOD_MODEL is not None:
         try:
-            preds = MOOD_MODEL(pooled)[0]
+            if 'embeddings' not in dir() or embeddings is None:
+                audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+                embeddings = MOOD_MODEL["embedding"](audio_16k)
+            preds = MOOD_MODEL["classifier"](embeddings)[0]
             # Full MTG-Jamendo mood taxonomy (56 classes).
             mood_labels = [
                 "happy", "sad", "angry", "fear", "tender", "excited", "energetic",
