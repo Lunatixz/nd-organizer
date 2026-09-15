@@ -898,7 +898,29 @@ pub fn verify_step(
                                                     .map(String::from)
                                                     .unwrap_or_default();
                                                 t.insert("mbid_album".into(), serde_json::Value::String(album_mbid));
-                                                t.insert("mbid_recording".into(), serde_json::Value::String(recording_mbid));
+                                                t.insert("mbid_recording".into(), serde_json::Value::String(recording_mbid.clone()));
+                                                // Submit fingerprint to AcoustID if enabled
+                                                if cfg.acoustid_submit && !recording_mbid.is_empty() && !cfg.acoustid_api_key.is_empty() {
+                                                    let file_path = root.join(rel);
+                                                    let submit_body = serde_json::json!({
+                                                        "path": file_path.to_string_lossy(),
+                                                        "acoustidApiKey": &cfg.acoustid_api_key,
+                                                        "recordingId": recording_mbid,
+                                                    });
+                                                    let submit_req = nd_pdk::host::http::HTTPRequest {
+                                                        method: "POST".into(),
+                                                        url: format!("{}/submit", acoustid_url),
+                                                        headers: std::collections::HashMap::new(),
+                                                        no_follow_redirects: false,
+                                                        body: submit_body.to_string().into_bytes(),
+                                                        timeout_ms: 30_000,
+                                                    };
+                                                    if let Ok(Some(resp)) = nd_pdk::host::http::send(submit_req) {
+                                                        if resp.status_code == 200 {
+                                                            crate::wasm::log_info(&format!("acoustid: submitted fingerprint for {}", rel));
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                         // Mark file as checked even if no match — prevents re-sending.
@@ -1386,6 +1408,9 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
             let budget = std::time::Duration::from_secs(12);
             let mut all_dirs = Vec::new();
             collect_dirs_bounded(&root, &root, cfg, &mut all_dirs, &start, &budget);
+            // Reverse: process children before parents so parent dirs
+            // still contain their (non-empty) children when we check them.
+            all_dirs.reverse();
             all_dirs
         });
 
@@ -1436,7 +1461,7 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
             if dry {
                 crate::wasm::log_info(&format!("cleanup: would delete {} (no audio)", dir_rel));
                 deleted += 1;
-            } else if std::fs::remove_dir_all(&dir_path).is_ok() {
+            } else if std::fs::remove_dir(&dir_path).is_ok() {
                 crate::wasm::log_info(&format!("cleanup: deleted {} (no audio)", dir_rel));
                 deleted += 1;
             }
@@ -2145,12 +2170,12 @@ pub fn plan_enrich_step(
                                 let _ = crate::store::kv().set(&cache_key, resp.body);
                                 val.get("isInstrumental")
                                     .and_then(|v| v.as_bool())
-                                    .unwrap_or(true)
+                                    .unwrap_or(false)
                             } else {
-                                true
+                                false
                             }
                         } else {
-                            true
+                            false
                         }
                     };
 
@@ -2193,8 +2218,9 @@ pub fn plan_enrich_step(
                 }
             }
             // Pass 2: Verify acoustic performance — trust but verify.
-            // If labeled "(Acoustic)", verify via Essentia and strip if not acoustic.
+            // If labeled "(Acoustic)", verify via librosa harmonic ratio and strip if not acoustic.
             // If not labeled but IS acoustic, append "(Acoustic)" to title.
+            // Acoustic = high harmonic content relative to percussive (HPSS separation).
             if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() {
                 for (rel, tags) in &files {
                     if enrich_start.elapsed() >= enrich_budget { break; }
@@ -2210,12 +2236,13 @@ pub fn plan_enrich_step(
                             .and_then(|v| v.get("isAcoustic").and_then(|v| v.as_bool()))
                             .unwrap_or(false)
                     } else {
-                        // Call Essentia /analyze with mood_acoustic model.
+                        // Use librosa HPSS to detect acoustic character:
+                        // High harmonic ratio relative to percussive = acoustic.
                         let base = cfg.essentia_url.trim().trim_end_matches('/');
-                        let body = serde_json::json!({"path": path_str, "genres": false, "moods": true, "structure": false, "chroma": false, "bpm": false});
+                        let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false});
                         let req = nd_pdk::host::http::HTTPRequest {
                             method: "POST".into(),
-                            url: format!("{}/analyze", base),
+                            url: format!("{}/instrumental-check", base),
                             headers: std::collections::HashMap::new(),
                             no_follow_redirects: false,
                             body: body.to_string().into_bytes(),
@@ -2225,13 +2252,18 @@ pub fn plan_enrich_step(
                             if resp.status_code == 200 {
                                 let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
                                 let _ = crate::store::kv().set(&cache_key, resp.body);
-                                val.get("moods")
-                                    .and_then(|m| m.as_array())
-                                    .map(|arr| arr.iter().any(|m| {
-                                        m.get("name").and_then(|n| n.as_str()).map(|n| n.contains("acoustic")).unwrap_or(false)
-                                            && m.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) > 0.3
-                                    }))
-                                    .unwrap_or(false)
+                                // Acoustic = NOT instrumental AND has vocal content.
+                                // If instrumental check says not instrumental (has vocals),
+                                // and vocal ratio is low-to-moderate (acoustic performance).
+                                let not_instrumental = val.get("isInstrumental")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false) == false;
+                                let vocal_ratio = val.get("vocalRatio")
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0);
+                                // Acoustic: has vocals but low vocal energy (0.05-0.3 range).
+                                // Pure instrumental = not acoustic. High vocal energy = not acoustic.
+                                not_instrumental && vocal_ratio > 0.05 && vocal_ratio < 0.3
                             } else {
                                 false
                             }
@@ -2565,12 +2597,12 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                             let _ = crate::store::kv().set(&cache_key, resp.body);
                             val.get("isInstrumental")
                                 .and_then(|v| v.as_bool())
-                                .unwrap_or(true)
+                                .unwrap_or(false)
                         } else {
-                            true
+                            false
                         }
                     } else {
-                        true
+                        false
                     }
                 };
                 let lower_title = title.to_lowercase();
@@ -2589,8 +2621,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
             }
 
             // Acoustic check — trust but verify.
-            // If labeled "(Acoustic)", verify and strip if not acoustic.
-            // If not labeled but IS acoustic, append "(Acoustic)".
+            // Uses instrumental-check endpoint: acoustic = not instrumental + low vocal ratio.
             if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() && start.elapsed() < budget {
                 let title = tags.title.clone();
                 let abs = root.join(rel);
@@ -2603,10 +2634,10 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         .unwrap_or(false)
                 } else {
                     let base = cfg.essentia_url.trim().trim_end_matches('/');
-                    let body = serde_json::json!({"path": path_str, "genres": false, "moods": true, "structure": false, "chroma": false, "bpm": false});
+                    let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false});
                     let req = nd_pdk::host::http::HTTPRequest {
                         method: "POST".into(),
-                        url: format!("{}/analyze", base),
+                        url: format!("{}/instrumental-check", base),
                         headers: std::collections::HashMap::new(),
                         no_follow_redirects: false,
                         body: body.to_string().into_bytes(),
@@ -2616,13 +2647,13 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         if resp.status_code == 200 {
                             let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
                             let _ = crate::store::kv().set(&cache_key, resp.body);
-                            val.get("moods")
-                                .and_then(|m| m.as_array())
-                                .map(|arr| arr.iter().any(|m| {
-                                    m.get("name").and_then(|n| n.as_str()).map(|n| n.contains("acoustic")).unwrap_or(false)
-                                        && m.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) > 0.3
-                                }))
-                                .unwrap_or(false)
+                            let not_instrumental = val.get("isInstrumental")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false) == false;
+                            let vocal_ratio = val.get("vocalRatio")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            not_instrumental && vocal_ratio > 0.05 && vocal_ratio < 0.3
                         } else {
                             false
                         }

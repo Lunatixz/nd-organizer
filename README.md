@@ -437,76 +437,15 @@ The compose files reference the published GHCR images — `docker compose up`
 pulls them (no local build, no build context needed). Tags: `:latest`, `:main`,
 and `vX.Y.Z` semver tags per release.
 
-Here is the **complete `docker-compose.yml`** — Navidrome plus all sidecars
-(acoustid, webhook, filter proxy, mysql, essentia) on one shared network.
-AudioMuse-AI is commented out (optional, third-party). Copy it to your
-NAS, fill in the paths, then run `docker compose up -d`:
+See **[`docker-compose.yml`](docker-compose.yml)** in the repo root for the
+full stack compose (Navidrome + acoustid + webhook + proxy + mysql + essentia).
+Copy it to your NAS, fill in the paths, then run `docker compose up -d`.
 
-```yaml
-# nd-organizer full stack - Navidrome plus sidecars, one command:
-#   docker compose up -d
-#
-# Services:
-#   navidrome                  (4533)  the music server (plugins enabled)
-#   octo-fiesta                (4535)  missing-track proxy (multi-provider)
-#   nd-organizer-acoustid (8097)  fingerprint + ReplayGain sidecar (fpcalc + ffmpeg)
-#   nd-organizer-webhook  (8099)  dashboard + log/status + radio management
-#   nd-organizer-proxy    (4534)  Subsonic filter proxy
-#   nd-organizer-mysql    (8098)  optional MySQL KV bridge for the plugin's state
-#   nd-organizer-essentia (8101)  genre/mood ML analysis (Essentia + Discogs-400)
-#
-# Streaming chain / player setup (server type: Subsonic/OpenSubsonic; use your
-# normal Navidrome user/password - credentials pass through unchanged):
-#   player -> octo-fiesta (4535) -> nd-organizer-proxy (4534) -> navidrome (4533)  [full stack]
-#   player -> nd-organizer-proxy (4534) -> navidrome (4533)                        [filtering only]
-#   player -> navidrome (4533)                                                     [no proxy]
-# Point the player at http://<your-nas>:4535/rest/ to get queue filtering AND
-# missing-track fallback. octo-fiesta is transparent for songs Navidrome already
-# has; only tracks NOT in the library are fetched from the configured provider.
-#
-# Providers (octo-fiesta supports all of these; fill credentials in a .env
-# file next to this compose and pick one via MUSIC_SERVICE):
-#   SquidWTF - no credentials (free, proxies Qobuz/Tidal/Amazon/Deemix)
-#   Deezer   - DEEZER_ARL (see octo-fiesta wiki "Getting-Deezer-Credentials")
-#   Qobuz    - QOBUZ_USER_AUTH_TOKEN + QOBUZ_USER_ID (paid account)
-#   Yandex   - YANDEX_OAUTH_TOKEN (see wiki "Getting-Yandex-Credentials")
-#
-# Prerequisites:
-#   - a user-defined Docker network named `stack_network`:
-#         docker network create stack_network
-#   - if you ALREADY run Navidrome separately, remove the `navidrome` service
-#     below and just connect your existing container to the network instead:
-#         docker network connect stack_network navidrome
-#   - acoustid: mirror EVERY library mount at the SAME guest paths Navidrome uses.
-#   - mysql: optional - only if you set persistenceBackend=mysql in the plugin.
-#
-# Plugin settings to match:
-#   logWebhookUrl = http://nd-organizer-webhook:8099
-#   acoustidUrl   = http://nd-organizer-acoustid:8097
-#   filterUrl     = http://nd-organizer-proxy:4534
-#   persistenceUrl= http://nd-organizer-mysql:8098   (if using mysql backend)
-#   octoFiestaUrl = http://octo-fiesta:8080         (or your NAS:4535; webhook health)
-
-services:
-  navidrome:
-    image: deluan/navidrome:latest
-    container_name: navidrome
-    restart: unless-stopped
-    ports:
-      - "4533:4533"
-    environment:
-      - ND_PLUGINS_ENABLED=true
-      - ND_PLUGINS_AUTORELOAD=true
-      # Default library. Additional libraries are added in the UI
-      # (Settings -> Libraries) pointing at the mounted guest paths below.
-      - ND_MUSICFOLDER=/music
-      # Import playlists (.m3u) from this folder, relative to ND_MUSICFOLDER.
-      # Colon-separated for multiple folders/globs. Empty = scan the whole library.
-      - ND_PLAYLISTSPATH=playlists
-      # Optional: agents the plugin can power for the UI (see README/agents):
-      # - ND_AGENTS=nd-organizer
-    volumes:
-      - ./navidrome-data:/data
+```bash
+docker network create stack_network                 # once
+docker network connect stack_network navidrome      # Navidrome must be on it
+docker compose up -d                                # deploy everything
+```
       - /path/to/music:/music:rw        # library 1  (path = /music)
       - /path/to/unsorted:/unsorted:rw  # library 2  (path = /unsorted)
       # add more - /host/path:/guest:rw lines for every library
@@ -718,24 +657,6 @@ The `.env` file next to this compose supplies the `${VAR}` values — start from
 the bundled **`.env.example`** (`copy .env.example .env`), which documents every
 octo-fiesta option and pre-fills `FOLDER_TEMPLATE` (it must live in `.env`, not
 inline in the compose — braces inside `${VAR:-default}` break interpolation).
-
-### Shared network
-
-One user-defined network lets every container reach the others **by container
-name** (`navidrome`, `octo-fiesta`, `nd-organizer-proxy`, ...). Create it once
-before `docker compose up`:
-
-```bash
-docker network create stack_network
-```
-
-The compose above deploys Navidrome too. If you already run Navidrome with its
-own compose, **remove the `navidrome` service** from the file and connect your
-existing container to the network instead:
-
-```bash
-docker network connect stack_network navidrome
-```
 
 ### Navidrome
 
@@ -1040,7 +961,7 @@ The `webhook` sidecar renders a self-refreshing dashboard at
 - **Activity** — raw status/report posts; rows with failing integrations or
   warnings get an ISSUES/WARNINGS chip.
 
-The plugin also posts a **stats heartbeat** every stats poll (5 min) so the
+The plugin also posts a **stats heartbeat** every stats poll (30 min) so the
 dashboard stays fresh between runs.
 
 ## Playback filtering (no file moves)

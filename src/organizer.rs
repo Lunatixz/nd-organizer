@@ -1127,7 +1127,7 @@ pub fn apply_group_plan(root: &Path, plan: &GroupPlan, prune: bool) -> Result<()
             }
         }
         let from_path = root.join(&m.from);
-        if let Err(e) = std::fs::rename(&from_path, &to_path) {
+        if let Err(e) = move_file_cross_device(&from_path, &to_path) {
             let msg = format!("move {} -> {}: {e}", m.from, m.to);
             crate::log::warn(&msg);
             errors.push(msg);
@@ -1138,7 +1138,7 @@ pub fn apply_group_plan(root: &Path, plan: &GroupPlan, prune: bool) -> Result<()
         if let Some(src_dir) = from_path.parent() {
             if let Some(dst_dir) = to_path.parent() {
                 for sc in &m.sidecars {
-                    if let Err(e) = std::fs::rename(src_dir.join(sc), dst_dir.join(sc)) {
+                    if let Err(e) = move_file_cross_device(&src_dir.join(sc), &dst_dir.join(sc)) {
                         crate::log::debug(&format!("sidecar {} move failed: {e}", sc));
                     } else {
                         crate::log::debug(&format!("sidecar {} moved with track", sc));

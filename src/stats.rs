@@ -517,7 +517,7 @@ pub mod host_stats {
         // or individual toggle overrides.
         if band == StarBand::Full {
             let use_lastfm = cfg.scrobble_provider == "lastfm" || cfg.lastfm_scrobble;
-            let use_librefm = cfg.scrobble_provider == "librefm" || cfg.librefm_scrobble;
+            let use_librefm = cfg.scrobble_provider == "librefm";
             if use_lastfm {
                 crate::favorites::host_favorites::scrobble(
                     cfg,

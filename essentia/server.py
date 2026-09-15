@@ -184,7 +184,7 @@ def load_models():
             import essentia.standard as es
             MOOD_MODEL = {
                 "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/Placeholder"),
-                "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="PartitionedCall"),
+                "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
             }
             log.info("Mood model loaded (MusiCNN + Moods MIREX classifier)")
         except Exception as e:
@@ -397,12 +397,19 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
     except ImportError:
         return result, "Essentia import failed"
 
-    # Genre prediction: EffNetDiscogs embeddings → TensorflowPredict2D classifier
+    # Pre-compute embeddings once for all classifiers.
+    # EffNetDiscogs: genre, danceability, gender, approachability, engagement, timbre
+    # MusiCNN: mood, voice, arousal/valence
+    audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
+    effnet_emb = None
+    musicnn_emb = None
+
+    # Genre prediction: EffNetDiscogs → classifier
     if genres and GENRE_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = GENRE_MODEL["embedding"](audio_16k)
-            preds = GENRE_MODEL["classifier"](embeddings)[0]
+            if effnet_emb is None:
+                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+            preds = GENRE_MODEL["classifier"](effnet_emb)[0]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:10]
             for idx, score in top:
                 if idx < len(GENRE_LABELS) and score > 0.05:
@@ -410,13 +417,12 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         except Exception as e:
             log.warning("genre prediction failed for %s: %s", path, e)
 
-    # Mood prediction: MusiCNN embeddings → TensorflowPredict2D classifier (5 mood clusters)
+    # Mood prediction: MusiCNN → classifier (5 mood clusters)
     if moods and MOOD_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = MOOD_MODEL["embedding"](audio_16k)
-            preds = MOOD_MODEL["classifier"](embeddings)[0]
-            # 5 Moods MIREX classes from the model metadata
+            if musicnn_emb is None:
+                musicnn_emb = MOOD_MODEL["embedding"](audio_16k)
+            preds = MOOD_MODEL["classifier"](musicnn_emb)[0]
             mood_labels = [
                 "passionate, rousing, confident, boisterous, rowdy",
                 "rollicking, cheerful, fun, sweet, amiable/good natured",
@@ -431,12 +437,12 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         except Exception as e:
             log.warning("mood prediction failed for %s: %s", path, e)
 
-    # Voice/instrumental prediction: MusiCNN embeddings → classifier (instrumental/voice)
+    # Voice/instrumental: MusiCNN → classifier
     if VOICE_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = VOICE_MODEL["embedding"](audio_16k)
-            preds = VOICE_MODEL["classifier"](embeddings)[0]
+            if musicnn_emb is None:
+                musicnn_emb = MOOD_MODEL["embedding"](audio_16k)
+            preds = VOICE_MODEL["classifier"](musicnn_emb)[0]
             voice_labels = ["instrumental", "voice"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
             for idx, score in top:
@@ -446,12 +452,12 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         except Exception as e:
             log.warning("voice prediction failed for %s: %s", path, e)
 
-    # Danceability prediction: EffNetDiscogs → classifier (danceable/not_danceable)
+    # Danceability: EffNetDiscogs → classifier
     if DANCE_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = DANCE_MODEL["embedding"](audio_16k)
-            preds = DANCE_MODEL["classifier"](embeddings)[0]
+            if effnet_emb is None:
+                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+            preds = DANCE_MODEL["classifier"](effnet_emb)[0]
             dance_labels = ["danceable", "not_danceable"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
             for idx, score in top:
@@ -461,12 +467,12 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         except Exception as e:
             log.warning("danceability prediction failed for %s: %s", path, e)
 
-    # Voice gender prediction: EffNetDiscogs → classifier (female/male)
+    # Voice gender: EffNetDiscogs → classifier
     if GENDER_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = GENDER_MODEL["embedding"](audio_16k)
-            preds = GENDER_MODEL["classifier"](embeddings)[0]
+            if effnet_emb is None:
+                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+            preds = GENDER_MODEL["classifier"](effnet_emb)[0]
             gender_labels = ["female", "male"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
             for idx, score in top:
@@ -476,23 +482,23 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         except Exception as e:
             log.warning("gender prediction failed for %s: %s", path, e)
 
-    # Arousal/valence prediction: MusiCNN → regression (valence, arousal 1-9)
+    # Arousal/valence: MusiCNN → regression (valence, arousal 1-9)
     if DEAM_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = DEAM_MODEL["embedding"](audio_16k)
-            preds = DEAM_MODEL["classifier"](embeddings)[0]
+            if musicnn_emb is None:
+                musicnn_emb = MOOD_MODEL["embedding"](audio_16k)
+            preds = DEAM_MODEL["classifier"](musicnn_emb)[0]
             result["valence"] = round(float(preds[0]), 2)
             result["arousal"] = round(float(preds[1]), 2)
         except Exception as e:
             log.warning("arousal/valence prediction failed for %s: %s", path, e)
 
-    # Approachability prediction: EffNetDiscogs → classifier (not_approachable/approachable)
+    # Approachability: EffNetDiscogs → classifier
     if APPROACH_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = APPROACH_MODEL["embedding"](audio_16k)
-            preds = APPROACH_MODEL["classifier"](embeddings)[0]
+            if effnet_emb is None:
+                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+            preds = APPROACH_MODEL["classifier"](effnet_emb)[0]
             approach_labels = ["not_approachable", "approachable"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
             for idx, score in top:
@@ -502,12 +508,12 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         except Exception as e:
             log.warning("approachability prediction failed for %s: %s", path, e)
 
-    # Engagement prediction: EffNetDiscogs → classifier (not_engaging/engaging)
+    # Engagement: EffNetDiscogs → classifier
     if ENGAGE_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = ENGAGE_MODEL["embedding"](audio_16k)
-            preds = ENGAGE_MODEL["classifier"](embeddings)[0]
+            if effnet_emb is None:
+                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+            preds = ENGAGE_MODEL["classifier"](effnet_emb)[0]
             engage_labels = ["not_engaging", "engaging"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
             for idx, score in top:
@@ -517,12 +523,12 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
         except Exception as e:
             log.warning("engagement prediction failed for %s: %s", path, e)
 
-    # Timbre prediction: EffNetDiscogs → classifier (bright/dark)
+    # Timbre: EffNetDiscogs → classifier (bright/dark)
     if TIMBRE_MODEL is not None:
         try:
-            audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
-            embeddings = TIMBRE_MODEL["embedding"](audio_16k)
-            preds = TIMBRE_MODEL["classifier"](embeddings)[0]
+            if effnet_emb is None:
+                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+            preds = TIMBRE_MODEL["classifier"](effnet_emb)[0]
             timbre_labels = ["bright", "dark"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
             for idx, score in top:

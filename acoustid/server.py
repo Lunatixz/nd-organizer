@@ -121,7 +121,7 @@ def acoustid_lookup(apikey, duration, fingerprint):
         "client": apikey,
         "duration": duration,
         "fingerprint": fingerprint,
-        "meta": "recordings+releasegroups+sources",
+        "meta": "recordings+releasegroups+sources+isrcs",
         "format": "json",
     })
     t0 = time.time()
@@ -256,7 +256,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "acoustidApiKey required"})
 
         results = []
-        for entry in files:
+        batch_start = time.time()
+        for i, entry in enumerate(files):
+            # Rate limit: AcoustID allows 3 requests/second
+            if i > 0 and time.time() - batch_start < 0.35 * i:
+                time.sleep(0.35 - (time.time() - batch_start - 0.35 * (i - 1)))
+            path = entry.get("path", "")
             path = entry.get("path", "")
             mtime = entry.get("mtime", 0)
             if not path or not os.path.exists(path):
@@ -320,6 +325,40 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": False, "error": err or "could not compute replaygain"})
             STATS["replaygains"] = STATS.get("replaygains", 0) + 1
             return self._send(200, {"ok": True, "replaygain": rg})
+
+        if self.path.startswith("/submit"):
+            # Submit fingerprint to AcoustID for tracks with MusicBrainz IDs.
+            apikey = req.get("acoustidApiKey", "")
+            recording_id = req.get("recordingId", "")
+            if not apikey or not recording_id:
+                return self._send(400, {"error": "acoustidApiKey and recordingId required"})
+            if not path or not os.path.exists(path):
+                STATS["errors"] += 1
+                return self._send(200, {"ok": False, "error": "file not found: %s" % path})
+            data, err = fpcalc(path)
+            if err or data is None:
+                STATS["errors"] += 1
+                return self._send(200, {"ok": False, "error": err or "fingerprint failed"})
+            # Submit to AcoustID
+            submit_data = urllib.parse.urlencode({
+                "client": apikey,
+                "duration": data.get("duration", 0),
+                "fingerprint": data.get("fingerprint", ""),
+                "recordingid": recording_id,
+            }).encode()
+            try:
+                req_url = "https://api.acoustid.org/v2/submit"
+                http_req = urllib.request.Request(req_url, data=submit_data, method="POST")
+                with urllib.request.urlopen(http_req, timeout=30) as r:
+                    result = json.loads(r.read().decode())
+                if result.get("status") == "ok":
+                    log.info("Submitted fingerprint for %s (recording=%s)", path, recording_id)
+                    return self._send(200, {"ok": True, "submitted": True})
+                else:
+                    msg = result.get("error", {}).get("message", "submit failed")
+                    return self._send(200, {"ok": False, "error": msg})
+            except Exception as e:
+                return self._send(200, {"ok": False, "error": str(e)})
 
         apikey = req.get("acoustidApiKey", "")
         if not path or not apikey:

@@ -352,8 +352,8 @@ pub struct Config {
     pub verify_instrumental: bool,
     /// Verify acoustic performance — append "(Acoustic)" to title if track is acoustic but not labeled.
     pub verify_acoustic: bool,
-    /// Number of tracks to analyze per run for Pass 2 (gradual full-library analysis).
-    pub instrumental_batch_size: i32,
+    /// Submit fingerprints to AcoustID for tracks that have MusicBrainz IDs.
+    pub acoustid_submit: bool,
 
     // Discogs (credits, release info, community ratings)
     pub discogs_token: String,
@@ -383,11 +383,6 @@ pub struct Config {
     /// to seed initial star ratings. When disabled (default), only personal
     /// ratings from Lidarr and the plugin's own play/skip behavior are used.
     pub use_community_ratings: bool,
-
-    // Libre.fm (free open-source Last.fm alternative) — shares Last.fm credentials
-    // The scrobbleProvider dropdown selects between Last.fm and Libre.fm backends
-    // using the same lastfmUser/lastfmApiKey/lastfmApiSecret fields.
-    pub librefm_scrobble: bool,
 
     // Scanning
     pub scan_user: String,
@@ -474,7 +469,7 @@ impl Default for Config {
             preserve_recording_type: true,
             singles_under_artist: true,
             singles_enabled: true,
-            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,interview,classical,karaoke".into(),
+            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,interview".into(),
             exclude_paths: Vec::new(),
             move_destination_library: String::new(), // empty = disabled
             backup_before_write: true,
@@ -523,7 +518,7 @@ impl Default for Config {
             write_acoustic_tags: false,
             verify_instrumental: false,
             verify_acoustic: false,
-            instrumental_batch_size: 100,
+            acoustid_submit: false,
             discogs_token: String::new(),
             discogs_credits: false,
             theaudiodb_key: String::new(),
@@ -537,7 +532,6 @@ impl Default for Config {
             apple_music_album_art: true,
             apple_music_album_info: true,
             listenbrainz_user: String::new(),
-            librefm_scrobble: false,
             use_community_ratings: false,
             scan_user: String::new(),
             trigger_scan_after_run: true,
@@ -584,16 +578,16 @@ const CONFIG_KEYS: &[&str] = &[
     "essentiaFingerprint", "audiomuseToken", "notifyAudiomuseAfterRun",
     "writeAcousticTags", "scanUser", "triggerScanAfterRun", "scanAfterAlbum",
     "scanAfterTagWrite", "scanDebounceSeconds",
-     "verifyInstrumental", "verifyAcoustic", "instrumentalBatchSize",
+     "verifyInstrumental", "verifyAcoustic", "acoustidSubmit",
     "discogsToken", "discogsCredits", "theAudioDbKey", "theAudioDbFanart",
     "geniusToken",
     "appleMusicCountries", "appleMusicCacheTtl", "appleMusicArtistImages",
     "appleMusicArtistBios", "appleMusicSimilarArtists", "appleMusicAlbumArt",
      "appleMusicAlbumInfo",
      "metaRefreshEnabled", "metaRefreshCron",
-     "librefmScrobble",
-    "favoritesSyncBidirectional", "favoritesSyncMinutes", "ratingSyncWriteToLidarr",
-    "ratingSyncPullFromNavidrome", "useCommunityRatings", "listenbrainzUser",
+     "favoritesSyncBidirectional", "favoritesSyncMinutes",
+     "ratingSyncWriteToLidarr", "ratingSyncPullFromNavidrome",
+     "useCommunityRatings", "listenbrainzUser",
 ];
 
 impl Config {
@@ -937,9 +931,7 @@ impl Config {
         c.essentia_fingerprint = bool(map, "essentiaFingerprint", c.essentia_fingerprint);
         c.verify_instrumental = bool(map, "verifyInstrumental", c.verify_instrumental);
         c.verify_acoustic = bool(map, "verifyAcoustic", c.verify_acoustic);
-        if let Some(v) = map.get("instrumentalBatchSize") {
-            c.instrumental_batch_size = v.parse().unwrap_or(c.instrumental_batch_size);
-        }
+        c.acoustid_submit = bool(map, "acoustidSubmit", c.acoustid_submit);
         if let Some(v) = map.get("audiomuseToken") {
             c.audiomuse_token = v.clone();
         }
@@ -972,7 +964,6 @@ impl Config {
             c.listenbrainz_user = v.clone();
         }
         c.use_community_ratings = bool(map, "useCommunityRatings", c.use_community_ratings);
-        c.librefm_scrobble = bool(map, "librefmScrobble", c.librefm_scrobble);
         if let Some(v) = map.get("scanUser") {
             c.scan_user = v.clone();
         }
