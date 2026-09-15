@@ -32,6 +32,7 @@ services:
     environment:
       - WEBHOOK_URL=http://nd-organizer-webhook:8099   # heartbeat -> dashboard
     volumes:
+      - essentia_models:/root/essentia_models   # persistent ML models (~20MB)
       - /path/to/music:/music:ro   # mirror every Navidrome library mount
     networks:
       - stack_network
@@ -39,3 +40,6 @@ services:
 networks:
   stack_network:
     external: true
+
+volumes:
+  essentia_models:

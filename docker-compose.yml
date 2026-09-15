@@ -163,6 +163,7 @@ services:
     environment:
       - WEBHOOK_URL=http://nd-organizer-webhook:8099
     volumes:
+      - essentia_models:/root/essentia_models   # persistent ML models (~20MB)
       - /path/to/music:/music:ro
     networks:
       - stack_network
@@ -304,6 +305,7 @@ services:
 
 volumes:
   mariadb_data:
+  essentia_models:
   # audiomuse-postgres-data:   # uncomment with AudioMuse-AI services
   # audiomuse-temp-flask:
   # audiomuse-temp-worker:
