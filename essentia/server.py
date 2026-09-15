@@ -64,6 +64,7 @@ SERVICE = "nd-organizer-essentia"
 STARTED = time.time()
 ESSENTIA_AVAILABLE = False
 LIBROSA_AVAILABLE = False
+MODELS_LOADED = False
 GENRE_MODEL = None
 MOOD_MODEL = None
 VOICE_MODEL = None
@@ -89,18 +90,39 @@ CHORD_LABELS = [
 ]
 
 
-def download_model(url, dest, max_retries=3, retry_delay=5):
-    """Download a model file if it doesn't exist, with retries."""
-    if os.path.exists(dest):
+def download_model(url, dest, max_retries=3, retry_delay=5, timeout=60, min_size=1024):
+    """Download a model file if it doesn't exist, with retries and timeout."""
+    if os.path.exists(dest) and os.path.getsize(dest) >= min_size:
         return True
+    # Remove stale/partial file
+    if os.path.exists(dest):
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
     for attempt in range(max_retries):
         try:
             log.info("Downloading model (attempt %d/%d): %s", attempt + 1, max_retries, url)
-            urllib.request.urlretrieve(url, dest)
-            log.info("Downloaded %s (%d bytes)", os.path.basename(dest), os.path.getsize(dest))
+            req = urllib.request.Request(url, headers={"User-Agent": "essentia-sidecar/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            if len(data) < min_size:
+                log.warning("Download too small (%d bytes < %d), retrying: %s", len(data), min_size, url)
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                continue
+            with open(dest, "wb") as f:
+                f.write(data)
+            log.info("Downloaded %s (%d bytes)", os.path.basename(dest), len(data))
             return True
         except Exception as e:
             log.warning("Download failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
+            # Clean up partial file
+            if os.path.exists(dest):
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
     log.warning("Failed to download %s after %d attempts", url, max_retries)
@@ -299,6 +321,11 @@ def load_models():
             log.info("Timbre model loaded")
         except Exception as e:
             log.warning("Timbre model load failed: %s", e)
+
+    MODELS_LOADED = True
+    loaded = sum(1 for m in [GENRE_MODEL, MOOD_MODEL, VOICE_MODEL, DANCE_MODEL,
+                             GENDER_MODEL, DEAM_MODEL, APPROACH_MODEL, ENGAGE_MODEL, TIMBRE_MODEL] if m is not None)
+    log.info("Model loading complete: %d/9 models loaded", loaded)
 
 
 def load_audio(path, duration=120):
@@ -1009,6 +1036,7 @@ class Handler(BaseHTTPRequestHandler):
                 "version": ver,
                 "essentia": ESSENTIA_AVAILABLE,
                 "librosa": LIBROSA_AVAILABLE,
+                "models_loaded": MODELS_LOADED,
                 "genre_model": GENRE_MODEL is not None,
                 "mood_model": MOOD_MODEL is not None,
                 "voice_model": VOICE_MODEL is not None,
@@ -1148,17 +1176,13 @@ def start_heartbeat():
 
 
 if __name__ == "__main__":
-    load_models()
+    import threading
+    # Start model downloads in background so /health responds immediately
+    threading.Thread(target=load_models, daemon=True).start()
     start_heartbeat()
-    backend = "essentia" if ESSENTIA_AVAILABLE else ("librosa" if LIBROSA_AVAILABLE else "none")
     log.info("=" * 60)
-    log.info("%s starting (backend: %s)", SERVICE, backend)
+    log.info("%s starting", SERVICE)
     log.info("listening on 0.0.0.0:%d", PORT)
-    log.info("Essentia: %s, librosa: %s", ESSENTIA_AVAILABLE, LIBROSA_AVAILABLE)
-    log.info("Models: genre=%s mood=%s voice=%s dance=%s gender=%s deam=%s approach=%s engage=%s timbre=%s",
-             GENRE_MODEL is not None, MOOD_MODEL is not None, VOICE_MODEL is not None,
-             DANCE_MODEL is not None, GENDER_MODEL is not None, DEAM_MODEL is not None,
-             APPROACH_MODEL is not None, ENGAGE_MODEL is not None, TIMBRE_MODEL is not None)
-    log.info("Features: structure, chords, fingerprint, compare, caching")
+    log.info("Models loading in background...")
     log.info("=" * 60)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
