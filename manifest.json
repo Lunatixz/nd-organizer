@@ -1408,6 +1408,10 @@
               "options": { "format": "password" }
             },
             {
+              "type": "Control",
+              "scope": "#/properties/acoustidSubmit"
+            },
+            {
               "type": "Label",
               "text": "Identity verification uses this sidecar for files without a MusicBrainz ID/ISRC."
             },
