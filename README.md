@@ -88,9 +88,15 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
 - **Force fingerprint**: Re-fingerprint ALL files via AcoustID even if they
   already have a MusicBrainz ID (`forceFingerprint`). Useful for refreshing
   identity verification across the entire library.
-- **Verify instrumental**: Hybrid Essentia + librosa vocal detection for tracks
-  labeled "(Instrumental)". If not truly instrumental, strips the keyword from
-  title, tags, and NFO files.
+- **Verify instrumental**: Trust-but-verify — tracks labeled "(Instrumental)"
+  are verified via Essentia and stripped if not truly instrumental. Tracks that
+  ARE instrumental but not labeled get "(Instrumental)" appended.
+- **Verify acoustic**: Same trust-but-verify pattern for acoustic performance
+  via Essentia mood_acoustic model. Strips false labels, appends when missing.
+- **Background metadata refresh**: When the organize pipeline is idle,
+  periodically updates tags, NFOs, ratings for files across ALL libraries
+  without organizing. User-gated (`metaRefreshEnabled`), respects existing
+  enrichment settings.
 - **Unified metadata writing**: All metadata sources are queried first, gaps are
   filled with priority logic, then written once (tags + NFO) at the end.
 
@@ -267,7 +273,10 @@ sync and scrobble will retry automatically via the circuit breaker.
 | `listenbrainzUser` | (empty) | ListenBrainz username (defaults to lastfmUser) |
 | `forceFingerprint` | false | Re-fingerprint ALL files via AcoustID (ignores existing MBIDs) |
 | `verifyInstrumental` | false | Verify instrumental tracks via Essentia + librosa |
+| `verifyAcoustic` | false | Verify acoustic performance via Essentia mood_acoustic model |
 | `instrumentalBatchSize` | 100 | Tracks per batch for Pass 2 (gradual analysis) |
+| `metaRefreshEnabled` | false | Enable background metadata refresh when pipeline is idle |
+| `metaRefreshCron` | `*/30 * * * *` | Cron schedule for metadata refresh checks |
 
 ### Conflict resolution
 
@@ -395,7 +404,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
 | `docker.io/library/mariadb:11.8` | MySQL server for persistent plugin state (ratings, playcounts, scan cache). Included in the compose. |
-| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | ML analysis using Essentia (genre/mood Discogs-400 + MTG-Jamendo, song structure, chords, BPM/key, audio fingerprinting). Falls back to librosa when Essentia is unavailable (BPM/key/structure/chords still work; genre/mood require Essentia models). **Requires library volumes to match Navidrome's mounts.** |
+| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | ML analysis with 9 classifiers: genre (Discogs400, 400 classes), mood (Moods MIREX, 5 clusters), voice/instrumental, danceability, voice gender, arousal/valence, approachability, engagement, timbre. Plus song structure, chords, BPM/key, audio fingerprinting. Falls back to librosa when Essentia unavailable. **Requires library volumes to match Navidrome's mounts.** |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
 ### MySQL setup (optional)
@@ -798,11 +807,24 @@ and `acoustidApiKey = <your AcoustID client key>` (free at
 ### Essentia (ML analysis, fingerprinting)
 
 ML-powered analysis sidecar using [Essentia](https://essentia.upf.edu/) (Music
-Technology Group) with Discogs-400 (genres) and MTG-Jamendo (mood) models.
-Provides genre/mood predictions, song structure segmentation, chord detection,
-BPM/key detection, and audio fingerprinting for cover/duplicate detection.
-Falls back to **librosa** when Essentia is unavailable — BPM/key/structure/chords
-still work; genre/mood require Essentia's pre-trained models.
+Technology Group) with **9 classifiers**:
+
+| Classifier | Model | Use Case |
+|------------|-------|----------|
+| **Genre** | Discogs400 (400 classes) | Detailed genre classification |
+| **Mood** | Moods MIREX (5 clusters) | Mood clusters |
+| **Voice/Instrumental** | Voice classifier | Vocal detection |
+| **Danceability** | Binary classifier | Danceable/not_danceable |
+| **Voice Gender** | Binary classifier | Male/female voice |
+| **Arousal/Valence** | Regression (1-9) | Emotional dimensions |
+| **Approachability** | Binary classifier | Mainstream vs niche |
+| **Engagement** | Binary classifier | Active vs passive listening |
+| **Timbre** | Binary classifier | Bright/dark classification |
+
+Plus song structure segmentation, chord detection, BPM/key detection, and
+audio fingerprinting for cover/duplicate detection. Falls back to **librosa**
+when Essentia is unavailable — BPM/key/structure/chords still work; classifiers
+require Essentia's pre-trained models (auto-downloaded on first start, ~20MB total).
 
 > **Critical rule:** like the Acoustid sidecar, the Essentia sidecar reads
 > audio files directly from the library volumes. **Mirror every library mount

@@ -863,7 +863,12 @@ pub mod host_stats {
         let json = host::subsonicapi::call(&uri).map_err(|e| e.to_string())?;
         let songs = crate::favorites::parse_starred(&json);
         let mut seeded = 0usize;
+        let pull_start = std::time::Instant::now();
+        let pull_budget = std::time::Duration::from_secs(12);
         for song in &songs {
+            if pull_start.elapsed() >= pull_budget {
+                break;
+            }
             // Find the file by its Navidrome id (we need the path to look up
             // the tally). The starred list doesn't include the path, so we
             // search for it via search3.

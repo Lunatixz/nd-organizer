@@ -1,18 +1,19 @@
 # Essentia ML analysis sidecar for nd-organizer.
 #
-# Provides genre/mood predictions (Discogs-400 + MTG-Jamendo), song structure
-# detection, chord analysis, BPM/key detection, and audio fingerprinting for
-# cover/duplicate detection. Acts as a fallback when AudioMuse-AI is unreachable,
-# or as the primary genre source when genreFrom=essentia.
+# Provides 9 classifiers (genre, mood, voice/instrumental, danceability,
+# voice gender, arousal/valence, approachability, engagement, timbre),
+# song structure, chords, BPM/key, and audio fingerprinting.
+# Falls back to librosa when Essentia unavailable.
 #
 # Features:
-#   - Genre/mood analysis (Discogs-400 + MTG-Jamendo models)
+#   - 9 ML classifiers (Discogs400 + MusiCNN + EffNetDiscogs)
 #   - Song structure segmentation (intro/verse/chorus/outro)
 #   - Chord detection via chroma features
 #   - BPM and musical key detection
 #   - Audio fingerprinting for cover/duplicate detection
 #
-# Requires ~100MB disk for models + 2-4GB RAM during analysis.
+# Requires ~20MB disk for models (auto-downloaded) + 2-4GB RAM during analysis.
+# Models persist in the essentia_models volume across restarts.
 #
 # IMPORTANT: The sidecar reads audio files directly from the library volumes.
 # Mirror EVERY library mount from your Navidrome stack at the SAME guest path.

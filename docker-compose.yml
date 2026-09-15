@@ -142,9 +142,10 @@ services:
   #     - stack_network
 
   # ===== Essentia (OPTIONAL - ML analysis, AudioMuse fallback) =====
-  # Genre/mood analysis (Discogs-400 + MTG-Jamendo), song structure, chords,
-  # BPM/key detection, and audio fingerprinting for cover/duplicate detection.
-  # Requires ~100MB disk for models + 2-4GB RAM during analysis.
+  # 9 ML classifiers (genre, mood, voice/instrumental, danceability, gender,
+  # arousal/valence, approachability, engagement, timbre) plus song structure,
+  # chords, BPM/key, and audio fingerprinting. Auto-downloads ~20MB of models
+  # (persistent via essentia_models volume) + 2-4GB RAM during analysis.
   #
   # IMPORTANT: The sidecar reads audio files directly from the library volumes.
   # Mirror EVERY library mount from your Navidrome stack at the SAME guest path.

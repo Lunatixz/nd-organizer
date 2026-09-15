@@ -539,10 +539,9 @@ pub(crate) mod wasm {
                 },
                 "stats_heavy" => {
                     // Heavy stats operations: top picks, ratings, meta tags.
-                    // Runs in its own background task to avoid blocking the
-                    // 30s scheduler callback. Each operation has a per-pass cap.
+                    // Runs in its own background task with strict time budget.
                     let stats_start = std::time::Instant::now();
-                    let budget = std::time::Duration::from_secs(22);
+                    let budget = std::time::Duration::from_secs(15);
                     let mut picks = 0usize;
                     let mut pulled = 0usize;
                     let mut ratings = 0usize;
