@@ -1332,6 +1332,20 @@
         },
         {
           "type": "Group",
+          "label": "Metadata refresh",
+          "elements": [
+            {
+              "type": "Control",
+              "scope": "#/properties/metaRefreshEnabled"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/metaRefreshCron"
+            }
+          ]
+        },
+        {
+          "type": "Group",
           "label": "Artwork",
           "elements": [
             {
@@ -1354,6 +1368,32 @@
             {
               "type": "Control",
               "scope": "#/properties/artworkSource"
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/artworkFront"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/artworkBack"
+                }
+              ]
+            },
+            {
+              "type": "HorizontalLayout",
+              "elements": [
+                {
+                  "type": "Control",
+                  "scope": "#/properties/artworkCd"
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/artworkBooklet"
+                }
+              ]
             }
           ]
         },
