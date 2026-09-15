@@ -365,10 +365,30 @@ pub(crate) mod wasm {
                 }
                 return Ok(());
             }
-            match run_pass(&cfg) {
-                Ok(()) => log_info("run pass completed"),
-                Err(e) => log_error(&e),
+            // Lightweight callbacks — enqueue task and return immediately.
+            // Avoids the30s scheduler deadline that run_pass() can blow.
+            if req.payload == "favsync" {
+                if let Err(e) = enqueue("favsync", 0, "", "") {
+                    log_warn(&format!("enqueue favsync: {e}"));
+                }
+                return Ok(());
             }
+            if req.payload == "meta_refresh" {
+                for &library_id in &target_libraries(&cfg) {
+                    if let Err(e) = enqueue("meta_refresh", library_id, "", "") {
+                        log_warn(&format!("enqueue meta_refresh for library {library_id}: {e}"));
+                    }
+                }
+                return Ok(());
+            }
+            if req.payload == "organize" || req.payload.is_empty() {
+                match run_pass(&cfg) {
+                    Ok(()) => log_info("run pass completed"),
+                    Err(e) => log_error(&e),
+                }
+                return Ok(());
+            }
+            log_warn(&format!("unknown scheduler callback payload: {}", req.payload));
             Ok(())
         }
     }
