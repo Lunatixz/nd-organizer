@@ -69,7 +69,7 @@ def _within_budget():
     return _render_deadline == 0.0 or time.time() < _render_deadline
 
 
-def _fetch_json(name, port, path, cache, ttl=30, timeout=1.0):
+def _fetch_json(name, port, path, cache, ttl=30, timeout=3.0):
     now = time.time()
     # Use name+path as cache key so /health and /list don't collide.
     key = "%s%s" % (name, path)
@@ -2155,7 +2155,7 @@ __BANNER__
 <details class="collapse" open id="playlists"><summary>Smart playlists</summary><div class="collapse-body">__PLAYLISTS__</div></details>
 <details class="collapse" open id="actions"><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
 <details class="collapse" id="tasks"><summary>Task queue</summary><div class="collapse-body">__TASKS__</div></details>
-<details class="collapse" id="sidecars"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
+<details class="collapse" open id="sidecars"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
 <details class="collapse" id="recent"><summary>Recent actions</summary><div class="collapse-body">__RECENT__</div></details>
 <details class="collapse" id="reports"><summary>Activity &amp; reports</summary><div class="collapse-body">__ROWS__</div></details>
 <div class="footer-art"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/footer.png" alt="" style="width:100%;max-width:700px;height:auto;border-radius:8px"></div>
