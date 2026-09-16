@@ -622,7 +622,7 @@ pub mod host_stats {
         let stats_budget = std::time::Duration::from_secs(12);
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
-                if published >= 30 || stats_start.elapsed() >= stats_budget {
+                if published >= 20 || stats_start.elapsed() >= stats_budget {
                     break; // cap per pass; the rest publish on later passes
                 }
                 let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
@@ -864,9 +864,13 @@ pub mod host_stats {
         let songs = crate::favorites::parse_starred(&json);
         let mut seeded = 0usize;
         let pull_start = std::time::Instant::now();
-        let pull_budget = std::time::Duration::from_secs(12);
+        let pull_budget = std::time::Duration::from_secs(10);
+        // Cap per pass: WASM HTTP client is slow (~50-100ms/call), so even
+        // 50 songs takes ~5s. The caller has a 12s budget within a 30s
+        // WASM deadline — keep well under.
+        let max_per_pass = 40;
         for song in &songs {
-            if pull_start.elapsed() >= pull_budget {
+            if seeded >= max_per_pass || pull_start.elapsed() >= pull_budget {
                 break;
             }
             // getStarred2 already returns the song ID — use getSong directly
@@ -1013,8 +1017,14 @@ pub mod host_stats {
             return Ok(0);
         }
         let mut written = 0usize;
+        let start = std::time::Instant::now();
+        let budget = std::time::Duration::from_secs(8);
+        let max_per_pass = 50;
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
+                if written >= max_per_pass || start.elapsed() >= budget {
+                    break;
+                }
                 let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
                 let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
                 if t.path.is_empty() || !std::path::Path::new(&t.path).exists() {
