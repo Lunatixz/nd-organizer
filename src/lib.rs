@@ -1090,21 +1090,9 @@ pub(crate) mod wasm {
         // 8. MusicBrainz + ListenBrainz are probed only via actual lookups;
         // health pings from WASM give false offline, so no card here.
 
-        // 10. Sidecars (local Docker containers — the plugin's own infrastructure)
-        // Webhook is excluded — if you can see this dashboard, it's running.
-        // MySQL is excluded — hidden when persistenceBackend != mysql.
-        // Radio is merged into webhook — no separate sidecar.
-        let sidecars = [
-            ("nd-organizer-proxy", "Filter Proxy", 4534),
-            ("nd-organizer-essentia", "Essentia ML", 8101),
-        ];
-        for (container, name, port) in sidecars {
-            let url = format!("http://{container}:{port}/health");
-            match probe_ok(container, &url, &empty) {
-                None => arr.push(json!({"name":name,"state":"ok","detail":format!("port {port}")})),
-                Some(w) => arr.push(json!({"name":name,"state":"unreachable","detail":w})),
-            }
-        }
+        // 10. Sidecars — probed by webhook dashboard (Docker network),
+        // not from WASM sandbox (can't resolve Docker DNS names).
+        // Filter Proxy health is shown in the webhook's sidecar cards.
 
         serde_json::json!(arr)
     }
