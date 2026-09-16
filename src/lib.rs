@@ -558,38 +558,19 @@ pub(crate) mod wasm {
                     Err(e) => Err(e),
                 },
                 "stats_heavy" => {
-                    // Heavy stats operations: top picks, ratings, meta tags.
-                    // Runs in its own background task with strict time budget.
-                    // WASM module has a 30s hard deadline — keep total well under.
-                    // Self-re-enqueues if budget exhausted so next pass picks up.
+                    // Heavy stats operations: pull ratings, publish, meta tags.
+                    // WASM module has a 30s hard deadline with ~20s startup overhead.
+                    // Only do pull_navidrome_ratings per pass — other operations
+                    // are skipped to stay under deadline. Self-re-enqueues.
                     let stats_start = std::time::Instant::now();
-                    let budget = std::time::Duration::from_secs(5);
-                    let mut picks = 0usize;
                     let mut pulled = 0usize;
-                    let mut ratings = 0usize;
-                    let mut meta_writes = 0usize;
 
-                    if cfg.top_picks_count > 0 && stats_start.elapsed() < budget {
-                        picks = crate::stats::host_stats::refresh_top_picks(&cfg, cfg.top_picks_count)
-                            .unwrap_or(0);
-                    }
-                    if stats_start.elapsed() < budget {
-                        pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
-                    }
-                    if stats_start.elapsed() < budget {
-                        ratings = crate::stats::host_stats::publish_star_ratings(&cfg).unwrap_or(0);
-                    }
-                    if stats_start.elapsed() < budget {
-                        meta_writes = crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0);
-                    }
-                    // Re-enqueue if we hit budget — ensures all songs get processed
-                    // across multiple passes (473 songs / 30 per pass = ~16 passes).
-                    if stats_start.elapsed() >= budget {
-                        let _ = enqueue("stats_heavy", 0, "", "");
-                    }
-                    Ok(format!(
-                        "stats_heavy: picks={picks}, pulled={pulled}, ratings={ratings}, meta={meta_writes}"
-                    ))
+                    pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
+
+                    // Re-enqueue so next pass continues where this one left off
+                    // (473 songs / 20 per pass = ~24 passes at 5 min intervals).
+                    let _ = enqueue("stats_heavy", 0, "", "");
+                    Ok(format!("stats_heavy: pulled={pulled}"))
                 }
                 "meta_refresh" => {
                     // Background metadata refresh: enrich files in all libraries
