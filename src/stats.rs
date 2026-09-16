@@ -622,7 +622,7 @@ pub mod host_stats {
         let stats_budget = std::time::Duration::from_secs(12);
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
-                if published >= 15 || stats_start.elapsed() >= stats_budget {
+                if published >= 10 || stats_start.elapsed() >= stats_budget {
                     break; // cap per pass; the rest publish on later passes
                 }
                 let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
@@ -868,7 +868,7 @@ pub mod host_stats {
         // Cap per pass: WASM HTTP client is slow (~50-100ms/call), so even
         // 50 songs takes ~5s. The caller has a 12s budget within a 30s
         // WASM deadline — keep well under.
-        let max_per_pass = 30;
+        let max_per_pass = 20;
         for song in &songs {
             if seeded >= max_per_pass || pull_start.elapsed() >= pull_budget {
                 break;
@@ -1019,7 +1019,7 @@ pub mod host_stats {
         let mut written = 0usize;
         let start = std::time::Instant::now();
         let budget = std::time::Duration::from_secs(8);
-        let max_per_pass = 30;
+        let max_per_pass = 20;
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
                 if written >= max_per_pass || start.elapsed() >= budget {

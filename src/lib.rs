@@ -563,7 +563,7 @@ pub(crate) mod wasm {
                     // WASM module has a 30s hard deadline — keep total well under.
                     // Self-re-enqueues if budget exhausted so next pass picks up.
                     let stats_start = std::time::Instant::now();
-                    let budget = std::time::Duration::from_secs(8);
+                    let budget = std::time::Duration::from_secs(5);
                     let mut picks = 0usize;
                     let mut pulled = 0usize;
                     let mut ratings = 0usize;
