@@ -561,8 +561,9 @@ pub(crate) mod wasm {
                     // Heavy stats operations: top picks, ratings, meta tags.
                     // Runs in its own background task with strict time budget.
                     // WASM module has a 30s hard deadline — keep total well under.
+                    // Self-re-enqueues if budget exhausted so next pass picks up.
                     let stats_start = std::time::Instant::now();
-                    let budget = std::time::Duration::from_secs(12);
+                    let budget = std::time::Duration::from_secs(8);
                     let mut picks = 0usize;
                     let mut pulled = 0usize;
                     let mut ratings = 0usize;
@@ -580,6 +581,11 @@ pub(crate) mod wasm {
                     }
                     if stats_start.elapsed() < budget {
                         meta_writes = crate::stats::host_stats::write_playback_meta_tags(&cfg).unwrap_or(0);
+                    }
+                    // Re-enqueue if we hit budget — ensures all songs get processed
+                    // across multiple passes (473 songs / 30 per pass = ~16 passes).
+                    if stats_start.elapsed() >= budget {
+                        let _ = enqueue("stats_heavy", 0, "", "");
                     }
                     Ok(format!(
                         "stats_heavy: picks={picks}, pulled={pulled}, ratings={ratings}, meta={meta_writes}"
