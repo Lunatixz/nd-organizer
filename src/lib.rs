@@ -560,8 +560,9 @@ pub(crate) mod wasm {
                 "stats_heavy" => {
                     // Heavy stats operations: top picks, ratings, meta tags.
                     // Runs in its own background task with strict time budget.
+                    // WASM module has a 30s hard deadline — keep total well under.
                     let stats_start = std::time::Instant::now();
-                    let budget = std::time::Duration::from_secs(15);
+                    let budget = std::time::Duration::from_secs(12);
                     let mut picks = 0usize;
                     let mut pulled = 0usize;
                     let mut ratings = 0usize;

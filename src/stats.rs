@@ -622,7 +622,7 @@ pub mod host_stats {
         let stats_budget = std::time::Duration::from_secs(12);
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
-                if published >= 50 || stats_start.elapsed() >= stats_budget {
+                if published >= 30 || stats_start.elapsed() >= stats_budget {
                     break; // cap per pass; the rest publish on later passes
                 }
                 let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
@@ -869,31 +869,13 @@ pub mod host_stats {
             if pull_start.elapsed() >= pull_budget {
                 break;
             }
-            // Find the file by its Navidrome id (we need the path to look up
-            // the tally). The starred list doesn't include the path, so we
-            // search for it via search3.
-            if song.title.is_empty() || song.artist.is_empty() {
+            // getStarred2 already returns the song ID — use getSong directly
+            // to get the path. This avoids the redundant search3 call (was
+            // doing 2 HTTP calls per song: search3 + getSong; now just 1).
+            if song.id.is_empty() {
                 continue;
             }
-            let search_uri = format!(
-                "search3?query={}&songCount=1&u={user}",
-                crate::favorites::host_favorites::urlencode(&format!("{} {}", song.artist, song.title))
-            );
-            let search_json = match host::subsonicapi::call(&search_uri) {
-                Ok(j) => j,
-                Err(_) => continue,
-            };
-            let results = crate::favorites::parse_starred(&search_json);
-            let found = results.iter().find(|s| crate::favorites::same_track(
-                &song.title, &song.artist, &song.mbid, s,
-            ));
-            // We need the file path from the song id — look it up via
-            // getSong with the id to get the path.
-            let song_id = match found {
-                Some(s) if !s.id.is_empty() => &s.id,
-                _ => continue,
-            };
-            let song_uri = format!("getSong?id={song_id}&u={user}");
+            let song_uri = format!("getSong?id={}&u={user}", song.id);
             let song_json = match host::subsonicapi::call(&song_uri) {
                 Ok(j) => j,
                 Err(_) => continue,
@@ -907,7 +889,7 @@ pub mod host_stats {
             }
             let mut t = StarTally {
                 path: path.clone(),
-                id: song_id.to_string(),
+                id: song.id.clone(),
                 title: song.title.clone(),
                 artist: song.artist.clone(),
                 ..Default::default()
@@ -933,6 +915,9 @@ pub mod host_stats {
                 if let Ok(keys) = crate::store::kv().list("star.tally.") {
                     // Find existing tallies by MBID to match ListenBrainz feedback.
                     for k in &keys {
+                        if pull_start.elapsed() >= pull_budget {
+                            break;
+                        }
                         let Ok(Some(v)) = crate::store::kv().get(k) else { continue };
                         let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
                         // Already has local data — skip.
