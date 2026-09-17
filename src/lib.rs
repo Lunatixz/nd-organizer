@@ -250,6 +250,27 @@ pub(crate) mod wasm {
                 })
                 .to_string();
                 post_webhook(&cfg, &status);
+                // Pass Subsonic credentials to webhook for background starred pull.
+                // The webhook pulls starred every 5 min and caches to a JSON file
+                // that stats_heavy reads (instant, no WASM deadline issues).
+                let user = crate::wasm::scan_user(&cfg);
+                if !user.is_empty() && !cfg.navidrome_admin_password.is_empty() {
+                    let creds = serde_json::json!({
+                        "songs": [],
+                        "user": user,
+                        "baseUrl": "http://audiomuse-navidrome-navidrome-1:4533",
+                        "password": cfg.navidrome_admin_password,
+                    });
+                    let req = host::http::HTTPRequest {
+                        method: "POST".into(),
+                        url: format!("{}/starred/pull", cfg.log_webhook_url.trim()),
+                        headers: std::collections::HashMap::new(),
+                        no_follow_redirects: false,
+                        body: creds.to_string().into_bytes(),
+                        timeout_ms: 5_000,
+                    };
+                    let _ = host::http::send(req);
+                }
             }
             // Create the organize queue. Concurrency 1 keeps per-album scans
             // coherent (only one album mid-move when a scan runs).
