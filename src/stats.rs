@@ -852,7 +852,7 @@ pub mod host_stats {
     /// Subsonic client. Returns how many tracks were seeded.
     pub fn pull_navidrome_ratings(cfg: &Config) -> Result<usize, String> {
         use crate::config::Mode;
-        if !cfg.rating_sync_pull_from_navidrome || cfg.mode != Mode::Apply {
+        if cfg.mode != Mode::Apply {
             return Ok(0);
         }
         let user = crate::wasm::scan_user(cfg);
