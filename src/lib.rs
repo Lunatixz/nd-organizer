@@ -556,9 +556,9 @@ pub(crate) mod wasm {
                     Ok(report) => {
                         // Lightweight callback — poll + filters.
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
-                        // NOTE: stats_heavy disabled — WASM startup overhead (~25s)
-                        // exceeds the 30s deadline. Starred pull runs in the webhook
-                        // background thread (every 5 min) and caches to a JSON file.
+                        // Pull starred ratings from webhook cache file (runs here
+                        // because stats task already has a warm WASM module).
+                        let _starred = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
                         let heartbeat = serde_json::json!({
                             "ts": state::now_ts(),
                             "mode": mode_label(&cfg),
