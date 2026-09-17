@@ -864,11 +864,10 @@ pub mod host_stats {
         let songs = crate::favorites::parse_starred(&json);
         let mut seeded = 0usize;
         let pull_start = std::time::Instant::now();
-        let pull_budget = std::time::Duration::from_secs(10);
-        // Cap per pass: WASM HTTP client is slow (~50-100ms/call), so even
-        // 50 songs takes ~5s. The caller has a 12s budget within a 30s
-        // WASM deadline — keep well under.
-        let max_per_pass = 20;
+        let pull_budget = std::time::Duration::from_secs(3);
+        // Cap per pass: WASM HTTP client is slow (~50-100ms/call) and the
+        // module has ~20s startup overhead + 30s hard deadline. Keep tiny.
+        let max_per_pass = 5;
         for song in &songs {
             if seeded >= max_per_pass || pull_start.elapsed() >= pull_budget {
                 break;

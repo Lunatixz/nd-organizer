@@ -567,9 +567,11 @@ pub(crate) mod wasm {
 
                     pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
 
-                    // Re-enqueue so next pass continues where this one left off
-                    // (473 songs / 20 per pass = ~24 passes at 5 min intervals).
-                    let _ = enqueue("stats_heavy", 0, "", "");
+                    // Re-enqueue if we seeded songs — next pass picks up remaining.
+                    // Skip if 0 seeded (all done or no starred songs).
+                    if pulled > 0 {
+                        let _ = enqueue("stats_heavy", 0, "", "");
+                    }
                     Ok(format!("stats_heavy: pulled={pulled}"))
                 }
                 "meta_refresh" => {
