@@ -2295,7 +2295,7 @@ class Server(http.server.ThreadingHTTPServer):
 # timer and caches results in a JSON file. The WASM plugin reads the file.
 
 STARRED_CACHE_PATH = os.environ.get(
-    "STARRED_CACHE", "/data/nd/plugins/nd-organizer/starred_cache.json"
+    "STARRED_CACHE", "/data/nd/plugins/nd-organizer/storage/starred_cache.json"
 )
 _starred_cache = {}  # song_id -> {id, title, artist, path, mbid}
 _starred_credentials = {}  # user, baseUrl, password — set by POST /starred/pull

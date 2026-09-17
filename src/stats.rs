@@ -861,7 +861,7 @@ pub mod host_stats {
         }
         // Try to read from webhook cache file first (instant, no HTTP).
         // The webhook background thread populates this file every 5 min.
-        let cache_path = std::path::Path::new("/data/plugins/nd-organizer/starred_cache.json");
+        let cache_path = std::path::Path::new("/data/plugins/nd-organizer/storage/starred_cache.json");
         if cache_path.exists() {
             if let Ok(data) = std::fs::read_to_string(&cache_path) {
                 if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&data) {
