@@ -402,7 +402,7 @@ impl Default for Config {
             max_albums_per_run: 100,
             max_scan_entries: 0, // 0 = unlimited (opt-in per-pass cap)
             albums_per_task: 5,
-            files_per_scan_task: 200,
+            files_per_scan_task: 50,
             run_only_when_idle: true,
             meta_refresh_enabled: false,
             meta_refresh_cron: "*/30 * * * *".to_string(),
