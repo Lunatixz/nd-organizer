@@ -1804,7 +1804,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         last_any_request = time.time()
         # Bound the whole render (~3.5s): sidecar probes that run past this are
         # skipped (cached/None) so the page never blocks on unreachable services.
-        _render_deadline = time.time() + 10.0
+        _render_deadline = time.time() + 20.0
         try:
             self._render()
         finally:
