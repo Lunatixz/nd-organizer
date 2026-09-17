@@ -554,12 +554,11 @@ pub(crate) mod wasm {
                 },
                 "stats" => match crate::stats::host_stats::poll(&cfg) {
                     Ok(report) => {
-                        // Lightweight callback — poll + filters + enqueue heavy ops.
+                        // Lightweight callback — poll + filters.
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
-                        // Enqueue heavy stats — reads from webhook cache file (instant, no HTTP).
-                        if let Err(e) = enqueue_stats_heavy() {
-                            log_warn(&format!("enqueue stats_heavy: {e}"));
-                        }
+                        // NOTE: stats_heavy disabled — WASM startup overhead (~25s)
+                        // exceeds the 30s deadline. Starred pull runs in the webhook
+                        // background thread (every 5 min) and caches to a JSON file.
                         let heartbeat = serde_json::json!({
                             "ts": state::now_ts(),
                             "mode": mode_label(&cfg),
