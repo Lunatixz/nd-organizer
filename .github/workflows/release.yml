@@ -107,10 +107,6 @@ jobs:
               --title "v${{ steps.ver.outputs.version }}" --generate-notes
           else
             # Every commit to main -> update the "latest" release (tag: latest).
-            # Only upload the generic nd-organizer.ndp, not the versioned one.
-            if gh release view latest >/dev/null 2>&1; then
-              gh release upload latest dist/nd-organizer.ndp --clobber
-            else
-              gh release create latest dist/nd-organizer.ndp --title "latest" --generate-notes
-            fi
+            gh release delete latest --yes || true
+            gh release create latest dist/nd-organizer.ndp --title "latest" --generate-notes
           fi
