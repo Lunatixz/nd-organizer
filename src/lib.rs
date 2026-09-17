@@ -535,10 +535,10 @@ pub(crate) mod wasm {
                     Ok(report) => {
                         // Lightweight callback — poll + filters + enqueue heavy ops.
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
-                        // Enqueue heavy stats operations as a background task.
-                        if let Err(e) = enqueue_stats_heavy() {
-                            log_warn(&format!("enqueue stats_heavy: {e}"));
-                        }
+                        // NOTE: stats_heavy is disabled — WASM startup overhead (~25s)
+                        // leaves no time within the 30s WASM deadline.
+                        // Starred pull is done via pull_navidrome_ratings in the
+                        // verify phase instead.
                         let heartbeat = serde_json::json!({
                             "ts": state::now_ts(),
                             "mode": mode_label(&cfg),
