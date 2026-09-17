@@ -17,6 +17,7 @@ import logging
 import os
 import socket
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -1690,37 +1691,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 user = req.get("user", "")
                 base_url = req.get("baseUrl", "")
                 password = req.get("password", "")
-                if not songs or not user:
-                    self._send(400, {"ok": False, "error": "songs and user required"})
-                    return
-                # Default to Navidrome container if no base URL provided
-                if not base_url:
-                    base_url = "http://audiomuse-navidrome-navidrome-1:4533"
-                resolved = []
-                for song in songs:
-                    song_id = song.get("id", "")
-                    if not song_id:
-                        continue
-                    # Call getSong to get the path
-                    try:
-                        song_url = "%s/rest/getSong?id=%s&u=%s&v=1.16.1&c=nd-organizer-webhook&f=json&p=%s" % (
-                            base_url.rstrip("/"), song_id, user, password)
-                        song_req = urllib.request.Request(song_url)
-                        with urllib.request.urlopen(song_req, timeout=5) as r:
-                            song_json = json.loads(r.read().decode("utf-8", "replace"))
-                        song_data = song_json.get("subsonic-response", {}).get("song", {})
-                        path = song_data.get("path", "")
-                        if path:
-                            resolved.append({
-                                "id": song_id,
-                                "title": song.get("title", ""),
-                                "artist": song.get("artist", ""),
-                                "path": path,
-                                "mbid": song.get("mbid", ""),
-                            })
-                    except Exception:
-                        continue
-                self._send(200, {"ok": True, "resolved": resolved, "count": len(resolved)})
+                # Store credentials for background thread
+                if user and base_url and password:
+                    _starred_credentials.update({
+                        "user": user,
+                        "baseUrl": base_url,
+                        "password": password,
+                    })
+                    # Trigger immediate pull in background
+                    threading.Thread(target=_do_starred_pull, daemon=True).start()
+                # Return cached data if available
+                if os.path.exists(STARRED_CACHE_PATH):
+                    with open(STARRED_CACHE_PATH, "r", encoding="utf-8") as f:
+                        cached = json.load(f)
+                    self._send(200, {"ok": True, "resolved": cached.get("songs", []),
+                                     "count": cached.get("count", 0), "cached": True})
+                else:
+                    self._send(200, {"ok": True, "resolved": [], "count": 0, "cached": False,
+                                     "note": "cache not ready yet, will be available on next call"})
             except Exception as e:
                 self._send(502, {"ok": False, "error": str(e)})
             return
@@ -2300,6 +2288,79 @@ class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
+# ---------------------------------------------------------------- background starred pull
+#
+# The WASM plugin can't make HTTP calls (30s deadline with ~25s startup).
+# This background thread pulls the starred list from the Subsonic API on a
+# timer and caches results in a JSON file. The WASM plugin reads the file.
+
+STARRED_CACHE_PATH = os.environ.get(
+    "STARRED_CACHE", "/data/plugins/nd-organizer/starred_cache.json"
+)
+_starred_cache = {}  # song_id -> {id, title, artist, path, mbid}
+_starred_credentials = {}  # user, baseUrl, password — set by POST /starred/pull
+
+
+def _starred_pull_thread():
+    """Background thread: pull starred list from Subsonic API every 5 min."""
+    import threading
+    while True:
+        time.sleep(300)  # 5 minutes
+        _do_starred_pull()
+
+
+def _do_starred_pull():
+    """Pull starred list from Subsonic API and cache to JSON file."""
+    creds = _starred_credentials
+    if not creds:
+        return
+    user = creds.get("user", "")
+    base_url = creds.get("baseUrl", "")
+    password = creds.get("password", "")
+    if not user or not base_url or not password:
+        return
+    try:
+        # Step 1: get starred list
+        starred_url = "%s/rest/getStarred2?u=%s&v=1.16.1&c=nd-organizer-webhook&f=json&p=%s" % (
+            base_url.rstrip("/"), user, password)
+        with urllib.request.urlopen(starred_url, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        songs = data.get("subsonic-response", {}).get("starred2", {}).get("song", [])
+        if not songs:
+            log.info("starred pull: no starred songs found")
+            return
+        # Step 2: resolve paths for each song
+        resolved = []
+        for song in songs:
+            song_id = song.get("id", "")
+            if not song_id:
+                continue
+            try:
+                song_url = "%s/rest/getSong?id=%s&u=%s&v=1.16.1&c=nd-organizer-webhook&f=json&p=%s" % (
+                    base_url.rstrip("/"), song_id, user, password)
+                with urllib.request.urlopen(song_url, timeout=10) as r:
+                    song_json = json.loads(r.read().decode("utf-8", "replace"))
+                song_data = song_json.get("subsonic-response", {}).get("song", {})
+                path = song_data.get("path", "")
+                if path:
+                    resolved.append({
+                        "id": song_id,
+                        "title": song.get("title", ""),
+                        "artist": song.get("artist", ""),
+                        "path": path,
+                        "mbid": song.get("mbid", ""),
+                    })
+            except Exception:
+                continue
+        # Step 3: cache to file
+        os.makedirs(os.path.dirname(STARRED_CACHE_PATH), exist_ok=True)
+        with open(STARRED_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"songs": resolved, "count": len(resolved), "ts": time.time()}, f)
+        log.info("starred pull: cached %d songs to %s", len(resolved), STARRED_CACHE_PATH)
+    except Exception as e:
+        log.warning("starred pull failed: %s", e)
+
+
 if __name__ == "__main__":
     load_log()
     log.info("=" * 60)
@@ -2310,4 +2371,6 @@ if __name__ == "__main__":
     log.info("waiting for the Navidrome plugin to POST reports/status to this URL")
     log.info("integrations panel is driven by the plugin's status JSON (no keys stored here)")
     log.info("=" * 60)
+    # Start background starred pull thread
+    threading.Thread(target=_starred_pull_thread, daemon=True).start()
     Server(("0.0.0.0", PORT), Handler).serve_forever()
