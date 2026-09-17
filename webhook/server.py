@@ -1666,6 +1666,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         # Force rescan: post a signal to the log so next scheduled run re-scans.
         if self.path.rstrip("/").endswith("/force-rescan"):
+            try:
+                url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+                if url:
+                    req = urllib.request.Request(
+                        url + "/force-rescan",
+                        data=b'{}',
+                        headers={"Content-Type": "application/json"},
+                    )
+                    urllib.request.urlopen(req, timeout=5).read()
+                self._send(200, {"ok": True})
+            except Exception as e:
+                self._send(502, {"ok": False, "error": str(e)})
+            return
+        # Starred pull: the plugin POSTs a Subsonic getStarred2 JSON response
+        # and the webhook resolves each song's path via getSong, then returns
+        # the mapped list. This avoids the WASM module making hundreds of
+        # sequential HTTP calls (which blow the 30s WASM deadline).
+        if self.path.rstrip("/").endswith("/starred/pull"):
+            try:
+                req = json.loads(body) if body else {}
+                songs = req.get("songs", [])
+                user = req.get("user", "")
+                base_url = req.get("baseUrl", "")
+                api_key = req.get("apiKey", "")
+                if not songs or not user:
+                    self._send(400, {"ok": False, "error": "songs and user required"})
+                    return
+                # Default to Navidrome container if no base URL provided
+                if not base_url:
+                    base_url = "http://audiomuse-navidrome-navidrome-1:4533"
+                resolved = []
+                for song in songs:
+                    song_id = song.get("id", "")
+                    if not song_id:
+                        continue
+                    # Call getSong to get the path
+                    try:
+                        song_url = "%s/rest/getSong?id=%s&u=%s&v=1.16.1&c=nd-organizer-webhook&f=json" % (
+                            base_url.rstrip("/"), song_id, user)
+                        if api_key:
+                            song_url += "&p=" + api_key
+                        song_req = urllib.request.Request(song_url)
+                        with urllib.request.urlopen(song_req, timeout=5) as r:
+                            song_json = json.loads(r.read().decode("utf-8", "replace"))
+                        song_data = song_json.get("subsonic-response", {}).get("song", {})
+                        path = song_data.get("path", "")
+                        if path:
+                            resolved.append({
+                                "id": song_id,
+                                "title": song.get("title", ""),
+                                "artist": song.get("artist", ""),
+                                "path": path,
+                                "mbid": song.get("mbid", ""),
+                            })
+                    except Exception:
+                        continue
+                self._send(200, {"ok": True, "resolved": resolved, "count": len(resolved)})
+            except Exception as e:
+                self._send(502, {"ok": False, "error": str(e)})
+            return
             log.info("force-rescan: handler entered, body=%d bytes", len(body))
             try:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

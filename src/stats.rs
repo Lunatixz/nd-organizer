@@ -859,22 +859,91 @@ pub mod host_stats {
         if user.is_empty() {
             return Ok(0);
         }
+        // Step 1: get starred list via Subsonic API (1 HTTP call)
         let uri = format!("getStarred2?u={user}");
         let json = host::subsonicapi::call(&uri).map_err(|e| e.to_string())?;
         let songs = crate::favorites::parse_starred(&json);
+        if songs.is_empty() {
+            return Ok(0);
+        }
+        // Step 2: send to webhook for path resolution (1 HTTP call instead of N)
+        // The webhook calls getSong for each song and returns the resolved list.
+        // This avoids the WASM module making hundreds of sequential HTTP calls.
+        let webhook_url = cfg.log_webhook_url.trim();
+        if webhook_url.is_empty() {
+            // Fallback: direct resolution (slow, may timeout)
+            return self_pull_direct(&songs, &user);
+        }
+        let songs_json: Vec<serde_json::Value> = songs.iter().map(|s| {
+            serde_json::json!({"id": s.id, "title": s.title, "artist": s.artist, "mbid": s.mbid})
+        }).collect();
+        let base_url = "http://audiomuse-navidrome-navidrome-1:4533".to_string();
+        let body = serde_json::json!({
+            "songs": songs_json,
+            "user": user,
+            "baseUrl": base_url,
+        });
+        let req = host::http::HTTPRequest {
+            method: "POST".into(),
+            url: format!("{}/starred/pull", webhook_url),
+            headers: std::collections::HashMap::new(),
+            no_follow_redirects: false,
+            body: body.to_string().into_bytes(),
+            timeout_ms: 30_000,
+        };
+        let resp = host::http::send(req).map_err(|e| format!("webhook call failed: {e}"))?;
+        let resp = resp.ok_or("webhook returned no response")?;
+        let result: serde_json::Value = serde_json::from_slice(&resp.body)
+            .map_err(|e| format!("bad webhook response: {e}"))?;
+        if result.get("ok") != Some(&serde_json::Value::Bool(true)) {
+            let err = result.get("error").and_then(|e| e.as_str()).unwrap_or("unknown");
+            return Err(format!("webhook starred/pull failed: {err}"));
+        }
+        let resolved = result.get("resolved").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        // Step 3: seed each resolved song into the plugin DB
+        let mut seeded = 0usize;
+        for song in &resolved {
+            let song_id = song.get("id").and_then(|id| id.as_str()).unwrap_or("");
+            let path = song.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let title = song.get("title").and_then(|t| t.as_str()).unwrap_or("");
+            let artist = song.get("artist").and_then(|a| a.as_str()).unwrap_or("");
+            if path.is_empty() || song_id.is_empty() {
+                continue;
+            }
+            let existing = load_star(path);
+            if existing.is_some() {
+                continue;
+            }
+            let mut t = StarTally {
+                path: path.to_string(),
+                id: song_id.to_string(),
+                title: title.to_string(),
+                artist: artist.to_string(),
+                ..Default::default()
+            };
+            t.loved = true;
+            t = seed_initial_rating(t, 0, true);
+            save_star(&t);
+            seeded += 1;
+        }
+        if seeded > 0 {
+            crate::wasm::log_info(&format!(
+                "star: pulled {seeded} rating(s) from Navidrome into plugin DB"
+            ));
+        }
+        Ok(seeded)
+    }
+
+    /// Fallback: pull starred ratings directly via Subsonic API (slow, per-song HTTP).
+    fn self_pull_direct(songs: &[crate::favorites::StarredSong], user: &str) -> Result<usize, String> {
         let mut seeded = 0usize;
         let pull_start = std::time::Instant::now();
         let pull_budget = std::time::Duration::from_secs(3);
-        // Cap per pass: WASM HTTP client is slow (~50-100ms/call) and the
-        // module has ~20s startup overhead + 30s hard deadline. Keep tiny.
         let max_per_pass = 5;
-        for song in &songs {
+        for song in songs {
             if seeded >= max_per_pass || pull_start.elapsed() >= pull_budget {
                 break;
             }
-            // getStarred2 already returns the song ID — use getSong directly
-            // to get the path. This avoids the redundant search3 call (was
-            // doing 2 HTTP calls per song: search3 + getSong; now just 1).
             if song.id.is_empty() {
                 continue;
             }
@@ -885,7 +954,6 @@ pub mod host_stats {
             };
             let path = extract_path_from_song(&song_json);
             let Some(path) = path else { continue };
-            // Only seed when the plugin has no local data yet.
             let existing = load_star(&path);
             if existing.is_some() {
                 continue;
@@ -897,9 +965,6 @@ pub mod host_stats {
                 artist: song.artist.clone(),
                 ..Default::default()
             };
-            // Check if this song has a rating (star/unstar implies loved, but
-            // getStarred2 doesn't carry the numeric rating — we treat starred
-            // as loved = 3 stars baseline).
             t.loved = true;
             t = seed_initial_rating(t, 0, true);
             save_star(&t);
@@ -907,53 +972,8 @@ pub mod host_stats {
         }
         if seeded > 0 {
             crate::wasm::log_info(&format!(
-                "star: pulled {seeded} rating(s) from Navidrome into plugin DB"
+                "star: pulled {seeded} rating(s) from Navidrome (direct fallback)"
             ));
-        }
-        // Pull loved/hated feedback from ListenBrainz for tracks not yet seeded.
-        if !cfg.musicbrainz_token.trim().is_empty() {
-            let lb_feedback = crate::favorites::host_favorites::listenbrainz_get_feedback(cfg);
-            if !lb_feedback.is_empty() {
-                let mut lb_seeded = 0usize;
-                if let Ok(keys) = crate::store::kv().list("star.tally.") {
-                    // Find existing tallies by MBID to match ListenBrainz feedback.
-                    for k in &keys {
-                        if pull_start.elapsed() >= pull_budget {
-                            break;
-                        }
-                        let Ok(Some(v)) = crate::store::kv().get(k) else { continue };
-                        let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
-                        // Already has local data — skip.
-                        if t.full + t.half + t.skips > 0 {
-                            continue;
-                        }
-                        // Read MBID from file tags.
-                        if let Ok(tagged) = lofty::read_from_path(&t.path) {
-                            use lofty::prelude::*;
-                            if let Some(tag) = tagged.primary_tag() {
-                                if let Some(rec_mbid) = tag.get_string(&ItemKey::MusicBrainzRecordingId) {
-                                    if let Some(&score) = lb_feedback.get(rec_mbid) {
-                                        let mut t2 = t.clone();
-                                        if score == 1 {
-                                            t2.loved = true;
-                                        }
-                                        let full = t2.full;
-                                        let loved = t2.loved;
-                                        t2 = seed_initial_rating(t2, full, loved);
-                                        save_star(&t2);
-                                        lb_seeded += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if lb_seeded > 0 {
-                    crate::wasm::log_info(&format!(
-                        "star: seeded {lb_seeded} rating(s) from ListenBrainz feedback"
-                    ));
-                }
-            }
         }
         Ok(seeded)
     }
