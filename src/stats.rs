@@ -882,6 +882,7 @@ pub mod host_stats {
             "songs": songs_json,
             "user": user,
             "baseUrl": base_url,
+            "password": cfg.navidrome_admin_password,
         });
         let req = host::http::HTTPRequest {
             method: "POST".into(),

@@ -1689,7 +1689,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 songs = req.get("songs", [])
                 user = req.get("user", "")
                 base_url = req.get("baseUrl", "")
-                api_key = req.get("apiKey", "")
+                password = req.get("password", "")
                 if not songs or not user:
                     self._send(400, {"ok": False, "error": "songs and user required"})
                     return
@@ -1703,10 +1703,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         continue
                     # Call getSong to get the path
                     try:
-                        song_url = "%s/rest/getSong?id=%s&u=%s&v=1.16.1&c=nd-organizer-webhook&f=json" % (
-                            base_url.rstrip("/"), song_id, user)
-                        if api_key:
-                            song_url += "&p=" + api_key
+                        song_url = "%s/rest/getSong?id=%s&u=%s&v=1.16.1&c=nd-organizer-webhook&f=json&p=%s" % (
+                            base_url.rstrip("/"), song_id, user, password)
                         song_req = urllib.request.Request(song_url)
                         with urllib.request.urlopen(song_req, timeout=5) as r:
                             song_json = json.loads(r.read().decode("utf-8", "replace"))
