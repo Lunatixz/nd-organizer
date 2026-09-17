@@ -943,8 +943,21 @@ pub fn verify_step(
             // Pull starred ratings from webhook cache file (instant, no HTTP).
             // Runs here because the WASM module is warm after the verify batch.
             // The webhook background thread populates the cache every 5 min.
-            if let Err(e) = crate::stats::host_stats::pull_navidrome_ratings(cfg) {
-                crate::wasm::log_debug(&format!("verify_step: starred pull: {e}"));
+            // Only pull every 10th batch to avoid adding latency to every verify.
+            {
+                let batch_count_key = format!("scan.verify_batch.{library_id}");
+                let batch_count: usize = crate::store::kv()
+                    .get(&batch_count_key)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| String::from_utf8_lossy(&v).parse().ok())
+                    .unwrap_or(0);
+                let _ = crate::store::kv().set(&batch_count_key, (batch_count + 1).to_string().into_bytes());
+                if batch_count % 10 == 0 {
+                    if let Err(e) = crate::stats::host_stats::pull_navidrome_ratings(cfg) {
+                        crate::wasm::log_debug(&format!("verify_step: starred pull: {e}"));
+                    }
+                }
             }
 
             // Remove processed files from the cached unverified list.
