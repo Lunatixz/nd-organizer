@@ -890,7 +890,7 @@ def service_cards(skip=None):
     hidden entirely (they're not running)."""
     skip = skip or set()
     now = time.time()
-    skip.update({"webhook", "proxy", "essentia"})  # internal/already-reported
+    skip.update({"webhook"})  # webhook reads own log, shown separately
     cards = ""
     for name in sorted(services):
         if name.lower() in skip:
