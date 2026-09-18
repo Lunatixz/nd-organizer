@@ -1069,6 +1069,15 @@ fn _complete_verify_job(
         let _ = crate::store::kv().delete(unverified_key);
     } else {
         let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&remaining).unwrap_or_default());
+        // If sidecar returned 0 results but files remain, reset cursor so
+        // next attempt actually sends batches (prevents infinite empty-job loop).
+        if processed == 0 {
+            let _ = crate::store::kv().delete(&format!("verify_cursor.{}", library_id));
+            crate::wasm::log_warn(&format!(
+                "verify_step: sidecar returned 0 results for {} files, resetting cursor",
+                remaining.len()
+            ));
+        }
     }
 
     if remaining.is_empty() {
