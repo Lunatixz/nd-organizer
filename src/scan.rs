@@ -923,7 +923,17 @@ pub fn verify_step(
     ));
 
     let mut all_sent = true;
+    let mut batches_sent = 0;
+    let max_batches_per_task = 3;
     for (batch_idx, chunk) in unverified.chunks(batch_size).enumerate() {
+        if batches_sent >= max_batches_per_task {
+            // Reached batch limit — store partial progress, re-enqueue
+            crate::wasm::log_info(&format!(
+                "verify_step: sent {}/{} batches, pausing for next task",
+                batches_sent, total_batches
+            ));
+            break;
+        }
         let batch_files: Vec<serde_json::Value> = chunk.iter().map(|(rel, mtime)| {
             let abs = root.join(rel);
             serde_json::json!({"path": abs.to_string_lossy(), "mtime": mtime})
@@ -960,6 +970,7 @@ pub fn verify_step(
                 break;
             }
         }
+        batches_sent += 1;
     }
 
     if all_sent {
