@@ -639,6 +639,30 @@ class Handler(BaseHTTPRequestHandler):
             log.warning("replaygain for %s: %s", path, rg_err)
         return self._send(200, resp)
 
+    def do_DELETE(self):
+        # DELETE /job?job_id=xxx — cleanup a completed job
+        if self.path.startswith("/job"):
+            params = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query))
+            job_id = params.get("job_id", "")
+            if not job_id:
+                self._send(400, {"ok": False, "error": "job_id required"})
+                return
+            if job_id in _jobs:
+                del _jobs[job_id]
+                # Clean up disk cache
+                cache_path = os.path.join(CACHE_DIR, f"{job_id}.json")
+                if os.path.exists(cache_path):
+                    try:
+                        os.remove(cache_path)
+                    except OSError:
+                        pass
+                log.info("job %s: deleted", job_id)
+                self._send(200, {"ok": True})
+            else:
+                self._send(404, {"ok": False, "error": "job not found"})
+            return
+        self._send(404, {"error": "not found"})
+
 
 def start_heartbeat():
     """Post a liveness heartbeat to the webhook dashboard (WEBHOOK_URL)."""

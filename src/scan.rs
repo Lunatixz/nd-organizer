@@ -924,7 +924,7 @@ pub fn verify_step(
         }
     }
 
-    // Send batches to sidecar (from cursor position)
+    // Send ALL batches to sidecar in one task (HTTP POSTs are fast, sidecar does the work).
     let batch_size = 100;
     let files_to_send: Vec<(String, i64)> = unverified.iter().skip(verify_cursor).cloned().collect();
     let total_batches = (files_to_send.len() + batch_size - 1) / batch_size;
@@ -934,17 +934,7 @@ pub fn verify_step(
     ));
 
     let mut all_sent = true;
-    let mut batches_sent = 0;
-    let max_batches_per_task = 3;
     for (batch_idx, chunk) in files_to_send.chunks(batch_size).enumerate() {
-        if batches_sent >= max_batches_per_task {
-            // Reached batch limit — store partial progress, re-enqueue
-            crate::wasm::log_info(&format!(
-                "verify_step: sent {}/{} batches, pausing for next task",
-                batches_sent, total_batches
-            ));
-            break;
-        }
         let batch_files: Vec<serde_json::Value> = chunk.iter().map(|(rel, mtime)| {
             let abs = root.join(rel);
             serde_json::json!({"path": abs.to_string_lossy(), "mtime": mtime})
@@ -981,7 +971,6 @@ pub fn verify_step(
                 break;
             }
         }
-        batches_sent += 1;
     }
 
     if all_sent {
