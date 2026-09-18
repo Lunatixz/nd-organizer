@@ -800,7 +800,7 @@ pub fn verify_step(
             let file_keys: Vec<String> = file_list.iter().map(|(rel, _)| file_key(library_id, rel)).collect();
             let batch_size_kv = 500;
             let recompute_start = std::time::Instant::now();
-            let recompute_budget = std::time::Duration::from_secs(5);
+            let recompute_budget = std::time::Duration::from_secs(3);
             let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
             for chunk in file_keys.chunks(batch_size_kv) {
                 if recompute_start.elapsed() >= recompute_budget {
