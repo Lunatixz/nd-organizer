@@ -287,16 +287,27 @@ pub(crate) mod wasm {
             if cfg.run_on_startup {
                 // Clear stale scan state so old tasks from previous runs
                 // find no data and exit immediately instead of timing out.
+                // Preserve scan.donev2 if the pipeline already completed —
+                // re-enabling the plugin should not re-run the entire pipeline.
                 let target_libs = target_libraries(&cfg);
                 for &library_id in &target_libs {
+                    let already_done = crate::store::kv()
+                        .get(&format!("scan.donev2.{library_id}"))
+                        .ok()
+                        .flatten()
+                        .is_some();
                     for prefix in [
                         "scan.walkstack.", "scan.walkfiles.", "scan.walkdelta.",
                         "scan.walkdirs.", "scan.walkcount.", "scan.indexed.",
                         "scan.index_cursor.", "scan.unverified.", "scan.group_cursor.",
                         "scan.group_entries.", "scan.group_remaining.",
-                        "scan.pass.", "scan.count.", "scan.donev2.",
+                        "scan.pass.", "scan.count.",
                     ] {
                         let _ = crate::store::kv().delete(&format!("{}{}", prefix, library_id));
+                    }
+                    // Only clear donev2 if pipeline hasn't completed
+                    if !already_done {
+                        let _ = crate::store::kv().delete(&format!("scan.donev2.{library_id}"));
                     }
                 }
                 // Enqueue walk tasks directly from init to avoid the tight
