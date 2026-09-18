@@ -63,11 +63,18 @@ logging.getLogger().addHandler(_mem)
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8097
 FPCALC_LENGTH = 120  # seconds; AcoustID recommends ~120s
 SERVICE = "nd-organizer-acoustid"
+CACHE_DIR = "/data/plugins/nd-organizer/sidecar-cache"
+JOB_TTL = 600  # 10 minutes — auto-expire stale jobs
 
 STARTED = time.time()
 STATS = {"lookups": 0, "matches": 0, "errors": 0, "lastLookup": 0, "lastMatch": 0}
 
 COMMON_MOUNTS = ["/music", "/unsorted", "/mnt/music", "/mnt/unsorted", "/data/music"]
+
+# Job queue: job_id -> {batches, files, results, processing, created_at}
+_jobs = {}
+# Idempotency cache: "path:mtime" -> result dict
+_results_cache = {}
 
 
 def startup_banner():
@@ -85,7 +92,170 @@ def startup_banner():
             "Mount your music at the SAME paths Navidrome uses, e.g. /music, /unsorted",
             ", ".join(COMMON_MOUNTS),
         )
+    os.makedirs(CACHE_DIR, exist_ok=True)
     log.info("=" * 60)
+
+
+def _expire_jobs():
+    """Evict jobs older than JOB_TTL seconds."""
+    now = time.time()
+    expired = [jid for jid, j in _jobs.items() if now - j["created_at"] > JOB_TTL]
+    for jid in expired:
+        log.info("expiring stale job %s (age %.0fs)", jid, now - _jobs[jid]["created_at"])
+        # Clean up disk cache
+        cache_path = os.path.join(CACHE_DIR, f"{jid}.json")
+        if os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+            except OSError:
+                pass
+        del _jobs[jid]
+
+
+def _process_job_file(job_id, entry, apikey):
+    """Process a single file: fpcalc + AcoustID lookup + replaygain.
+    Returns a result dict. Checks idempotency cache first."""
+    path = entry.get("path", "")
+    mtime = entry.get("mtime", 0)
+    if not path:
+        return {"path": path, "ok": False, "error": "no path"}
+
+    # Idempotency: skip if already processed
+    cache_key = f"{path}:{mtime}"
+    if cache_key in _results_cache:
+        return _results_cache[cache_key]
+
+    # Validate mtime hasn't changed
+    if not os.path.exists(path):
+        result = {"path": path, "ok": False, "error": "file not found", "transient": True}
+        _results_cache[cache_key] = result
+        return result
+    try:
+        current_mtime = os.path.getmtime(path)
+        if abs(current_mtime - mtime) > 1:
+            result = {"path": path, "ok": False, "error": f"mtime mismatch: expected {mtime}, got {current_mtime}", "transient": True}
+            _results_cache[cache_key] = result
+            return result
+    except OSError:
+        pass
+
+    STATS["lookups"] += 1
+    data, err = fpcalc(path)
+    if err or data is None:
+        STATS["errors"] += 1
+        result = {"path": path, "ok": False, "error": err or "fingerprint failed"}
+        _results_cache[cache_key] = result
+        return result
+
+    res, err = acoustid_lookup(apikey, data.get("duration", 0), data.get("fingerprint", ""))
+    if err:
+        STATS["errors"] += 1
+        # Distinguish transient (rate limit, network) from permanent errors
+        transient = "429" in err or "timeout" in err.lower() or "connection" in err.lower()
+        result = {"path": path, "ok": False, "error": err, "transient": transient}
+        _results_cache[cache_key] = result
+        return result
+    if not res or res.get("status") != "ok":
+        msg = res.get("error", {}).get("message", "lookup failed") if res else "no response"
+        STATS["errors"] += 1
+        result = {"path": path, "ok": False, "error": msg}
+        _results_cache[cache_key] = result
+        return result
+
+    matches = top_matches(res)
+    if matches:
+        STATS["matches"] += len(matches)
+        STATS["lastMatch"] = int(time.time())
+
+    rg, rg_err = replaygain(path)
+    entry_result = {"path": path, "ok": True, "matches": matches}
+    if rg is not None:
+        entry_result["replaygain"] = rg
+    _results_cache[cache_key] = entry_result
+    return entry_result
+
+
+def _process_job(job_id):
+    """Background thread: process all files in a job, write results incrementally."""
+    job = _jobs.get(job_id)
+    if not job:
+        return
+    apikey = job.get("apikey", "")
+    log.info("job %s: starting processing (%d files)", job_id, len(job["files"]))
+    results = []
+    for i, entry in enumerate(job["files"]):
+        if job_id not in _jobs:
+            log.info("job %s: cancelled (removed)", job_id)
+            return
+        result = _process_job_file(job_id, entry, apikey)
+        results.append(result)
+        job["results"][len(results) - 1] = result
+        job["done"] = len(results)
+        # Write incremental results to disk
+        if len(results) % 50 == 0:
+            _save_job(job_id, job)
+    job["processing"] = False
+    job["done"] = len(results)
+    _save_job(job_id, job)
+    STATS["lastLookup"] = int(time.time())
+    log.info("job %s: completed (%d files processed)", job_id, len(results))
+
+
+def _save_job(job_id, job):
+    """Persist job state to disk for crash recovery."""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        path = os.path.join(CACHE_DIR, f"{job_id}.json")
+        # Only save serializable parts
+        save_data = {
+            "job_id": job_id,
+            "apikey": job.get("apikey", ""),
+            "total_batches": job.get("total_batches", 0),
+            "received_batches": len(job.get("batches", {})),
+            "files": job.get("files", []),
+            "done": job.get("done", 0),
+            "processing": job.get("processing", False),
+            "created_at": job.get("created_at", 0),
+        }
+        with open(path, "w") as f:
+            json.dump(save_data, f)
+    except Exception as e:
+        log.warning("failed to save job %s: %s", job_id, e)
+
+
+def _load_jobs_from_disk():
+    """Load incomplete jobs from disk on startup."""
+    if not os.path.isdir(CACHE_DIR):
+        return
+    now = time.time()
+    for fname in os.listdir(CACHE_DIR):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(CACHE_DIR, fname)) as f:
+                data = json.load(f)
+            job_id = data.get("job_id", "")
+            if not job_id:
+                continue
+            # Expire old jobs
+            if now - data.get("created_at", 0) > JOB_TTL:
+                os.remove(os.path.join(CACHE_DIR, fname))
+                log.info("expired stale job %s from disk", job_id)
+                continue
+            # Restore job state
+            _jobs[job_id] = {
+                "batches": {},  # batches are ephemeral, files are what matter
+                "files": data.get("files", []),
+                "results": {},
+                "processing": False,  # don't resume processing on restart
+                "done": data.get("done", 0),
+                "apikey": data.get("apikey", ""),
+                "created_at": data.get("created_at", 0),
+                "total_batches": data.get("total_batches", 0),
+            }
+            log.info("restored job %s from disk (%d files)", job_id, len(data.get("files", [])))
+        except Exception as e:
+            log.warning("failed to load job %s: %s", fname, e)
 
 
 def fpcalc(path):
@@ -243,8 +413,39 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             log.info("health check from %s (mounts=%s)", self.client_address[0], mounts)
             self._send(200, {"ok": True, "service": SERVICE, "port": PORT, "libraryMounts": mounts, "version": ver})
-        else:
-            self._send(404, {"error": "not found"})
+            return
+        # Job status: GET /status?job_id=xxx
+        if self.path.startswith("/job-status"):
+            params = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query))
+            job_id = params.get("job_id", "")
+            _expire_jobs()
+            job = _jobs.get(job_id)
+            if not job:
+                self._send(404, {"ok": False, "error": "job not found"})
+                return
+            self._send(200, {
+                "ok": True,
+                "processing": job["processing"],
+                "done": job.get("done", 0),
+                "total": len(job.get("files", [])),
+                "errors": sum(1 for r in job.get("results", {}).values() if not r.get("ok", True)),
+            })
+            return
+        # Job results: GET /job-results?job_id=xxx
+        if self.path.startswith("/job-results"):
+            params = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query))
+            job_id = params.get("job_id", "")
+            job = _jobs.get(job_id)
+            if not job:
+                self._send(404, {"ok": False, "error": "job not found"})
+                return
+            self._send(200, {
+                "ok": True,
+                "results": job.get("results", {}),
+                "processing": job["processing"],
+            })
+            return
+        self._send(404, {"error": "not found"})
 
     def _handle_batch(self, req):
         """Process multiple files: fpcalc + AcoustID lookup + replaygain."""
@@ -311,7 +512,43 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad request: %s" % e})
 
         path = req.get("path", "")
-        # Batch processing: process multiple files in one request.
+        # Async job: receive batches, process in background
+        if self.path.startswith("/job"):
+            _expire_jobs()
+            job_id = req.get("job_id", "")
+            if not job_id:
+                return self._send(400, {"error": "job_id required"})
+            batch_index = req.get("batch_index", 0)
+            batch_total = req.get("batch_total", 1)
+            files = req.get("files", [])
+            apikey = req.get("acoustidApiKey", "")
+            if not files:
+                return self._send(400, {"error": "no files provided"})
+            # Create or update job
+            if job_id not in _jobs:
+                _jobs[job_id] = {
+                    "batches": {}, "files": [], "results": {},
+                    "processing": False, "created_at": time.time(),
+                    "apikey": apikey, "total_batches": batch_total, "done": 0,
+                }
+            job = _jobs[job_id]
+            # Deduplicate by batch_index
+            if batch_index in job["batches"]:
+                self._send(200, {"ok": True, "deduplicated": True, "received": len(job["batches"]), "total": batch_total})
+                return
+            job["batches"][batch_index] = files
+            job["files"].extend(files)
+            log.info("job %s: received batch %d/%d (%d files)", job_id, batch_index + 1, batch_total, len(files))
+            _save_job(job_id, job)
+            # Start processing when all batches received
+            if len(job["batches"]) >= batch_total and not job["processing"]:
+                job["processing"] = True
+                _save_job(job_id, job)
+                import threading
+                threading.Thread(target=_process_job, args=(job_id,), daemon=True).start()
+            self._send(200, {"ok": True, "received": len(job["batches"]), "total": batch_total})
+            return
+        # Batch processing: process multiple files in one request (legacy sync).
         if self.path.startswith("/batch"):
             return self._handle_batch(req)
         # ReplayGain-only request: compute loudness for any file, no AcoustID.
@@ -430,4 +667,5 @@ def start_heartbeat():
 if __name__ == "__main__":
     start_heartbeat()
     startup_banner()
+    _load_jobs_from_disk()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

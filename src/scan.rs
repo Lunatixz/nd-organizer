@@ -768,6 +768,7 @@ pub fn verify_step(
 
     let indexed_key = format!("scan.indexed.{library_id}");
     let unverified_key = format!("scan.unverified.{library_id}");
+    let job_id_key = format!("scan.verify_job.{library_id}");
 
     // Load cached unverified list, or recompute from indexed key.
     let unverified: Vec<(String, i64)> = crate::store::kv()
@@ -789,7 +790,7 @@ pub fn verify_step(
             let file_keys: Vec<String> = file_list.iter().map(|(rel, _)| file_key(library_id, rel)).collect();
             let batch_size_kv = 500;
             let recompute_start = std::time::Instant::now();
-            let recompute_budget = std::time::Duration::from_secs(12);
+            let recompute_budget = std::time::Duration::from_secs(5);
             let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
             for chunk in file_keys.chunks(batch_size_kv) {
                 if recompute_start.elapsed() >= recompute_budget {
@@ -839,144 +840,234 @@ pub fn verify_step(
         return Ok((ScanOutcome::Done, 0));
     }
 
-    // Process in batches of 50 via acoustid sidecar.
-    let batch_size = 50;
-    let batch: Vec<&(String, i64)> = unverified.iter().take(batch_size).collect();
-    let batch_files: Vec<serde_json::Value> = batch.iter().map(|(rel, mtime)| {
-        let abs = root.join(rel);
-        serde_json::json!({"path": abs.to_string_lossy(), "mtime": mtime})
-    }).collect();
-
+    // Async verify: send batches to AcoustID sidecar, poll for results.
     let acoustid_url = cfg.acoustid_url.trim().trim_end_matches('/');
-    let body = serde_json::json!({
-        "files": batch_files,
-        "acoustidApiKey": cfg.acoustid_api_key,
-    });
+    let job_id = format!("verify-{}-{}", library_id, crate::wasm::current_run_id(library_id).unwrap_or_default());
 
-    crate::wasm::log_info(&format!(
-        "verify_step: sending {} files to acoustid sidecar",
-        batch.len()
-    ));
+    // Check if we have an active job
+    let existing_job_id = crate::store::kv()
+        .get(&job_id_key)
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8(v).ok());
 
-    let req = host::http::HTTPRequest {
-        method: "POST".into(),
-        url: format!("{}/batch", acoustid_url),
-        headers: std::collections::HashMap::new(),
-        no_follow_redirects: false,
-        body: body.to_string().into_bytes(),
-        timeout_ms: 300_000, // 5 minutes for batch
-    };
+    if let Some(ref existing_id) = existing_job_id {
+        // Poll job status
+        let status_url = format!("{}/job-status?job_id={}", acoustid_url, existing_id);
+        let req = host::http::HTTPRequest {
+            method: "GET".into(),
+            url: status_url,
+            headers: std::collections::HashMap::new(),
+            no_follow_redirects: false,
+            body: vec![],
+            timeout_ms: 5_000,
+        };
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                let status: serde_json::Value = serde_json::from_slice(&resp.body)
+                    .map_err(|e| format!("bad status response: {e}"))?;
+                let processing = status.get("processing").and_then(|p| p.as_bool()).unwrap_or(false);
+                let done = status.get("done").and_then(|d| d.as_u64()).unwrap_or(0) as usize;
+                let total = status.get("total").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
 
-    match host::http::send(req) {
-        Ok(Some(resp)) if resp.status_code == 200 => {
-            let result: serde_json::Value = serde_json::from_slice(&resp.body)
-                .map_err(|e| format!("bad batch response: {e}"))?;
+                if processing {
+                    crate::wasm::log_info(&format!(
+                        "verify_step: job {} still processing ({}/{} done)",
+                        existing_id, done, total
+                    ));
+                    crate::wasm::enqueue_verify_task(library_id)?;
+                    post_scan_status(cfg, library_id, done, &format!(
+                        "verifying... {}/{} files", done, total
+                    ));
+                    return Ok((ScanOutcome::More, done));
+                }
 
-            // Save verified results to individual KV entries.
-            if let Some(results) = result.get("results").and_then(|r| r.as_array()) {
-                for r in results {
-                    if let Some(path) = r.get("path").and_then(|p| p.as_str()) {
-                        // Update the file's tags in KV with the resolved MBIDs.
-                        let rel = path.trim_start_matches(&root.to_string_lossy().to_string())
-                            .trim_start_matches('/');
-                        let key = file_key(library_id, rel);
-                        if let Ok(Some(v)) = crate::store::kv().get(&key) {
-                            if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
-                                if let Some(tags) = val.get_mut("tags") {
-                                    if let Some(t) = tags.as_object_mut() {
-                                        if let Some(matches) = r.get("matches").and_then(|m| m.as_array()) {
-                                            if let Some(top) = matches.first() {
-                                                let album_mbid = top.get("releaseGroups")
-                                                    .and_then(|rg| rg.as_array())
-                                                    .and_then(|a| a.first())
-                                                    .and_then(|g| g.get("id"))
-                                                    .and_then(|id| id.as_str())
-                                                    .map(String::from)
-                                                    .unwrap_or_default();
-                                                let recording_mbid = top.get("id")
-                                                    .and_then(|id| id.as_str())
-                                                    .map(String::from)
-                                                    .unwrap_or_default();
-                                                t.insert("mbid_album".into(), serde_json::Value::String(album_mbid));
-                                                t.insert("mbid_recording".into(), serde_json::Value::String(recording_mbid.clone()));
-                                                // Submit fingerprint to AcoustID if enabled
-                                                if cfg.acoustid_submit && !recording_mbid.is_empty() && !cfg.acoustid_api_key.is_empty() {
-                                                    let file_path = root.join(rel);
-                                                    let submit_body = serde_json::json!({
-                                                        "path": file_path.to_string_lossy(),
-                                                        "acoustidApiKey": &cfg.acoustid_api_key,
-                                                        "recordingId": recording_mbid,
-                                                    });
-                                                    let submit_req = nd_pdk::host::http::HTTPRequest {
-                                                        method: "POST".into(),
-                                                        url: format!("{}/submit", acoustid_url),
-                                                        headers: std::collections::HashMap::new(),
-                                                        no_follow_redirects: false,
-                                                        body: submit_body.to_string().into_bytes(),
-                                                        timeout_ms: 30_000,
-                                                    };
-                                                    if let Ok(Some(resp)) = nd_pdk::host::http::send(submit_req) {
-                                                        if resp.status_code == 200 {
-                                                            crate::wasm::log_info(&format!("acoustid: submitted fingerprint for {}", rel));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // Mark file as checked even if no match — prevents re-sending.
-                                        t.insert("_acoustid_checked".into(), serde_json::Value::Bool(true));
-                                    }
-                                }
-                                let _ = crate::store::kv().set(&key, val.to_string().into_bytes());
-                            }
-                        }
+                // Job completed — read results
+                let results_url = format!("{}/job-results?job_id={}", acoustid_url, existing_id);
+                let req = host::http::HTTPRequest {
+                    method: "GET".into(),
+                    url: results_url,
+                    headers: std::collections::HashMap::new(),
+                    no_follow_redirects: false,
+                    body: vec![],
+                    timeout_ms: 10_000,
+                };
+                match host::http::send(req) {
+                    Ok(Some(resp)) if resp.status_code == 200 => {
+                        let result: serde_json::Value = serde_json::from_slice(&resp.body)
+                            .map_err(|e| format!("bad results response: {e}"))?;
+                        return _complete_verify_job(cfg, &root, library_id, acoustid_url, existing_id, &result, &unverified, &unverified_key, &job_id_key);
+                    }
+                    _ => {
+                        crate::wasm::log_warn("verify_step: failed to read job results, retrying");
+                        let _ = crate::store::kv().delete(&job_id_key);
+                        crate::wasm::enqueue_verify_task(library_id)?;
+                        return Ok((ScanOutcome::More, 0));
                     }
                 }
             }
-
-            let processed = result.get("processed").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
-            crate::wasm::log_info(&format!(
-                "verify_step: processed {}/{} files, {} remaining",
-                processed, batch.len(), unverified.len() - processed
-            ));
-
-            // Pull starred ratings moved to background task (pull_starred task)
-            // to avoid blocking verify with 102KB cache file reads.
-
-            // Remove processed files from the cached unverified list.
-            let remaining: Vec<(String, i64)> = unverified[processed..].to_vec();
-            if remaining.is_empty() {
-                let _ = crate::store::kv().delete(&unverified_key);
-            } else {
-                let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&remaining).unwrap_or_default());
+            _ => {
+                // Status check failed — job may have expired. Start fresh.
+                crate::wasm::log_warn("verify_step: job status check failed, starting new job");
+                let _ = crate::store::kv().delete(&job_id_key);
             }
+        }
+    }
 
-            if !remaining.is_empty() {
-                // More files to verify — re-enqueue.
-                crate::wasm::enqueue_verify_task(library_id)?;
-                post_scan_status(cfg, library_id, processed, &format!(
-                    "verifying... {}/{} files verified", processed, unverified.len()
+    // Send batches to sidecar
+    let batch_size = 100;
+    let total_batches = (unverified.len() + batch_size - 1) / batch_size;
+    crate::wasm::log_info(&format!(
+        "verify_step: sending {} files to acoustid sidecar ({} batches)",
+        unverified.len(), total_batches
+    ));
+
+    let mut all_sent = true;
+    for (batch_idx, chunk) in unverified.chunks(batch_size).enumerate() {
+        let batch_files: Vec<serde_json::Value> = chunk.iter().map(|(rel, mtime)| {
+            let abs = root.join(rel);
+            serde_json::json!({"path": abs.to_string_lossy(), "mtime": mtime})
+        }).collect();
+
+        let body = serde_json::json!({
+            "job_id": &job_id,
+            "batch_index": batch_idx,
+            "batch_total": total_batches,
+            "files": batch_files,
+            "acoustidApiKey": &cfg.acoustid_api_key,
+        });
+
+        let req = host::http::HTTPRequest {
+            method: "POST".into(),
+            url: format!("{}/job", acoustid_url),
+            headers: std::collections::HashMap::new(),
+            no_follow_redirects: false,
+            body: body.to_string().into_bytes(),
+            timeout_ms: 10_000,
+        };
+
+        match host::http::send(req) {
+            Ok(Some(resp)) if resp.status_code == 200 => {
+                crate::wasm::log_info(&format!(
+                    "verify_step: sent batch {}/{}", batch_idx + 1, total_batches
                 ));
-                Ok((ScanOutcome::More, processed))
-            } else {
-                // All files verified — transition to group.
-                // Don't delete indexed_key — group_step needs it.
-                let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
-                crate::wasm::enqueue_group_task(library_id)?;
-                post_scan_status(cfg, library_id, processed, "verification complete");
-                Ok((ScanOutcome::Done, processed))
+            }
+            _ => {
+                crate::wasm::log_warn(&format!(
+                    "verify_step: failed to send batch {}/{}", batch_idx + 1, total_batches
+                ));
+                all_sent = false;
+                break;
             }
         }
-        _ => {
-            crate::wasm::log_warn("verify_step: acoustid sidecar unavailable, skipping verification");
-            // Skip verification — group with existing tags.
-            // Don't delete indexed_key — group_step needs it.
-            let _ = crate::store::kv().delete(&unverified_key);
-            let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
-            crate::wasm::enqueue_group_task(library_id)?;
-            post_scan_status(cfg, library_id, 0, "verification skipped (sidecar offline)");
-            Ok((ScanOutcome::Done, 0))
+    }
+
+    if all_sent {
+        // Store job ID for polling on next task
+        let _ = crate::store::kv().set(&job_id_key, job_id.into_bytes());
+        crate::wasm::enqueue_verify_task(library_id)?;
+        post_scan_status(cfg, library_id, 0, &format!(
+            "verifying... 0/{} files", unverified.len()
+        ));
+        Ok((ScanOutcome::More, 0))
+    } else {
+        // Some batches failed — retry
+        crate::wasm::enqueue_verify_task(library_id)?;
+        Ok((ScanOutcome::More, 0))
+    }
+}
+
+
+fn _process_verify_results(
+    cfg: &Config,
+    root: &std::path::Path,
+    library_id: i32,
+    result: &serde_json::Value,
+) -> Result<usize, String> {
+    let results = result.get("results").and_then(|r| r.as_object()).cloned().unwrap_or_default();
+    let mut processed = 0usize;
+    for (path, entry) in &results {
+        let rel = path.trim_start_matches(&root.to_string_lossy().to_string())
+            .trim_start_matches('/');
+        let key = file_key(library_id, rel);
+        if let Ok(Some(v)) = crate::store::kv().get(&key) {
+            if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
+                if let Some(tags) = val.get_mut("tags") {
+                    if let Some(t) = tags.as_object_mut() {
+                        if let Some(matches) = entry.get("matches").and_then(|m| m.as_array()) {
+                            if let Some(top) = matches.first() {
+                                let album_mbid = top.get("releaseGroups")
+                                    .and_then(|rg| rg.as_array())
+                                    .and_then(|a| a.first())
+                                    .and_then(|g| g.get("id"))
+                                    .and_then(|id| id.as_str())
+                                    .map(String::from)
+                                    .unwrap_or_default();
+                                let recording_mbid = top.get("id")
+                                    .and_then(|id| id.as_str())
+                                    .map(String::from)
+                                    .unwrap_or_default();
+                                t.insert("mbid_album".into(), serde_json::Value::String(album_mbid));
+                                t.insert("mbid_recording".into(), serde_json::Value::String(recording_mbid));
+                            }
+                        }
+                        t.insert("_acoustid_checked".into(), serde_json::Value::Bool(true));
+                    }
+                }
+                let _ = crate::store::kv().set(&key, val.to_string().into_bytes());
+            }
         }
+        processed += 1;
+    }
+    crate::wasm::log_info(&format!(
+        "verify_step: processed {} results from sidecar", processed
+    ));
+    Ok(processed)
+}
+
+
+fn _complete_verify_job(
+    cfg: &Config,
+    root: &std::path::Path,
+    library_id: i32,
+    acoustid_url: &str,
+    job_id: &str,
+    result: &serde_json::Value,
+    unverified: &[(String, i64)],
+    unverified_key: &str,
+    job_id_key: &str,
+) -> Result<(ScanOutcome, usize), String> {
+    let processed = _process_verify_results(cfg, root, library_id, result)?;
+    // Cleanup job
+    let _ = crate::store::kv().delete(job_id_key);
+    let _ = host::http::send(host::http::HTTPRequest {
+        method: "DELETE".into(),
+        url: format!("{}/job?job_id={}", acoustid_url, job_id),
+        headers: std::collections::HashMap::new(),
+        no_follow_redirects: false,
+        body: vec![],
+        timeout_ms: 5_000,
+    });
+
+    // Remove processed files from unverified list
+    let remaining: Vec<(String, i64)> = unverified.iter().skip(processed).cloned().collect();
+    if remaining.is_empty() {
+        let _ = crate::store::kv().delete(unverified_key);
+    } else {
+        let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&remaining).unwrap_or_default());
+    }
+
+    if remaining.is_empty() {
+        let _ = crate::store::kv().set(&format!("scan.donev2.{}", library_id), b"1".to_vec());
+        crate::wasm::enqueue_group_task(library_id)?;
+        post_scan_status(cfg, library_id, processed, "verification complete");
+        Ok((ScanOutcome::Done, processed))
+    } else {
+        crate::wasm::enqueue_verify_task(library_id)?;
+        post_scan_status(cfg, library_id, processed, &format!(
+            "verifying... {}/{} files verified", processed, unverified.len()
+        ));
+        Ok((ScanOutcome::More, processed))
     }
 }
 
