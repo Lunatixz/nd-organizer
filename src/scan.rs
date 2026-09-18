@@ -771,6 +771,16 @@ pub fn verify_step(
     let job_id_key = format!("scan.verify_job.{library_id}");
 
     // Load cached unverified list, or recompute from indexed key.
+    // Use cursor to avoid re-sending files already sent to the sidecar.
+    let verify_cursor_key = format!("verify_cursor.{library_id}");
+    let verify_cursor: usize = crate::store::kv()
+        .get(&verify_cursor_key)
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     let unverified: Vec<(String, i64)> = crate::store::kv()
         .get(&unverified_key)
         .ok()
@@ -914,18 +924,19 @@ pub fn verify_step(
         }
     }
 
-    // Send batches to sidecar
+    // Send batches to sidecar (from cursor position)
     let batch_size = 100;
-    let total_batches = (unverified.len() + batch_size - 1) / batch_size;
+    let files_to_send: Vec<(String, i64)> = unverified.iter().skip(verify_cursor).cloned().collect();
+    let total_batches = (files_to_send.len() + batch_size - 1) / batch_size;
     crate::wasm::log_info(&format!(
-        "verify_step: sending {} files to acoustid sidecar ({} batches)",
-        unverified.len(), total_batches
+        "verify_step: sending {} files to acoustid sidecar ({} batches, cursor={})",
+        files_to_send.len(), total_batches, verify_cursor
     ));
 
     let mut all_sent = true;
     let mut batches_sent = 0;
     let max_batches_per_task = 3;
-    for (batch_idx, chunk) in unverified.chunks(batch_size).enumerate() {
+    for (batch_idx, chunk) in files_to_send.chunks(batch_size).enumerate() {
         if batches_sent >= max_batches_per_task {
             // Reached batch limit — store partial progress, re-enqueue
             crate::wasm::log_info(&format!(
@@ -974,6 +985,9 @@ pub fn verify_step(
     }
 
     if all_sent {
+        // Update cursor to skip files already sent
+        let new_cursor = verify_cursor + files_to_send.len();
+        let _ = crate::store::kv().set(&verify_cursor_key, new_cursor.to_string().into_bytes());
         // Store job ID for polling on next task
         let _ = crate::store::kv().set(&job_id_key, job_id.into_bytes());
         crate::wasm::enqueue_verify_task(library_id)?;
