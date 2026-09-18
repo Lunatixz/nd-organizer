@@ -924,13 +924,16 @@ pub fn verify_step(
         }
     }
 
-    // Send ALL batches to sidecar in one task (HTTP POSTs are fast, sidecar does the work).
+    // Send batches to sidecar. Cap at 500 files (5 batches of 100) per task
+    // to stay within the WASM 30s callback deadline. The unverified list IS
+    // the cursor — _complete_verify_job truncates processed entries from the front.
     let batch_size = 100;
-    let files_to_send: Vec<(String, i64)> = unverified.iter().skip(verify_cursor).cloned().collect();
+    let max_per_task = 500;
+    let files_to_send: Vec<(String, i64)> = unverified.iter().take(max_per_task).cloned().collect();
     let total_batches = (files_to_send.len() + batch_size - 1) / batch_size;
     crate::wasm::log_info(&format!(
-        "verify_step: sending {} files to acoustid sidecar ({} batches, cursor={})",
-        files_to_send.len(), total_batches, verify_cursor
+        "verify_step: sending {} files to acoustid sidecar ({} batches of {}, unverified={})",
+        files_to_send.len(), total_batches, batch_size, unverified.len()
     ));
 
     let mut all_sent = true;
@@ -974,9 +977,6 @@ pub fn verify_step(
     }
 
     if all_sent {
-        // Update cursor to skip files already sent
-        let new_cursor = verify_cursor + files_to_send.len();
-        let _ = crate::store::kv().set(&verify_cursor_key, new_cursor.to_string().into_bytes());
         // Store job ID for polling on next task
         let _ = crate::store::kv().set(&job_id_key, job_id.into_bytes());
         crate::wasm::enqueue_verify_task(library_id)?;
