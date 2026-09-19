@@ -740,6 +740,10 @@ pub fn index_step(
         crate::store::kv()
             .set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default())
             .map_err(|e| e.to_string())?;
+        // Pre-cache the unverified list so verify_step doesn't need to
+        // recompute from the 40K-entry indexed key (which times out WASM).
+        let unverified_key = format!("scan.unverified.{library_id}");
+        let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&files).unwrap_or_default());
         let _ = crate::store::kv().set(
             &pass_key,
             (pass_count + processed).to_string().into_bytes(),
