@@ -809,46 +809,46 @@ def integrations_html():
         return ("<div class='note'>Waiting for the plugin to report integration status "
                 "(enable favorites/status checks in Navidrome plugin settings).</div>")
 
-        state_cls = {"ok": "ok", "reachable": "warn", "unreachable": "bad",
-                     "authFailed": "authfail", "notConfigured": "dim"}
-        state_label = {"ok": "OK", "reachable": "PARTIAL", "unreachable": "UNREACHABLE",
-                       "authFailed": "AUTH FAILED", "notConfigured": "NOT CONFIGURED"}
+    state_cls = {"ok": "ok", "reachable": "warn", "unreachable": "bad",
+                 "authFailed": "authfail", "notConfigured": "dim"}
+    state_label = {"ok": "OK", "reachable": "PARTIAL", "unreachable": "UNREACHABLE",
+                   "authFailed": "AUTH FAILED", "notConfigured": "NOT CONFIGURED"}
 
-        healthy = warn = bad = notc = 0
-        issues = []
-        cards = ""
-        plugin_names = set()
-        for it in found:
-            if not isinstance(it, dict):
-                continue
-            name = it.get("name", "?")
-            plugin_names.add(name.lower())
-            state = it.get("state", "unknown")
-            detail = it.get("detail", "")
-            cls = state_cls.get(state, "dim")
-            label = state_label.get(state, state.upper())
-            if state == "ok":
-                healthy += 1
-            elif state == "reachable":
-                warn += 1
-            elif state in ("unreachable", "authFailed"):
-                bad += 1
-                issues.append("%s - %s" % (name, label))
-            else:
-                notc += 1
-            # Show "last signal" from heartbeat if available, else detail
-            now = time.time()
-            signal_text = ""
-            for svc_name, svc_ts in services.items():
-                if name.lower() in svc_name.lower() or svc_name.lower().replace("nd-organizer-", "") in name.lower():
-                    age = max(0, int(now - svc_ts))
-                    signal_text = "last signal %ds ago" % age
-                    break
-            display_detail = signal_text if signal_text else detail
-            cards += ("<div class='ig'><div class='ig-top'><span class='ig-name'>%s</span>"
-                      "<span class='ig-state %s'>%s</span></div>%s</div>") % (
-                esc(name), cls, label,
-                "<span class='dim'>%s</span>" % esc(display_detail) if display_detail else "")
+    healthy = warn = bad = notc = 0
+    issues = []
+    cards = ""
+    plugin_names = set()
+    for it in found:
+        if not isinstance(it, dict):
+            continue
+        name = it.get("name", "?")
+        plugin_names.add(name.lower())
+        state = it.get("state", "unknown")
+        detail = it.get("detail", "")
+        cls = state_cls.get(state, "dim")
+        label = state_label.get(state, state.upper())
+        if state == "ok":
+            healthy += 1
+        elif state == "reachable":
+            warn += 1
+        elif state in ("unreachable", "authFailed"):
+            bad += 1
+            issues.append("%s - %s" % (name, label))
+        else:
+            notc += 1
+        # Show "last signal" from heartbeat if available, else detail
+        now = time.time()
+        signal_text = ""
+        for svc_name, svc_ts in services.items():
+            if name.lower() in svc_name.lower() or svc_name.lower().replace("nd-organizer-", "") in name.lower():
+                age = max(0, int(now - svc_ts))
+                signal_text = "last signal %ds ago" % age
+                break
+        display_detail = signal_text if signal_text else detail
+        cards += ("<div class='ig'><div class='ig-top'><span class='ig-name'>%s</span>"
+                  "<span class='ig-state %s'>%s</span></div>%s</div>") % (
+            esc(name), cls, label,
+            "<span class='dim'>%s</span>" % esc(display_detail) if display_detail else "")
 
     total = healthy + warn + bad + notc
     checked = ""
