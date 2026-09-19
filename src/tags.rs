@@ -98,6 +98,11 @@ pub struct TrackTags {
     pub mbid_recording: String,
     pub mbid_album: String,
     pub mbid_artist: String,
+    /// Picard's compilation flag (TCMP/cpil/COMPILATION=1) — indicates VA album.
+    pub compilation: bool,
+    /// MusicBrainz release type from embedded tags (RELEASETYPE / TXXX:MusicBrainz Album Type).
+    /// Values: "album", "single", "ep", "compilation", "soundtrack", "live", etc.
+    pub mb_release_type: String,
 }
 
 /// Detect the recording source from embedded metadata. Bootleg wins over Live.
@@ -171,6 +176,36 @@ pub fn read_tags(path: &Path) -> Option<TrackTags> {
     let genre = text(tag.genre());
     let recording = detect_recording(tag, &title, &album, &genre);
 
+    // Picard compilation flag (TCMP/cpil/COMPILATION=1) — indicates Various Artists album.
+    let compilation = tag.get_string(&ItemKey::FlagCompilation).unwrap_or("0") == "1";
+    // MusicBrainz release type from embedded tags.
+    // Lofty 0.22 doesn't have MusicBrainzReleaseType; read from raw tag items.
+    // ID3v2: "TXXX:MusicBrainz Album Type"
+    // Vorbis: "RELEASETYPE"
+    // MP4: "----:com.apple.iTunes:MusicBrainz Album Type"
+    let mut mb_release_type = String::new();
+    for item in tag.items() {
+        let key = match item.key() {
+            ItemKey::Unknown(s) => s.to_ascii_lowercase(),
+            _ => String::new(),
+        };
+        if key == "releasetype"
+            || key == "musicbrainz album type"
+            || key == "musicbrainz_albumtype"
+        {
+            if let Some(val) = item.value().text() {
+                let v = val.trim().to_ascii_lowercase();
+                // Picard may write multiple values separated by "/".
+                if v.contains("compilation") { mb_release_type = "compilation".into(); break; }
+                if v.contains("soundtrack") || v.contains("score") { mb_release_type = "soundtrack".into(); break; }
+                if v.contains("single") { mb_release_type = "single".into(); break; }
+                if v.contains("ep") { mb_release_type = "ep".into(); break; }
+                if v.contains("live") { mb_release_type = "live".into(); break; }
+                if v.contains("mixtape") { mb_release_type = "mixtape".into(); break; }
+            }
+        }
+    }
+
     Some(TrackTags {
         title,
         artist: text(tag.artist()),
@@ -188,6 +223,8 @@ pub fn read_tags(path: &Path) -> Option<TrackTags> {
         mbid_recording: mbid(ItemKey::MusicBrainzRecordingId),
         mbid_album: mbid(ItemKey::MusicBrainzReleaseId),
         mbid_artist: mbid(ItemKey::MusicBrainzArtistId),
+        compilation,
+        mb_release_type,
     })
 }
 

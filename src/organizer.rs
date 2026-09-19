@@ -74,6 +74,10 @@ pub struct AlbumInfo {
     /// classifyFromMB found one; empty otherwise.
     pub release_type: String,
     pub description: String,
+    /// True when any track has the Picard compilation flag (TCMP/cpil/COMPILATION=1).
+    pub compilation: bool,
+    /// MusicBrainz release type read from embedded tags (RELEASETYPE / TXXX:MusicBrainz Album Type).
+    pub release_type_from_tag: String,
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +251,8 @@ fn album_info_raw(album: &AlbumDir) -> AlbumInfo {
     let mut genre = String::new();
     let mut distinct_artists: Vec<String> = Vec::new();
     let mut recordings: Vec<Recording> = Vec::new();
+    let mut compilation = false;
+    let mut release_type_from_tag = String::new();
     for t in &album.tracks {
         if let Some(tags) = &t.tags {
             if title.is_empty() {
@@ -268,6 +274,12 @@ fn album_info_raw(album: &AlbumDir) -> AlbumInfo {
             if !recordings.contains(&tags.recording) {
                 recordings.push(tags.recording);
             }
+            if tags.compilation {
+                compilation = true;
+            }
+            if release_type_from_tag.is_empty() && !tags.mb_release_type.is_empty() {
+                release_type_from_tag = tags.mb_release_type.clone();
+            }
         }
     }
     let recording = match recordings.len() {
@@ -285,6 +297,8 @@ fn album_info_raw(album: &AlbumDir) -> AlbumInfo {
         recording,
         release_type: String::new(),
         description: String::new(),
+        compilation,
+        release_type_from_tag,
     }
 }
 
@@ -370,9 +384,19 @@ fn folder_name(rel: &str) -> String {
 /// Classify an album into a bucket. Local-tag heuristics only; MusicBrainz /
 /// Lidarr release-type signals slot in ahead of this in Phase 2.
 pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
-    let genre = info.genre.to_ascii_lowercase();
-    let album = info.album.to_ascii_lowercase();
-    // MusicBrainz release type wins when classifyFromMB is on.
+    // 1. Picard compilation flag — most reliable VA signal (TCMP/cpil/COMPILATION=1).
+    if info.compilation {
+        return Bucket::Various;
+    }
+    // 2. MusicBrainz release type from embedded tags (RELEASETYPE / TXXX:MusicBrainz Album Type).
+    //    Picard writes this for compilations, soundtracks, singles, etc.
+    match info.release_type_from_tag.to_ascii_lowercase().as_str() {
+        "soundtrack" | "score" => return Bucket::Soundtrack,
+        "compilation" | "live" => return Bucket::Various,
+        "single" | "ep" | "mixtape" if cfg.singles_enabled => return Bucket::Singles,
+        _ => {}
+    }
+    // 3. MusicBrainz API release type (when classifyFromMB is on).
     if cfg.classify_from_mb {
         match info.release_type.to_ascii_lowercase().as_str() {
             "soundtrack" | "score" => return Bucket::Soundtrack,
@@ -381,6 +405,9 @@ pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
             _ => {}
         }
     }
+    // 4. Genre/album name → soundtrack heuristic.
+    let genre = info.genre.to_ascii_lowercase();
+    let album = info.album.to_ascii_lowercase();
     let is_soundtrack = genre.contains("soundtrack")
         || genre.contains("ost")
         || album.contains("soundtrack")
@@ -391,19 +418,30 @@ pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
         return Bucket::Soundtrack;
     }
 
+    // 5. Album artist string → various.
     let aa = info.album_artist.trim().to_ascii_lowercase();
     let is_various = aa == "various"
         || aa == "various artists"
         || aa == "va"
+        || aa == "v/a"
+        || aa == "diverse"
+        || aa == "multiple artists"
+        || aa.starts_with("various ")
+        || aa == "verschiedene interpreten"
+        || aa == "divers artistes"
+        || aa == "artisti vari"
+        || aa == "varios artistas"
         || (info.distinct_artists.len() > 1 && aa.is_empty());
     if is_various {
         return Bucket::Various;
     }
 
-    if cfg.singles_enabled && (info.track_count == 1 || info.track_count < cfg.incomplete_album_min_tracks) {
+    // 6. No artist → singles (incomplete metadata).
+    if info.album_artist.trim().is_empty() {
         return Bucket::Singles;
     }
 
+    // 7. Default → Normal (has artist, has album, not VA/soundtrack).
     Bucket::Normal
 }
 
@@ -465,7 +503,15 @@ pub fn target_album_dir(
             }
         }
         Bucket::Singles => {
-            if cfg.singles_under_artist && !info.album_artist.trim().is_empty() {
+            if info.compilation {
+                // VA compilation singles always go under Various Artist.
+                let sub = render_folder_path(
+                    &format!("{}/{{albumArtist}} - {{title}}", cfg.singles_folder),
+                    &fields,
+                    &opts,
+                );
+                format!("{}/{}", cfg.various_folder, sub)
+            } else if cfg.singles_under_artist && !info.album_artist.trim().is_empty() {
                 render_folder_path(
                     &format!("{{albumArtist}}/{}/{{title}}", cfg.singles_folder),
                     &fields,
@@ -739,6 +785,8 @@ pub fn album_info_from_tags(files: &[(String, TrackTags)]) -> AlbumInfo {
     let mut genre = String::new();
     let mut distinct_artists: Vec<String> = Vec::new();
     let mut recordings: Vec<Recording> = Vec::new();
+    let mut compilation = false;
+    let mut release_type_from_tag = String::new();
     for (_, t) in files {
         if title.is_empty() {
             title = t.album.clone();
@@ -759,6 +807,12 @@ pub fn album_info_from_tags(files: &[(String, TrackTags)]) -> AlbumInfo {
         if !recordings.contains(&t.recording) {
             recordings.push(t.recording);
         }
+        if t.compilation {
+            compilation = true;
+        }
+        if release_type_from_tag.is_empty() && !t.mb_release_type.is_empty() {
+            release_type_from_tag = t.mb_release_type.clone();
+        }
     }
     let recording = match recordings.len() {
         0 => Recording::Studio,
@@ -775,6 +829,8 @@ pub fn album_info_from_tags(files: &[(String, TrackTags)]) -> AlbumInfo {
         recording,
         release_type: String::new(),
         description: String::new(),
+        compilation,
+        release_type_from_tag,
     }
 }
 
@@ -1353,6 +1409,8 @@ mod tests {
             recording: Recording::Studio,
             release_type: String::new(),
             description: String::new(),
+            compilation: false,
+            release_type_from_tag: String::new(),
         };
 
         assert_eq!(
@@ -1377,7 +1435,7 @@ mod tests {
         );
         assert_eq!(
             classify(&info("Solo", "X", "Rock", 1, false), &c),
-            Bucket::Singles
+            Bucket::Normal
         );
         // MusicBrainz release type drives classification when classifyFromMB is on.
         let mut c2 = cfg();
@@ -1392,6 +1450,8 @@ mod tests {
             recording: Recording::Studio,
             release_type: t.to_string(),
             description: String::new(),
+            compilation: false,
+            release_type_from_tag: String::new(),
         };
         assert_eq!(classify(&mb_info("Soundtrack"), &c2), Bucket::Soundtrack);
         assert_eq!(classify(&mb_info("Compilation"), &c2), Bucket::Various);
@@ -1399,7 +1459,7 @@ mod tests {
         assert_eq!(classify(&mb_info("Album"), &c2), Bucket::Normal);
         assert_eq!(
             classify(&info("Partial", "X", "Rock", 2, false), &c),
-            Bucket::Singles
+            Bucket::Normal
         );
         assert_eq!(
             classify(&info("Real", "X", "Rock", 12, false), &c),
@@ -1410,7 +1470,7 @@ mod tests {
         c2.incomplete_album_min_tracks = 5;
         assert_eq!(
             classify(&info("Partial", "X", "Rock", 4, false), &c2),
-            Bucket::Singles
+            Bucket::Normal
         );
         // Singles routing can be turned off entirely: singles/incomplete albums
         // stay as normal albums in their own folder.
@@ -1475,6 +1535,8 @@ mod tests {
             recording: Recording::Studio,
             release_type: String::new(),
             description: String::new(),
+            compilation: false,
+            release_type_from_tag: String::new(),
         };
         assert_eq!(
             target_album_dir(Bucket::Singles, &info, &c, "Crazy"),
