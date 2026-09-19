@@ -735,14 +735,11 @@ pub fn index_step(
         crate::wasm::enqueue_index_task(library_id)?;
         Ok((ScanOutcome::Paused, processed))
     } else {
-        // All files done — copy raw KV bytes from walk_files to indexed key.
-        // Avoids re-serializing 40K+ entries which would timeout the WASM budget.
+        // All files done — save full list to indexed key for group_step.
         let indexed_key = format!("scan.indexed.{library_id}");
-        if let Ok(Some(raw)) = crate::store::kv().get(&files_key) {
-            crate::store::kv()
-                .set(&indexed_key, raw)
-                .map_err(|e| e.to_string())?;
-        }
+        crate::store::kv()
+            .set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
         let _ = crate::store::kv().set(
             &pass_key,
             (pass_count + processed).to_string().into_bytes(),
