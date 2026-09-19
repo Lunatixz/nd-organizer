@@ -731,6 +731,10 @@ pub fn index_step(
             &pass_key,
             (pass_count + processed).to_string().into_bytes(),
         );
+        // Save incremental progress to indexed key so group_step can read it
+        // even if the final completion times out (40K serialization can exceed WASM budget).
+        let indexed_key = format!("scan.indexed.{library_id}");
+        let _ = crate::store::kv().set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default());
         post_scan_status(cfg, library_id, processed, &last_rel);
         crate::wasm::enqueue_index_task(library_id)?;
         Ok((ScanOutcome::Paused, processed))
@@ -2611,6 +2615,19 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
     let eff = crate::wasm::effective_config(cfg);
     let cfg = &eff;
     let root = lib_root(library_id)?;
+
+    // Skip if the organize pipeline is active (verify/group in progress).
+    // meta_refresh and organize share the same queue — running meta_refresh
+    // during verify blocks the verify polling loop and stalls the pipeline.
+    let has_unverified = crate::store::kv()
+        .get(&format!("scan.unverified.{library_id}"))
+        .ok().flatten().is_some();
+    let has_group_cursor = crate::store::kv()
+        .get(&format!("scan.group_cursor.{library_id}"))
+        .ok().flatten().is_some();
+    if has_unverified || has_group_cursor {
+        return Ok("meta_refresh: deferred — organize pipeline active".into());
+    }
 
     // Load indexed file list for this library.
     let indexed_key = format!("scan.indexed.{library_id}");

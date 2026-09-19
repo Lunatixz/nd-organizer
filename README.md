@@ -8,6 +8,8 @@
 [![Docker](https://img.shields.io/badge/Docker-Sidecars-blue.svg)](docker-compose.yml)
 [![GitHub release](https://img.shields.io/github/v/release/lunatixz/nd-organizer)](https://github.com/lunatixz/nd-organizer/releases)
 
+> **Note:** Code was developed with the help of an AI assistant under the supervision of a human developer.
+
 > **Optimized for [Navidrome](https://www.navidrome.org/) +
 > [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) +
 > [Symfonium](https://symfonium.app/).**
