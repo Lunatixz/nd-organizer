@@ -927,6 +927,10 @@ pub fn verify_step(
                 // Status check failed — job may have expired. Start fresh.
                 crate::wasm::log_warn("verify_step: job status check failed, starting new job");
                 let _ = crate::store::kv().delete(&job_id_key);
+                // Re-enqueue without loading the 40K unverified list.
+                // Next call will find no job and take the send-batches path.
+                crate::wasm::enqueue_verify_task(library_id)?;
+                return Ok((ScanOutcome::More, 0));
             }
         }
     }
