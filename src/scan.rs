@@ -736,20 +736,24 @@ pub fn index_step(
         Ok((ScanOutcome::Paused, processed))
     } else {
         // All files done — save full list to indexed key for group_step.
+        // Delete walk_files FIRST to free KV storage before writing indexed+unverified.
+        // This prevents temporarily doubling storage (which can hit the 100MB KV limit
+        // and cause WAL bloat that blocks plugin reload after crashes).
+        let _ = crate::store::kv().delete(&files_key);
+        let _ = crate::store::kv().delete(&cursor_key);
         let indexed_key = format!("scan.indexed.{library_id}");
+        let files_bytes = serde_json::to_vec(&files).unwrap_or_default();
         crate::store::kv()
-            .set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default())
+            .set(&indexed_key, files_bytes.clone())
             .map_err(|e| e.to_string())?;
         // Pre-cache the unverified list so verify_step doesn't need to
         // recompute from the 40K-entry indexed key (which times out WASM).
         let unverified_key = format!("scan.unverified.{library_id}");
-        let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&files).unwrap_or_default());
+        let _ = crate::store::kv().set(&unverified_key, files_bytes);
         let _ = crate::store::kv().set(
             &pass_key,
             (pass_count + processed).to_string().into_bytes(),
         );
-        let _ = crate::store::kv().delete(&files_key);
-        let _ = crate::store::kv().delete(&cursor_key);
         post_scan_status(cfg, library_id, processed, &format!(
             "indexing complete: {} files indexed, {} skipped (unchanged)",
             processed, skipped
@@ -792,19 +796,29 @@ pub fn verify_step(
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_else(|| {
             // Recompute: load full indexed list, batch-check which are unverified.
-            // Chunk the KV reads with a time budget to avoid WASM timeout.
+            // The entire recompute is budgeted to 20s to stay within the WASM 30s
+            // callback deadline (leaves 10s headroom for the rest of verify_step).
             crate::wasm::log_info("verify_step: recomputing unverified list from indexed key");
-            let file_list: Vec<(String, i64)> = crate::store::kv()
+            let recompute_start = std::time::Instant::now();
+            let recompute_budget = std::time::Duration::from_secs(20);
+
+            let file_list: Vec<(String, i64)> = match crate::store::kv()
                 .get(&indexed_key)
                 .ok()
                 .flatten()
                 .and_then(|v| serde_json::from_slice(&v).ok())
-                .unwrap_or_default();
+            {
+                Some(list) => list,
+                None => return vec![],
+            };
+
+            if recompute_start.elapsed() >= recompute_budget {
+                crate::wasm::log_warn("verify_step: recompute budget exceeded after loading indexed list");
+                return vec![];
+            }
 
             let file_keys: Vec<String> = file_list.iter().map(|(rel, _)| file_key(library_id, rel)).collect();
             let batch_size_kv = 500;
-            let recompute_start = std::time::Instant::now();
-            let recompute_budget = std::time::Duration::from_secs(3);
             let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
             for chunk in file_keys.chunks(batch_size_kv) {
                 if recompute_start.elapsed() >= recompute_budget {
@@ -836,6 +850,11 @@ pub fn verify_step(
             let list: Vec<(String, i64)> = file_list.iter().filter(|(rel, _)| {
                 !verified_set.contains(&file_key(library_id, rel))
             }).cloned().collect();
+            crate::wasm::log_info(&format!(
+                "verify_step: recompute done in {:?}, {} unverified of {} total (checked {}/{})",
+                recompute_start.elapsed(), list.len(), file_list.len(),
+                verified_set.len(), file_keys.len()
+            ));
             // Cache for next run.
             let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&list).unwrap_or_default());
             list
