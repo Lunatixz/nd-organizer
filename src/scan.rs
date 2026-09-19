@@ -767,43 +767,27 @@ pub fn index_step(
 /// Phase 3: Verify file identities via AcoustID sidecar batch processing.
 /// Loads unverified files, sends them to the acoustid sidecar in batches,
 /// saves verified results to KV, and enqueues group task when complete.
-pub fn verify_step(
+
+/// Load or recompute the unverified file list. Cached in KV after first compute.
+/// The entire recompute is budgeted to 20s to stay within the WASM 30s deadline.
+fn load_unverified(
     cfg: &Config,
     library_id: i32,
-) -> Result<(ScanOutcome, usize), String> {
-    let root = lib_root(library_id)?;
-    post_phase_status(cfg, library_id, "verify");
-
-    let indexed_key = format!("scan.indexed.{library_id}");
-    let unverified_key = format!("scan.unverified.{library_id}");
-    let job_id_key = format!("scan.verify_job.{library_id}");
-
-    // Load cached unverified list, or recompute from indexed key.
-    // Use cursor to avoid re-sending files already sent to the sidecar.
-    let verify_cursor_key = format!("verify_cursor.{library_id}");
-    let verify_cursor: usize = crate::store::kv()
-        .get(&verify_cursor_key)
-        .ok()
-        .flatten()
-        .and_then(|v| String::from_utf8(v).ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    let unverified: Vec<(String, i64)> = crate::store::kv()
-        .get(&unverified_key)
+    indexed_key: &str,
+    unverified_key: &str,
+) -> Vec<(String, i64)> {
+    crate::store::kv()
+        .get(unverified_key)
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_else(|| {
-            // Recompute: load full indexed list, batch-check which are unverified.
-            // The entire recompute is budgeted to 20s to stay within the WASM 30s
-            // callback deadline (leaves 10s headroom for the rest of verify_step).
             crate::wasm::log_info("verify_step: recomputing unverified list from indexed key");
             let recompute_start = std::time::Instant::now();
             let recompute_budget = std::time::Duration::from_secs(20);
 
             let file_list: Vec<(String, i64)> = match crate::store::kv()
-                .get(&indexed_key)
+                .get(indexed_key)
                 .ok()
                 .flatten()
                 .and_then(|v| serde_json::from_slice(&v).ok())
@@ -855,29 +839,28 @@ pub fn verify_step(
                 recompute_start.elapsed(), list.len(), file_list.len(),
                 verified_set.len(), file_keys.len()
             ));
-            // Cache for next run.
-            let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&list).unwrap_or_default());
+            let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&list).unwrap_or_default());
             list
-        });
+        })
+}
+pub fn verify_step(
+    cfg: &Config,
+    library_id: i32,
+) -> Result<(ScanOutcome, usize), String> {
+    let root = lib_root(library_id)?;
+    post_phase_status(cfg, library_id, "verify");
 
-    // Set total for ETA calculation.
-    let _ = crate::store::kv().set(&format!("scan.verify_total.{library_id}"), unverified.len().to_string().into_bytes());
-
-    if unverified.is_empty() {
-        crate::wasm::log_info("verify_step: all files verified, transitioning to group");
-        // Don't delete indexed_key — group_step needs it to load the file list.
-        let _ = crate::store::kv().delete(&unverified_key);
-        let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
-        crate::wasm::enqueue_group_task(library_id)?;
-        post_scan_status(cfg, library_id, 0, "verification complete");
-        return Ok((ScanOutcome::Done, 0));
-    }
+    let indexed_key = format!("scan.indexed.{library_id}");
+    let unverified_key = format!("scan.unverified.{library_id}");
+    let job_id_key = format!("scan.verify_job.{library_id}");
 
     // Async verify: send batches to AcoustID sidecar, poll for results.
     let acoustid_url = cfg.acoustid_url.trim().trim_end_matches('/');
     let job_id = format!("verify-{}-{}", library_id, crate::wasm::current_run_id(library_id).unwrap_or_default());
 
-    // Check if we have an active job
+    // Check for existing job FIRST — this is the fast path (most verify calls
+    // just poll). Loading the 40K-entry unverified list is deferred until we
+    // actually need to send batches or process completed results.
     let existing_job_id = crate::store::kv()
         .get(&job_id_key)
         .ok()
@@ -915,7 +898,8 @@ pub fn verify_step(
                     return Ok((ScanOutcome::More, done));
                 }
 
-                // Job completed — read results
+                // Job completed — load unverified list and process results
+                let unverified = load_unverified(cfg, library_id, &indexed_key, &unverified_key);
                 let results_url = format!("{}/job-results?job_id={}", acoustid_url, existing_id);
                 let req = host::http::HTTPRequest {
                     method: "GET".into(),
@@ -945,6 +929,21 @@ pub fn verify_step(
                 let _ = crate::store::kv().delete(&job_id_key);
             }
         }
+    }
+
+    // No active job — load unverified list and send batches.
+    let unverified = load_unverified(cfg, library_id, &indexed_key, &unverified_key);
+
+    // Set total for ETA calculation.
+    let _ = crate::store::kv().set(&format!("scan.verify_total.{library_id}"), unverified.len().to_string().into_bytes());
+
+    if unverified.is_empty() {
+        crate::wasm::log_info("verify_step: all files verified, transitioning to group");
+        let _ = crate::store::kv().delete(&unverified_key);
+        let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
+        crate::wasm::enqueue_group_task(library_id)?;
+        post_scan_status(cfg, library_id, 0, "verification complete");
+        return Ok((ScanOutcome::Done, 0));
     }
 
     // Send batches to sidecar. Cap at 500 files (5 batches of 100) per task
