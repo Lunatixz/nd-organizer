@@ -1213,6 +1213,16 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     // Post group phase so the dashboard shows "Grouping files..."
     post_phase_status(cfg, library_id, "group");
 
+    // Skip if verify is still active — the unverified list means verify hasn't
+    // finished. Stale group tasks from previous runs can block the queue otherwise.
+    let has_unverified = crate::store::kv()
+        .get(&format!("scan.unverified.{library_id}"))
+        .ok().flatten().is_some();
+    if has_unverified {
+        crate::wasm::log_info("group_step: deferred — verify still active");
+        return Ok((0, 0));
+    }
+
     // AcoustID verification is now handled by verify_step (sidecar batch).
     // The group_step just loads verified files from KV.
     // Uses a cursor to resume across multiple task invocations.
