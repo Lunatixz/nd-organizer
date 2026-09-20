@@ -2685,16 +2685,19 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
     let cfg = &eff;
     let root = lib_root(library_id)?;
 
-    // Skip if the organize pipeline is active (verify/group in progress).
+    // Skip if the organize pipeline is active (index/verify/group in progress).
     // meta_refresh and organize share the same queue — running meta_refresh
-    // during verify blocks the verify polling loop and stalls the pipeline.
+    // during index/verify blocks the pipeline and stalls the run.
+    let has_index_cursor = crate::store::kv()
+        .get(&format!("scan.index_cursor.{library_id}"))
+        .ok().flatten().is_some();
     let has_unverified = crate::store::kv()
         .get(&format!("scan.unverified.{library_id}"))
         .ok().flatten().is_some();
     let has_group_cursor = crate::store::kv()
         .get(&format!("scan.group_cursor.{library_id}"))
         .ok().flatten().is_some();
-    if has_unverified || has_group_cursor {
+    if has_index_cursor || has_unverified || has_group_cursor {
         return Ok("meta_refresh: deferred — organize pipeline active".into());
     }
 
