@@ -1116,11 +1116,70 @@ fn _complete_verify_job(
         post_scan_status(cfg, library_id, processed, "verification complete");
         Ok((ScanOutcome::Done, processed))
     } else {
-        crate::wasm::enqueue_verify_task(library_id)?;
-        post_scan_status(cfg, library_id, processed, &format!(
-            "verifying... {}/{} files verified", processed, unverified.len()
+        // Immediately send next batch from remaining list (already in memory).
+        // Avoids reloading the full unverified list from KV which times out WASM.
+        let batch_size = 100;
+        let max_per_task = 500;
+        let files_to_send: Vec<(String, i64)> = remaining.iter().take(max_per_task).cloned().collect();
+        let total_batches = (files_to_send.len() + batch_size - 1) / batch_size;
+        let acoustid_url = acoustid_url.trim().trim_end_matches('/');
+        let new_job_id = format!("verify-{}-{}", library_id, crate::wasm::current_run_id(library_id).unwrap_or_default());
+        crate::wasm::log_info(&format!(
+            "verify_step: sending {} files to acoustid sidecar ({} batches of {}, remaining={})",
+            files_to_send.len(), total_batches, batch_size, remaining.len()
         ));
-        Ok((ScanOutcome::More, processed))
+
+        let mut all_sent = true;
+        for (batch_idx, chunk) in files_to_send.chunks(batch_size).enumerate() {
+            let batch_files: Vec<serde_json::Value> = chunk.iter().map(|(rel, mtime)| {
+                let abs = root.join(rel);
+                serde_json::json!({"path": abs.to_string_lossy(), "mtime": mtime})
+            }).collect();
+
+            let body = serde_json::json!({
+                "job_id": &new_job_id,
+                "batch_index": batch_idx,
+                "batch_total": total_batches,
+                "files": batch_files,
+                "acoustidApiKey": &cfg.acoustid_api_key,
+            });
+
+            let req = host::http::HTTPRequest {
+                method: "POST".into(),
+                url: format!("{}/job", acoustid_url),
+                headers: std::collections::HashMap::new(),
+                no_follow_redirects: false,
+                body: body.to_string().into_bytes(),
+                timeout_ms: 10_000,
+            };
+
+            match host::http::send(req) {
+                Ok(Some(resp)) if resp.status_code == 200 => {
+                    crate::wasm::log_info(&format!(
+                        "verify_step: sent batch {}/{}", batch_idx + 1, total_batches
+                    ));
+                }
+                _ => {
+                    crate::wasm::log_warn(&format!(
+                        "verify_step: failed to send batch {}/{}", batch_idx + 1, total_batches
+                    ));
+                    all_sent = false;
+                    break;
+                }
+            }
+        }
+
+        if all_sent {
+            let _ = crate::store::kv().set(job_id_key, new_job_id.into_bytes());
+            crate::wasm::enqueue_verify_task(library_id)?;
+            post_scan_status(cfg, library_id, processed, &format!(
+                "verifying... {}/{} files verified", processed, unverified.len()
+            ));
+            Ok((ScanOutcome::More, processed))
+        } else {
+            crate::wasm::enqueue_verify_task(library_id)?;
+            Ok((ScanOutcome::More, processed))
+        }
     }
 }
 
