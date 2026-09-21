@@ -382,8 +382,18 @@ pub(crate) mod wasm {
             // Without this, the signal sits forever if no scheduleCron is configured.
             check_force_rescan(&cfg);
             if req.payload == "stats" && cfg.playback_stats_enabled {
-                if let Err(e) = enqueue("stats", 0, "", "") {
-                    log_warn(&format!("enqueue stats: {e}"));
+                // Dedup: skip if a stats task is already pending or running.
+                let has_stats = task_log().as_array()
+                    .map(|arr| arr.iter().any(|t|
+                        t.get("kind").and_then(|k| k.as_str()) == Some("stats")
+                            && t.get("state").and_then(|s| s.as_str()) != Some("done")
+                            && t.get("state").and_then(|s| s.as_str()) != Some("failed")
+                    ))
+                    .unwrap_or(false);
+                if !has_stats {
+                    if let Err(e) = enqueue("stats", 0, "", "") {
+                        log_warn(&format!("enqueue stats: {e}"));
+                    }
                 }
                 return Ok(());
             }

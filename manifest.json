@@ -230,7 +230,7 @@
           "type": "string",
           "title": "Filler keywords",
           "default": "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke",
-          "description": "Comma-separated keywords. A track whose title matches one (whole-word) is ignored from the queue: the proxy drops it from auto-play lists (random/search/playlist/genre/top/similar). Albums stay whole - it remains in its album, and files are never moved."
+          "description": "Comma-separated keywords. A track whose title matches one is dropped from auto-play lists (random/search/playlist/genre/top/similar). Use genre:prefix to match genre instead of title (e.g. 'genre:christmas,genre:holiday'). Albums stay whole - it remains in its album, and files are never moved."
         },
         "playbackStatsEnabled": {
           "type": "boolean",
@@ -995,6 +995,12 @@
           "default": false,
           "description": "Re-fingerprint ALL files via AcoustID even if they already have a MusicBrainz ID. Use this to refresh identity verification across the entire library. Requires verifyIdentity and acoustidUrl."
         },
+        "forceRefingerprintUnknownArtist": {
+          "type": "boolean",
+          "title": "Force re-fingerprint tracks with unknown artist",
+          "default": false,
+          "description": "Re-fingerprint tracks where both artist AND album_artist are unknown placeholders (e.g. 'Unknown Artist', 'Unknown', 'Various Artists', 'Various'). After AcoustID identifies the track, the artist is filled in and the file joins the normal organize pipeline. Requires verifyIdentity and acoustidUrl."
+        },
         "verifyInstrumental": {
           "type": "boolean",
           "title": "Verify instrumental tracks",
@@ -1462,6 +1468,10 @@
             {
               "type": "Control",
               "scope": "#/properties/forceFingerprint"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/forceRefingerprintUnknownArtist"
             },
             {
               "type": "Control",

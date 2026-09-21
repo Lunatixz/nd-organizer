@@ -103,14 +103,19 @@ SONIC_MATCH_KEYS = ("sonicMatch",)
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def is_filler_title(title):
+def is_filler(title, genre=""):
+    """Check if a track is filler by title substring or genre keyword.
+    Keywords starting with 'genre:' match against the genre field instead of title.
+    """
     t = (title or "").strip().lower()
-    if not t:
-        return False
+    g = (genre or "").strip().lower()
     for k in KEYWORDS:
         if not k:
             continue
-        if k in t:
+        if k.startswith("genre:"):
+            if g and k[6:] in g:
+                return True
+        elif t and k in t:
             return True
     return False
 
@@ -196,7 +201,7 @@ def filter_json(obj, own_key=None):
                     if reorder and SKIP_MODE == "exclude":
                         _record_drop(it, "excluded")
                         continue
-                elif drop_keyword and is_filler_title(it.get("title", "")):
+                elif drop_keyword and is_filler(it.get("title", ""), it.get("genre", "")):
                     _record_drop(it, "keyword")
                     continue
                 kept.append(it)
@@ -224,7 +229,7 @@ def filter_json(obj, own_key=None):
                 if is_skip_heavy(entry) and SKIP_MODE == "exclude":
                     _record_drop(entry, "excluded")
                     continue
-                if drop_keyword and is_filler_title(entry.get("title", "")):
+                if drop_keyword and is_filler(entry.get("title", ""), entry.get("genre", "")):
                     _record_drop(entry, "keyword")
                     continue
                 kept.append(item)

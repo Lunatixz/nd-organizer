@@ -817,7 +817,13 @@ fn load_unverified(
                         if let Ok(val) = serde_json::from_slice::<Value>(&v) {
                             if let Some(tags) = val.get("tags") {
                                 if !tags.is_null() {
-                                    if !cfg.force_fingerprint {
+                                    // Check if this file should be re-fingerprinted
+                                    // due to unknown artist (both artist and album_artist).
+                                    let force_unknown = cfg.force_refingerprint_unknown_artist
+                                        && tags.get("artist").and_then(|a| a.as_str()).map(crate::tags::is_unknown_artist).unwrap_or(true)
+                                        && tags.get("album_artist").and_then(|a| a.as_str()).map(crate::tags::is_unknown_artist).unwrap_or(true);
+
+                                    if !force_unknown && !cfg.force_fingerprint {
                                         if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
                                             if !t.mbid_album.is_empty() {
                                                 verified_set.insert(k);
@@ -825,7 +831,7 @@ fn load_unverified(
                                             }
                                         }
                                     }
-                                    if tags.get("_acoustid_checked").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                    if !force_unknown && tags.get("_acoustid_checked").and_then(|v| v.as_bool()).unwrap_or(false) {
                                         verified_set.insert(k);
                                     }
                                 }
@@ -958,7 +964,9 @@ pub fn verify_step(
     // Send batches to sidecar. Use cursor to send only the next batch (500 files)
     // instead of loading the full unverified list on every call.
     let batch_size = 100;
-    let max_per_task = 500;
+    // ponytail: 500 results → 1000 KV ops → WASM 30s deadline exceeded.
+    // 50 files × ~2 KV ops = 100 ops, completes in ~5s.
+    let max_per_task = 50;
     let verify_cursor_key = format!("verify_cursor.{library_id}");
     let cursor: usize = crate::store::kv()
         .get(&verify_cursor_key)
@@ -1311,7 +1319,8 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let scan_start = std::time::Instant::now();
     let time_budget = std::time::Duration::from_secs(15);
     let mut entries: Vec<(String, TrackTags)> = Vec::new();
-    let batch_size = 500;
+    // ponytail: 500 KV reads per chunk → slow in WASM. 50 keeps each chunk under 15s.
+    let batch_size = 50;
     let mut hit_budget = false;
 
     for chunk in file_list[cursor..].chunks(batch_size) {
@@ -1378,7 +1387,8 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let _ = crate::store::kv().delete(&entries_key);
     let _ = crate::store::kv().delete(&remaining_key);
     let _ = crate::store::kv().delete(&format!("scan.group_entries.{library_id}"));
-    let _ = crate::store::kv().delete(&indexed_key);
+    // Don't delete indexed_key yet — if WASM kills us during plan enqueue,
+    // group_step needs it to resume. Delete after plan tasks are enqueued.
 
     let total_files = all_entries.len();
     let verified: Vec<(String, TrackTags)> = all_entries;
@@ -1418,6 +1428,8 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         }
     }
     let enqueued = crate::wasm::enqueue_plan_tasks(cfg, library_id, groups)?;
+    // Safe to delete indexed_key now — plan tasks are enqueued and group won't need it again.
+    let _ = crate::store::kv().delete(&indexed_key);
     crate::wasm::log_info(&format!(
         "group_step: grouped {} files into {} plan tasks (enqueued)",
         total_files, enqueued
@@ -2351,30 +2363,39 @@ pub fn plan_enrich_step(
                     let lower_title = title.to_lowercase();
                     let has_instrumental_label = lower_title.contains("instrumental");
 
-                    if has_instrumental_label && !is_instrumental {
+                    // Re-read title from file tag to avoid stale KV cache
+                    // causing double-suffix on subsequent runs.
+                    let current_title = crate::tags::read_tags(&abs)
+                        .map(|t| t.title)
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| title.clone());
+                    let current_lower = current_title.to_lowercase();
+                    let current_has_label = current_lower.contains("instrumental");
+
+                    if current_has_label && !is_instrumental {
                         // Labeled instrumental but NOT actually instrumental — strip the label.
-                        let stripped = crate::tags::strip_instrumental(&title);
-                        if stripped != title {
+                        let stripped = crate::tags::strip_instrumental(&current_title);
+                        if stripped != current_title {
                             let _ = crate::tags::write_title(&abs, &stripped);
                             crate::wasm::log_info(&format!(
                                 "instrumental: stripped from '{}' -> '{}' (not truly instrumental)",
-                                title, stripped
+                                current_title, stripped
                             ));
                             actions.push(serde_json::json!({
                                 "ts": crate::state::now_ts(),
-                                "text": format!("instrumental: stripped from '{}' (not truly instrumental)", title),
+                                "text": format!("instrumental: stripped from '{}' (not truly instrumental)", current_title),
                             }));
                             if cfg.scan_after_tag_write {
                                 let _ = crate::wasm::trigger_navidrome_scan(cfg);
                             }
                         }
-                    } else if is_instrumental && !has_instrumental_label {
+                    } else if is_instrumental && !current_has_label {
                         // Instrumental but not labeled — append "(Instrumental)".
-                        let new_title = format!("{} (Instrumental)", title);
+                        let new_title = format!("{} (Instrumental)", current_title);
                         let _ = crate::tags::write_title(&abs, &new_title);
                         crate::wasm::log_info(&format!(
                             "instrumental: appended to '{}' -> '{}'",
-                            title, new_title
+                            current_title, new_title
                         ));
                         actions.push(serde_json::json!({
                             "ts": crate::state::now_ts(),
@@ -2441,33 +2462,39 @@ pub fn plan_enrich_step(
                         }
                     };
 
-                    let lower_title = title.to_lowercase();
-                    let has_acoustic_label = lower_title.contains("acoustic");
+                    // Re-read title from file tag to avoid stale KV cache
+                    // causing double-suffix on subsequent runs.
+                    let current_title = crate::tags::read_tags(&abs)
+                        .map(|t| t.title)
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| title.clone());
+                    let current_lower = current_title.to_lowercase();
+                    let current_has_label = current_lower.contains("acoustic");
 
-                    if has_acoustic_label && !is_acoustic {
+                    if current_has_label && !is_acoustic {
                         // Labeled acoustic but NOT actually acoustic — strip the label.
-                        let stripped = crate::tags::strip_acoustic(&title);
-                        if stripped != title {
+                        let stripped = crate::tags::strip_acoustic(&current_title);
+                        if stripped != current_title {
                             let _ = crate::tags::write_title(&abs, &stripped);
                             crate::wasm::log_info(&format!(
                                 "acoustic: stripped from '{}' -> '{}' (not truly acoustic)",
-                                title, stripped
+                                current_title, stripped
                             ));
                             actions.push(serde_json::json!({
                                 "ts": crate::state::now_ts(),
-                                "text": format!("acoustic: stripped from '{}' (not truly acoustic)", title),
+                                "text": format!("acoustic: stripped from '{}' (not truly acoustic)", current_title),
                             }));
                             if cfg.scan_after_tag_write {
                                 let _ = crate::wasm::trigger_navidrome_scan(cfg);
                             }
                         }
-                    } else if is_acoustic && !has_acoustic_label {
+                    } else if is_acoustic && !current_has_label {
                         // Acoustic but not labeled — append "(Acoustic)".
-                        let new_title = format!("{} (Acoustic)", title);
+                        let new_title = format!("{} (Acoustic)", current_title);
                         let _ = crate::tags::write_title(&abs, &new_title);
                         crate::wasm::log_info(&format!(
                             "acoustic: appended to '{}' -> '{}'",
-                            title, new_title
+                            current_title, new_title
                         ));
                         actions.push(serde_json::json!({
                             "ts": crate::state::now_ts(),
@@ -2642,10 +2669,10 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
     // meta_refresh and organize share the same queue — running meta_refresh
     // during any organize phase blocks the pipeline and stalls the run.
     let has_walk_files = crate::store::kv()
-        .get(&format!("scan.walk_files.{library_id}"))
+        .get(&format!("scan.walkfiles.{library_id}"))
         .ok().flatten().is_some();
     let has_walk_stack = crate::store::kv()
-        .get(&format!("scan.walkstack.{library_id}"))
+        .get(&format!("scan.walkv2.{library_id}"))
         .ok().flatten().is_some();
     let has_index_cursor = crate::store::kv()
         .get(&format!("scan.index_cursor.{library_id}"))
@@ -2796,16 +2823,22 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         false
                     }
                 };
-                let lower_title = title.to_lowercase();
+                // Re-read title from file tag to avoid stale KV cache causing
+                // double-suffix (e.g. "Title (Instrumental) (Instrumental)").
+                let current_title = crate::tags::read_tags(&abs)
+                    .map(|t| t.title)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| title.clone());
+                let lower_title = current_title.to_lowercase();
                 let has_instrumental_label = lower_title.contains("instrumental");
                 if has_instrumental_label && !is_instrumental {
-                    let stripped = crate::tags::strip_instrumental(&title);
-                    if stripped != title {
+                    let stripped = crate::tags::strip_instrumental(&current_title);
+                    if stripped != current_title {
                         let _ = crate::tags::write_title(&abs, &stripped);
                         changed = true;
                     }
                 } else if is_instrumental && !has_instrumental_label {
-                    let new_title = format!("{} (Instrumental)", title);
+                    let new_title = format!("{} (Instrumental)", current_title);
                     let _ = crate::tags::write_title(&abs, &new_title);
                     changed = true;
                 }
@@ -2852,16 +2885,22 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         false
                     }
                 };
-                let lower_title = title.to_lowercase();
+                // Re-read title from file tag to avoid stale KV cache causing
+                // double-suffix (e.g. "Title (Acoustic) (Acoustic)").
+                let current_title = crate::tags::read_tags(&abs)
+                    .map(|t| t.title)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| title.clone());
+                let lower_title = current_title.to_lowercase();
                 let has_acoustic_label = lower_title.contains("acoustic");
                 if has_acoustic_label && !is_acoustic {
-                    let stripped = crate::tags::strip_acoustic(&title);
-                    if stripped != title {
+                    let stripped = crate::tags::strip_acoustic(&current_title);
+                    if stripped != current_title {
                         let _ = crate::tags::write_title(&abs, &stripped);
                         changed = true;
                     }
                 } else if is_acoustic && !has_acoustic_label {
-                    let new_title = format!("{} (Acoustic)", title);
+                    let new_title = format!("{} (Acoustic)", current_title);
                     let _ = crate::tags::write_title(&abs, &new_title);
                     changed = true;
                 }
