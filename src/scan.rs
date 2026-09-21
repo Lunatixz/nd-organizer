@@ -2638,9 +2638,15 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
     let cfg = &eff;
     let root = lib_root(library_id)?;
 
-    // Skip if the organize pipeline is active (index/verify/group in progress).
+    // Skip if the organize pipeline is active (walk/index/verify/group in progress).
     // meta_refresh and organize share the same queue — running meta_refresh
-    // during index/verify blocks the pipeline and stalls the run.
+    // during any organize phase blocks the pipeline and stalls the run.
+    let has_walk_files = crate::store::kv()
+        .get(&format!("scan.walk_files.{library_id}"))
+        .ok().flatten().is_some();
+    let has_walk_stack = crate::store::kv()
+        .get(&format!("scan.walkstack.{library_id}"))
+        .ok().flatten().is_some();
     let has_index_cursor = crate::store::kv()
         .get(&format!("scan.index_cursor.{library_id}"))
         .ok().flatten().is_some();
@@ -2650,7 +2656,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
     let has_group_cursor = crate::store::kv()
         .get(&format!("scan.group_cursor.{library_id}"))
         .ok().flatten().is_some();
-    if has_index_cursor || has_unverified || has_group_cursor {
+    if has_walk_files || has_walk_stack || has_index_cursor || has_unverified || has_group_cursor {
         return Ok("meta_refresh: deferred — organize pipeline active".into());
     }
 
