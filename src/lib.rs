@@ -659,16 +659,7 @@ pub(crate) mod wasm {
                 other => Err(format!("unknown task kind {other}")),
             };
             match &r {
-                Ok(msg) => {
-                    record_task(kind, payload.library_id, "done", msg);
-                    // Clear pending flag for dedup.
-                    match kind {
-                        "stats" => { let _ = crate::store::kv().delete("task.pending.stats"); }
-                        "meta_refresh" => { let _ = crate::store::kv().delete("task.pending.meta_refresh"); }
-                        "favsync" => { let _ = crate::store::kv().delete("task.pending.favsync"); }
-                        _ => {}
-                    }
-                }
+                Ok(msg) => record_task(kind, payload.library_id, "done", msg),
                 Err(e) => record_task(kind, payload.library_id, "failed", e),
             }
             r.map_err(|e| nd_pdk::taskworker::Error::new(e))
