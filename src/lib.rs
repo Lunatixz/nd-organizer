@@ -305,6 +305,10 @@ pub(crate) mod wasm {
                     ] {
                         let _ = crate::store::kv().delete(&format!("{}{}", prefix, library_id));
                     }
+                    // Clear task dedup flags.
+                    let _ = crate::store::kv().delete("task.pending.stats");
+                    let _ = crate::store::kv().delete("task.pending.meta_refresh");
+                    let _ = crate::store::kv().delete("task.pending.favsync");
                     // Only clear donev2 if pipeline hasn't completed
                     if !already_done {
                         let _ = crate::store::kv().delete(&format!("scan.donev2.{library_id}"));
@@ -382,18 +386,20 @@ pub(crate) mod wasm {
             // Without this, the signal sits forever if no scheduleCron is configured.
             check_force_rescan(&cfg);
             if req.payload == "stats" && cfg.playback_stats_enabled {
-                // Dedup: skip if a stats task is already pending or running.
-                let has_stats = task_log().as_array()
-                    .map(|arr| arr.iter().any(|t|
-                        t.get("kind").and_then(|k| k.as_str()) == Some("stats")
-                            && t.get("state").and_then(|s| s.as_str()) != Some("done")
-                            && t.get("state").and_then(|s| s.as_str()) != Some("failed")
-                    ))
-                    .unwrap_or(false);
-                if !has_stats {
-                    if let Err(e) = enqueue("stats", 0, "", "") {
-                        log_warn(&format!("enqueue stats: {e}"));
-                    }
+                // Dedup: skip if a stats task is already pending (KV flag).
+                let pending = crate::store::kv()
+                    .get("task.pending.stats")
+                    .ok().flatten()
+                    .and_then(|v| String::from_utf8(v).ok())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let now = crate::state::now_ts();
+                if now - pending < 120 {
+                    return Ok(());
+                }
+                let _ = crate::store::kv().set("task.pending.stats", now.to_string().into_bytes());
+                if let Err(e) = enqueue("stats", 0, "", "") {
+                    log_warn(&format!("enqueue stats: {e}"));
                 }
                 return Ok(());
             }
@@ -410,12 +416,34 @@ pub(crate) mod wasm {
             // Lightweight callbacks — enqueue task and return immediately.
             // Avoids the30s scheduler deadline that run_pass() can blow.
             if req.payload == "favsync" {
+                let pending = crate::store::kv()
+                    .get("task.pending.favsync")
+                    .ok().flatten()
+                    .and_then(|v| String::from_utf8(v).ok())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let now = crate::state::now_ts();
+                if now - pending < 120 {
+                    return Ok(());
+                }
+                let _ = crate::store::kv().set("task.pending.favsync", now.to_string().into_bytes());
                 if let Err(e) = enqueue("favsync", 0, "", "") {
                     log_warn(&format!("enqueue favsync: {e}"));
                 }
                 return Ok(());
             }
             if req.payload == "meta_refresh" {
+                let pending = crate::store::kv()
+                    .get("task.pending.meta_refresh")
+                    .ok().flatten()
+                    .and_then(|v| String::from_utf8(v).ok())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let now = crate::state::now_ts();
+                if now - pending < 120 {
+                    return Ok(());
+                }
+                let _ = crate::store::kv().set("task.pending.meta_refresh", now.to_string().into_bytes());
                 for &library_id in &target_libraries(&cfg) {
                     if let Err(e) = enqueue("meta_refresh", library_id, "", "") {
                         log_warn(&format!("enqueue meta_refresh for library {library_id}: {e}"));
@@ -623,7 +651,16 @@ pub(crate) mod wasm {
                 other => Err(format!("unknown task kind {other}")),
             };
             match &r {
-                Ok(msg) => record_task(kind, payload.library_id, "done", msg),
+                Ok(msg) => {
+                    record_task(kind, payload.library_id, "done", msg);
+                    // Clear pending flag for dedup.
+                    match kind {
+                        "stats" => { let _ = crate::store::kv().delete("task.pending.stats"); }
+                        "meta_refresh" => { let _ = crate::store::kv().delete("task.pending.meta_refresh"); }
+                        "favsync" => { let _ = crate::store::kv().delete("task.pending.favsync"); }
+                        _ => {}
+                    }
+                }
                 Err(e) => record_task(kind, payload.library_id, "failed", e),
             }
             r.map_err(|e| nd_pdk::taskworker::Error::new(e))
