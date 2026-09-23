@@ -738,7 +738,9 @@ pub fn index_step(
         // Also save paths-only for group_step.
         let paths_key = format!("scan.group_paths.{library_id}");
         let paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
-        let _ = crate::store::kv().set(&paths_key, serde_json::to_vec(&paths).unwrap_or_default());
+        if let Err(e) = crate::store::kv().set(&paths_key, serde_json::to_vec(&paths).unwrap_or_default()) {
+            crate::wasm::log_warn(&format!("index_step: failed to write paths_key (incremental): {e}"));
+        }
         post_scan_status(cfg, library_id, processed, &last_rel);
         crate::wasm::enqueue_index_task(library_id)?;
         Ok((ScanOutcome::Paused, processed))
@@ -758,7 +760,14 @@ pub fn index_step(
         // The full indexed_key (with mtimes) is too slow to deserialize in WASM.
         let paths_key = format!("scan.group_paths.{library_id}");
         let paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
-        let _ = crate::store::kv().set(&paths_key, serde_json::to_vec(&paths).unwrap_or_default());
+        let paths_bytes = serde_json::to_vec(&paths).unwrap_or_default();
+        crate::wasm::log_info(&format!(
+            "index_step: writing paths_key={}, size={} bytes",
+            paths_key, paths_bytes.len()
+        ));
+        if let Err(e) = crate::store::kv().set(&paths_key, paths_bytes) {
+            crate::wasm::log_warn(&format!("index_step: failed to write paths_key: {e}"));
+        }
         // Pre-cache the unverified list as paths only (no mtimes) so verify_step
         // doesn't need to recompute from the full indexed key (which times out WASM).
         let unverified_key = format!("scan.unverified.{library_id}");
