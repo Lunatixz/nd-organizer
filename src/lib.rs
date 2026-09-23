@@ -416,6 +416,10 @@ pub(crate) mod wasm {
             // Lightweight callbacks — enqueue task and return immediately.
             // Avoids the30s scheduler deadline that run_pass() can blow.
             if req.payload == "favsync" {
+                // Skip if pipeline is active — don't block verify.
+                if is_pipeline_active(&cfg) {
+                    return Ok(());
+                }
                 let pending = crate::store::kv()
                     .get("task.pending.favsync")
                     .ok().flatten()
@@ -433,6 +437,10 @@ pub(crate) mod wasm {
                 return Ok(());
             }
             if req.payload == "meta_refresh" {
+                // Skip if pipeline is active — don't block verify.
+                if is_pipeline_active(&cfg) {
+                    return Ok(());
+                }
                 let pending = crate::store::kv()
                     .get("task.pending.meta_refresh")
                     .ok().flatten()
@@ -781,6 +789,21 @@ pub(crate) mod wasm {
             }
             _ => configured.to_string(),
         }
+    }
+
+    /// Check if the organize pipeline is active (walk/index/verify/group).
+    /// Used by scheduler callbacks to avoid blocking the queue.
+    fn is_pipeline_active(cfg: &Config) -> bool {
+        for &library_id in &target_libraries(cfg) {
+            if crate::store::kv().get(&format!("scan.walkv2.{library_id}")).ok().flatten().is_some()
+                || crate::store::kv().get(&format!("scan.index_cursor.{library_id}")).ok().flatten().is_some()
+                || crate::store::kv().get(&format!("scan.unverified.{library_id}")).ok().flatten().is_some()
+                || crate::store::kv().get(&format!("scan.group_cursor.{library_id}")).ok().flatten().is_some()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// the Subsonic getNowPlaying API. Paused/stopped players count as idle -
