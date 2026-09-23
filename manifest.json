@@ -229,7 +229,7 @@
         "fillerKeywords": {
           "type": "string",
           "title": "Filler keywords",
-          "default": "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke",
+          "default": "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke,comedy",
           "description": "Comma-separated keywords. A track whose title matches one is dropped from auto-play lists (random/search/playlist/genre/top/similar). Use genre:prefix to match genre instead of title (e.g. 'genre:christmas,genre:holiday'). Albums stay whole - it remains in its album, and files are never moved."
         },
         "playbackStatsEnabled": {

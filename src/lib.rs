@@ -301,7 +301,7 @@ pub(crate) mod wasm {
                         "scan.walkdirs.", "scan.walkcount.", "scan.indexed.",
                         "scan.index_cursor.", "scan.unverified.", "scan.group_cursor.",
                         "scan.group_entries.", "scan.group_remaining.",
-                        "scan.pass.", "scan.count.",
+                        "scan.group_paths.", "scan.verify_job.", "scan.pass.", "scan.count.",
                     ] {
                         let _ = crate::store::kv().delete(&format!("{}{}", prefix, library_id));
                     }

@@ -735,6 +735,10 @@ pub fn index_step(
         // even if the final completion times out (40K serialization can exceed WASM budget).
         let indexed_key = format!("scan.indexed.{library_id}");
         let _ = crate::store::kv().set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default());
+        // Also save paths-only for group_step.
+        let paths_key = format!("scan.group_paths.{library_id}");
+        let paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
+        let _ = crate::store::kv().set(&paths_key, serde_json::to_vec(&paths).unwrap_or_default());
         post_scan_status(cfg, library_id, processed, &last_rel);
         crate::wasm::enqueue_index_task(library_id)?;
         Ok((ScanOutcome::Paused, processed))
@@ -750,10 +754,16 @@ pub fn index_step(
         crate::store::kv()
             .set(&indexed_key, files_bytes.clone())
             .map_err(|e| e.to_string())?;
-        // Pre-cache the unverified list so verify_step doesn't need to
-        // recompute from the 40K-entry indexed key (which times out WASM).
+        // Store file paths only (no mtimes) for group_step to read quickly.
+        // The full indexed_key (with mtimes) is too slow to deserialize in WASM.
+        let paths_key = format!("scan.group_paths.{library_id}");
+        let paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
+        let _ = crate::store::kv().set(&paths_key, serde_json::to_vec(&paths).unwrap_or_default());
+        // Pre-cache the unverified list as paths only (no mtimes) so verify_step
+        // doesn't need to recompute from the full indexed key (which times out WASM).
         let unverified_key = format!("scan.unverified.{library_id}");
-        let _ = crate::store::kv().set(&unverified_key, files_bytes);
+        let unverified_paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
+        let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&unverified_paths).unwrap_or_default());
         let _ = crate::store::kv().set(
             &pass_key,
             (pass_count + processed).to_string().into_bytes(),
@@ -780,11 +790,21 @@ fn load_unverified(
     indexed_key: &str,
     unverified_key: &str,
 ) -> Vec<(String, i64)> {
+    // Try to load from unverified key. Handle both formats:
+    // - New: Vec<String> (paths only, written by index)
+    // - Old: Vec<(String, i64)> (paths + mtimes, from previous runs)
     crate::store::kv()
         .get(unverified_key)
         .ok()
         .flatten()
-        .and_then(|v| serde_json::from_slice(&v).ok())
+        .and_then(|v| {
+            // Try new paths-only format first.
+            if let Ok(paths) = serde_json::from_slice::<Vec<String>>(&v) {
+                return Some(paths.into_iter().map(|p| (p, 0i64)).collect());
+            }
+            // Fall back to old format.
+            serde_json::from_slice(&v).ok()
+        })
         .unwrap_or_else(|| {
             crate::wasm::log_info("verify_step: recomputing unverified list from indexed key");
             let recompute_start = std::time::Instant::now();
@@ -1118,7 +1138,9 @@ fn _complete_verify_job(
     if remaining.is_empty() {
         let _ = crate::store::kv().delete(unverified_key);
     } else {
-        let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&remaining).unwrap_or_default());
+        // Save as paths only to keep KV value small.
+        let remaining_paths: Vec<String> = remaining.iter().map(|(r, _)| r.clone()).collect();
+        let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&remaining_paths).unwrap_or_default());
         // Reset cursor since the list was truncated — next send starts from the beginning.
         let _ = crate::store::kv().delete(&format!("verify_cursor.{}", library_id));
         // If sidecar returned 0 results but files remain, log it.
@@ -1243,6 +1265,18 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         return Ok((0, 0));
     }
 
+    // Skip if walk or index is still running — paths_key won't exist yet.
+    let has_walk = crate::store::kv()
+        .get(&format!("scan.walkv2.{library_id}"))
+        .ok().flatten().is_some();
+    let has_index_cursor = crate::store::kv()
+        .get(&format!("scan.index_cursor.{library_id}"))
+        .ok().flatten().is_some();
+    if has_walk || has_index_cursor {
+        crate::wasm::log_info("group_step: deferred — walk/index still active");
+        return Ok((0, 0));
+    }
+
     // AcoustID verification is now handled by verify_step (sidecar batch).
     // The group_step just loads verified files from KV.
     // Uses a cursor to resume across multiple task invocations.
@@ -1279,23 +1313,36 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         ));
         remaining
     } else {
-        // First chunk — load from indexed_key.
-        let list: Vec<(String, i64)> = crate::store::kv()
-            .get(&indexed_key)
+        // First chunk — load from paths_key (file paths only, fast deserialization).
+        let paths_key = format!("scan.group_paths.{library_id}");
+        let paths: Vec<String> = crate::store::kv()
+            .get(&paths_key)
             .ok()
             .flatten()
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
-        if list.is_empty() {
+        if paths.is_empty() {
             crate::wasm::log_info("group_step: indexed key empty, skipping (walk not complete yet)");
             return Ok((0, 0));
         }
-        let _ = crate::store::kv().set(&entries_key, list.len().to_string().into_bytes());
+        let _ = crate::store::kv().set(&entries_key, paths.len().to_string().into_bytes());
         crate::wasm::log_info(&format!(
-            "group_step: loaded {} files from indexed key, processing...",
-            list.len()
+            "group_step: loaded {} files from paths key, processing...",
+            paths.len()
         ));
-        list
+        // Convert paths to (path, mtime=0) tuples for compatibility with existing code.
+        let list: Vec<(String, i64)> = paths.into_iter().map(|p| (p, 0i64)).collect();
+        // For large lists, save the remainder immediately so subsequent calls
+        // load from remaining_key instead of re-loading the full list.
+        let chunk_size = 500;
+        if list.len() > chunk_size {
+            let remaining: Vec<(String, i64)> = list[chunk_size..].to_vec();
+            let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&remaining).unwrap_or_default());
+            let _ = crate::store::kv().set(&cursor_key, chunk_size.to_string().into_bytes());
+            list[..chunk_size].to_vec()
+        } else {
+            list
+        }
     };
 
     if file_list.is_empty() {
@@ -1332,20 +1379,33 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             .iter()
             .map(|(rel, _)| file_key(library_id, rel))
             .collect();
-        if let Ok(values) = crate::store::kv().get_many(keys) {
-            for (rel, _mtime) in chunk {
-                let key = file_key(library_id, rel);
-                if let Some(v) = values.get(&key) {
-                    if let Ok(val) = serde_json::from_slice::<Value>(v) {
-                        if let Some(tags) = val.get("tags") {
-                            if !tags.is_null() {
-                                if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-                                    entries.push((rel.clone(), t));
+        if cursor == 0 && entries.is_empty() {
+            crate::wasm::log_info(&format!(
+                "group_step: get_many debug: {} keys, first_key={}, first_rel={}",
+                keys.len(),
+                keys.first().unwrap_or(&String::new()),
+                chunk.first().map(|(r, _)| r.as_str()).unwrap_or("")
+            ));
+        }
+        match crate::store::kv().get_many(keys) {
+            Ok(values) => {
+                for (rel, _mtime) in chunk {
+                    let key = file_key(library_id, rel);
+                    if let Some(v) = values.get(&key) {
+                        if let Ok(val) = serde_json::from_slice::<Value>(v) {
+                            if let Some(tags) = val.get("tags") {
+                                if !tags.is_null() {
+                                    if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
+                                        entries.push((rel.clone(), t));
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            }
+            Err(e) => {
+                crate::wasm::log_warn(&format!("group_step: get_many failed: {e}"));
             }
         }
         cursor += chunk.len();
