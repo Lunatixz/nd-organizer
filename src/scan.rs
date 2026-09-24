@@ -750,7 +750,6 @@ pub fn index_step(
         // This prevents temporarily doubling storage (which can hit the 100MB KV limit
         // and cause WAL bloat that blocks plugin reload after crashes).
         let _ = crate::store::kv().delete(&files_key);
-        let _ = crate::store::kv().delete(&cursor_key);
         let indexed_key = format!("scan.indexed.{library_id}");
         let files_bytes = serde_json::to_vec(&files).unwrap_or_default();
         crate::store::kv()
@@ -768,6 +767,8 @@ pub fn index_step(
         if let Err(e) = crate::store::kv().set(&paths_key, paths_bytes) {
             crate::wasm::log_warn(&format!("index_step: failed to write paths_key: {e}"));
         }
+        // Delete cursor AFTER paths_key is written — group checks cursor to defer.
+        let _ = crate::store::kv().delete(&cursor_key);
         // Pre-cache the unverified list as paths only (no mtimes) so verify_step
         // doesn't need to recompute from the full indexed key (which times out WASM).
         let unverified_key = format!("scan.unverified.{library_id}");
