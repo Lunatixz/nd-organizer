@@ -284,6 +284,13 @@ pub(crate) mod wasm {
                     retention_ms: 3_600_000,
                 },
             );
+            // Clear stale queued tasks from previous runs — old stats/meta_refresh
+            // tasks would otherwise starve verify/group after every restart.
+            match host::task::clear_queue(QUEUE) {
+                Ok(n) if n > 0 => log_info(&format!("init: cleared {n} stale queued task(s)")),
+                Ok(_) => {}
+                Err(e) => log_warn(&format!("init: clear_queue failed: {e}")),
+            }
             if cfg.run_on_startup {
                 // Clear stale scan state so old tasks from previous runs
                 // find no data and exit immediately instead of timing out.
