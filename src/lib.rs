@@ -395,8 +395,16 @@ pub(crate) mod wasm {
                     .unwrap_or(0);
                 let now = crate::state::now_ts();
                 if now - pending < 120 {
+                    crate::wasm::log_info(&format!(
+                        "stats dedup: skipping (pending={}, now={}, diff={})",
+                        pending, now, now - pending
+                    ));
                     return Ok(());
                 }
+                crate::wasm::log_info(&format!(
+                    "stats dedup: enqueuing (pending={}, now={}, diff={})",
+                    pending, now, now - pending
+                ));
                 let _ = crate::store::kv().set("task.pending.stats", now.to_string().into_bytes());
                 if let Err(e) = enqueue("stats", 0, "", "") {
                     log_warn(&format!("enqueue stats: {e}"));
