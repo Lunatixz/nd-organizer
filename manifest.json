@@ -230,7 +230,7 @@
           "type": "string",
           "title": "Filler keywords",
           "default": "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke,comedy",
-          "description": "Comma-separated keywords. A track whose title matches one is dropped from auto-play lists (random/search/playlist/genre/top/similar). Use genre:prefix to match genre instead of title (e.g. 'genre:christmas,genre:holiday'). Albums stay whole - it remains in its album, and files are never moved."
+          "description": "Comma-separated keywords. A track whose title matches one is dropped from the lists enabled below (suggested/shuffled, playlists, now playing; albums and searches are kept whole unless you turn those on). Use genre:prefix to match genre instead of title (e.g. 'genre:christmas,genre:holiday'). Files are never moved."
         },
         "playbackStatsEnabled": {
           "type": "boolean",
@@ -263,9 +263,39 @@
         },
         "keywordFilterEnabled": {
           "type": "boolean",
-          "title": "Keyword filter (drop filler tracks from auto-queues)",
+          "title": "Keyword filter (drop filler tracks)",
           "default": true,
-          "description": "Drop filler-keyword tracks (see fillerKeywords) from auto-queues (random/playlist/similar/genre/top/starred) via the proxy. Explicit user searches still return them. No files are moved."
+          "description": "Master switch for dropping filler-keyword tracks (see fillerKeywords) via the proxy. The checkboxes below choose which lists it applies to. No files are moved."
+        },
+        "filterSuggested": {
+          "type": "boolean",
+          "title": "Suggested & shuffled lists",
+          "default": true,
+          "description": "Drop filler-keyword tracks from lists the app picks for you: shuffle/random, radio mixes, similar songs, genre mixes, top charts."
+        },
+        "filterPlaylists": {
+          "type": "boolean",
+          "title": "Playlists & favorites",
+          "default": true,
+          "description": "Drop filler-keyword tracks when you open a playlist or your starred/favorites lists."
+        },
+        "filterLive": {
+          "type": "boolean",
+          "title": "Now playing & queue",
+          "default": true,
+          "description": "Drop filler-keyword tracks from the now-playing view and the active play queue."
+        },
+        "filterAlbums": {
+          "type": "boolean",
+          "title": "Albums & folders you open",
+          "default": false,
+          "description": "Off by default: albums and folders you open always show every track, even ones matching filler keywords - you chose to play them."
+        },
+        "filterSearch": {
+          "type": "boolean",
+          "title": "Search results",
+          "default": false,
+          "description": "Off by default: searches always return everything you searched for, including filler-keyword tracks."
         },
         "skipContentMode": {
           "type": "string",
@@ -1801,7 +1831,7 @@
           "elements": [
             {
               "type": "Label",
-              "text": "Playback filtering without touching files. The KEYWORD filter drops filler-keyword tracks from auto-queues (explicit searches still return them). The SKIP-CONTENT limiter controls how many skip-heavy (low-star) tracks may appear in queued lists: exclude entirely, a third, less than half, or half - or leave them alone (none). Deploy proxy/docker-compose.yml and set its URL below; settings are pushed to the proxy on every stats pass."
+              "text": "Playback filtering without touching files. The KEYWORD filter drops filler-keyword tracks from the lists you tick below (suggested/shuffled, playlists and now-playing are on by default; albums and searches stay whole unless you turn them on). The SKIP-CONTENT limiter controls how many skip-heavy (low-star) tracks may appear in queued lists: exclude entirely, a third, less than half, or half - or leave them alone (none). Deploy proxy/docker-compose.yml and set its URL below; settings are pushed to the proxy on every stats pass."
             },
             {
               "type": "Control",
@@ -1814,6 +1844,71 @@
             {
               "type": "Control",
               "scope": "#/properties/fillerKeywords",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/keywordFilterEnabled",
+                  "schema": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/filterSuggested",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/keywordFilterEnabled",
+                  "schema": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/filterPlaylists",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/keywordFilterEnabled",
+                  "schema": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/filterLive",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/keywordFilterEnabled",
+                  "schema": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/filterAlbums",
+              "rule": {
+                "effect": "SHOW",
+                "condition": {
+                  "scope": "#/properties/keywordFilterEnabled",
+                  "schema": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/filterSearch",
               "rule": {
                 "effect": "SHOW",
                 "condition": {

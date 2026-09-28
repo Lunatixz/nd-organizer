@@ -135,9 +135,18 @@ pub struct Config {
     pub top_picks_count: usize,
     /// Skip percentage threshold for skip-heavy detection.
     pub skip_threshold_percent: i32,
-    /// Drop filler-keyword tracks (fillerKeywords) from auto-queues via the
-    /// Subsonic proxy. Explicit user searches still return them.
+    /// Drop filler-keyword tracks (fillerKeywords) from the request groups the
+    /// user ticked in the coverage checkboxes below (master switch).
     pub keyword_filter_enabled: bool,
+    /// Coverage checkboxes for the keyword filter: which request groups the
+    /// proxy drops filler-keyword tracks from. Defaults match the manifest:
+    /// suggested/playlists/live on, albums/search off (opening an album or
+    /// searching is a deliberate choice and keeps every track).
+    pub filter_suggested: bool,
+    pub filter_playlists: bool,
+    pub filter_live: bool,
+    pub filter_albums: bool,
+    pub filter_search: bool,
     /// How much skip-heavy (low-star) content may appear in queued lists:
     /// none / exclude / third / lessThanHalf / half. The proxy enforces it.
     pub skip_content_mode: SkipContentMode,
@@ -416,6 +425,11 @@ impl Default for Config {
             top_picks_count: 50,
             skip_threshold_percent: 30,
             keyword_filter_enabled: true,
+            filter_suggested: true,
+            filter_playlists: true,
+            filter_live: true,
+            filter_albums: false,
+            filter_search: false,
             skip_content_mode: SkipContentMode::LessThanHalf,
             skip_heavy_ratio: 0.6,
             filter_url: "http://nd-organizer-proxy:4534".into(),
@@ -706,6 +720,11 @@ impl Config {
             c.skip_threshold_percent = v.trim().parse().unwrap_or(c.skip_threshold_percent);
         }
         c.keyword_filter_enabled = bool(map, "keywordFilterEnabled", c.keyword_filter_enabled);
+        c.filter_suggested = bool(map, "filterSuggested", c.filter_suggested);
+        c.filter_playlists = bool(map, "filterPlaylists", c.filter_playlists);
+        c.filter_live = bool(map, "filterLive", c.filter_live);
+        c.filter_albums = bool(map, "filterAlbums", c.filter_albums);
+        c.filter_search = bool(map, "filterSearch", c.filter_search);
         if let Some(v) = map.get("skipContentMode") {
             c.skip_content_mode = SkipContentMode::parse(v);
         }
@@ -1061,6 +1080,8 @@ mod tests {
         assert_eq!(c.star_min_samples, 3);
         // Proxy defaults
         assert!(c.keyword_filter_enabled);
+        assert!(c.filter_suggested && c.filter_playlists && c.filter_live);
+        assert!(!c.filter_albums && !c.filter_search);
         assert_eq!(c.skip_content_mode, SkipContentMode::LessThanHalf);
         assert!((c.skip_heavy_ratio - 0.6).abs() < f64::EPSILON);
     }
@@ -1105,6 +1126,9 @@ mod tests {
             ("starFullPlayPercent", "90"),
             ("starMinSamples", "5"),
             ("keywordFilterEnabled", "false"),
+            ("filterSuggested", "false"),
+            ("filterAlbums", "true"),
+            ("filterSearch", "true"),
             ("skipContentMode", "half"),
             ("skipHeavyRatio", "0.75"),
         ]));
@@ -1129,6 +1153,9 @@ mod tests {
         assert_eq!(c.star_full_play_percent, 90);
         assert_eq!(c.star_min_samples, 5);
         assert!(!c.keyword_filter_enabled);
+        assert!(!c.filter_suggested);
+        assert!(c.filter_albums && c.filter_search);
+        assert!(c.filter_playlists && c.filter_live); // untouched = default true
         assert_eq!(c.skip_content_mode, SkipContentMode::Half);
         assert!((c.skip_heavy_ratio - 0.75).abs() < f64::EPSILON);
         assert!(!c.cleanup_no_audio_folders); // opt-in

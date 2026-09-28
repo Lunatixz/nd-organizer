@@ -576,8 +576,10 @@ all **without touching files**. Point your Subsonic-compatible client at
   Navidrome. Only clients that request JSON (`f=json`) get filtering.
 - Credentials pass through — use your normal Navidrome user/password in the client.
 - Plugin flagging: set `filterUrl = http://nd-organizer-proxy:4534`; the plugin
-  pushes the keyword list (`keywordFilterEnabled`), the skip-heavy ID set + limit
-  mode (`skipContentMode`) and every track's weight via `POST /filters`.
+  pushes the keyword list + coverage checkboxes (`keywordFilterEnabled`,
+  `filterSuggested`/`filterPlaylists`/`filterLive`/`filterAlbums`/`filterSearch`),
+  the skip-heavy ID set + limit mode (`skipContentMode`) and every track's
+  weight via `POST /filters`.
 - Optional env on the proxy: `FILTER_KEYWORDS` — startup default only. The
   plugin pushes Navidrome's `fillerKeywords` setting on every stats pass, so the
   Navidrome UI is the single source of truth for keyword filtering.
@@ -790,13 +792,22 @@ stay whole — `getAlbum` keeps full track order — and live/active views
 (`getNowPlaying`, `getPlayQueue`) are never touched.
 
 ### Keyword filter (opt-in, `keywordFilterEnabled`)
-Edit **Filler keywords** (`fillerKeywords`) in the Navidrome plugin settings.
-The plugin pushes this list to the filter proxy on every stats pass, so the
-proxy **drops keyword-matched tracks from every media response** (album track
-lists, playlists, random, genre, starred, similar, top) — so intros and outros
-never appear in any view. **Explicit user searches** (`searchResult*`) still
-return keyword tracks. Files are never touched. (`FILTER_KEYWORDS`
-on the proxy container is only a startup fallback.)
+Edit **Filler keywords** (`fillerKeywords`) in the Navidrome plugin settings,
+then tick which lists it applies to — five coverage checkboxes (published to the
+proxy as `coverage` on every stats pass):
+
+| Checkbox | Applies to | Default |
+|---|---|---|
+| Suggested & shuffled lists | shuffle/random, radio mixes, similar songs, genre mixes, top charts, sonic matches | on |
+| Playlists & favorites | playlist contents, starred/favorites | on |
+| Now playing & queue | now-playing view, active play queue | on |
+| Albums & folders you open | album track lists, folder listings | **off** |
+| Search results | `searchResult*` | **off** |
+
+Albums and searches stay whole unless you turn them on — opening an album or
+searching is a deliberate choice. The master switch (`keywordFilterEnabled`)
+turns the whole feature off regardless of the checkboxes. Files are never
+touched. (`FILTER_KEYWORDS` on the proxy container is only a startup fallback.)
 
 ### Skip-content limiter (`skipContentMode`)
 Every `statsPollMinutes` the plugin publishes each track's **weight** plus the
@@ -830,7 +841,8 @@ Enable **Playback stats** (`playbackStatsEnabled`). Every `statsPollMinutes`
    **"nd-organizer: Top Picks"** playlist (top `topPicksCount` songs by weight).
 3. If a **Navidrome filter proxy URL** (`filterUrl`) is set, publishes every
    track's weight + the skip-heavy ID set (`skipContentMode`) + the filler
-   keyword list (`keywordFilterEnabled`) to the proxy via `POST /filters`.
+   keyword list and coverage checkboxes (`keywordFilterEnabled`) to the proxy
+   via `POST /filters`.
 
 ### Smart skip accounting
 

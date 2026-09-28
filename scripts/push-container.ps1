@@ -9,7 +9,7 @@ param(
     [Parameter(Mandatory)][string]$LocalFile,
     [Parameter(Mandatory)][string]$RemotePath,
     [string]$PortainerUrl = "http://192.168.0.21:9000",
-    [string]$ApiKey = "ptr_ZYi4rjc6DQIzAH3joO8th827Rxq38vE2b9NjKQPPkrQ=",
+    [string]$ApiKey = "ptr_myMlvL+coFnGCxfEj7tqAa6C/E9i+mVVxsWVZp8w6k0=",
     [string]$EndpointId = "13"
 )
 

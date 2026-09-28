@@ -1150,6 +1150,13 @@ pub mod host_stats {
             "weights": weights,
             "keywords": keywords,
             "keywordFilter": kw_on,
+            "coverage": {
+                "suggested": cfg.filter_suggested,
+                "playlists": cfg.filter_playlists,
+                "live": cfg.filter_live,
+                "albums": cfg.filter_albums,
+                "search": cfg.filter_search,
+            },
             "skipMode": mode.as_str(),
         })
         .to_string();

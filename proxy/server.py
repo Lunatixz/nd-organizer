@@ -12,16 +12,18 @@
 #
 # Filtering applied to JSON song lists:
 #   - hard-excluded track IDs (published by the organizer via POST /filters) are
-#     removed everywhere: these are net-negative skips past your cap (skipped more
-#     than ever played in full);
+#     removed from queue containers: these are net-negative skips past your cap
+#     (skipped more than ever played in full);
 #   - filler-keyword tracks (pushed by the organizer from Navidrome's
-#     fillerKeywords setting) are ignored from the QUEUE: dropped from auto-queue
-#     lists (random/search/playlist/genre/top/similar) while an album's track
-#     list stays whole;
+#     fillerKeywords setting) are dropped from the request groups the user
+#     enabled in the plugin's coverage checkboxes (see COVERAGE): suggested/
+#     shuffled lists, playlists/favorites, now-playing/queue filter by default;
+#     albums/folders and search results keep their tracks unless turned on;
 #   - song lists in queue containers are re-sorted by published weight
 #     (plays - 2*skips) so skipped tracks sink and liked tracks rise.
 # Album track order (getAlbum) and live/active views (getNowPlaying, getPlayQueue)
-# are never reordered.
+# are never reordered. A single-track lookup (getSong) is always passed whole -
+# tapping one track is a deliberate play.
 #
 # Credentials are passed through unchanged (clients use their normal
 # Navidrome user/password).
@@ -73,6 +75,17 @@ EXCLUDED = set()      # skip-heavy track IDs published by the organizer plugin
 WEIGHTS = {}          # track ID -> weight (plays - 2*skips); used to reorder returned song lists
 KEYWORD_FILTER_ENABLED = True   # pushed by the plugin; startup default
 SKIP_MODE = "none"              # none|exclude|third|lessThanHalf|half - pushed by the plugin
+# Which request groups the keyword filter covers (pushed by the plugin's
+# coverage checkboxes; these are the startup defaults). Albums/folders and
+# search stay whole unless the user opts in - opening an album or searching
+# is a deliberate choice. See coverage_group() for the path mapping.
+COVERAGE = {
+    "suggested": True,   # random/similar/genre/top/sonic matches (+ unmapped)
+    "playlists": True,   # playlist contents, starred/favorites
+    "live": True,        # now playing, play queue
+    "albums": False,     # album track lists, folder listings
+    "search": False,     # search results
+}
 
 STARTED = time.time()
 REQUESTS = 0
@@ -94,11 +107,12 @@ REORDER_CONTAINERS = {
 # the entry dict inside each match, same as song/entry lists.
 SONIC_MATCH_KEYS = ("sonicMatch",)
 
-# Filler-keyword tracks are dropped from EVERY media response the proxy returns
-# (albums, playlists, queues, genre/similar/top, starred, sonicMatch, ...) - see
-# filter_json.  Only explicit user searches (searchResult*) keep their keyword
-# tracks because the user asked for those.  Reordering by weight is limited to
-# REORDER_CONTAINERS (auto-queue sources) so album track order is preserved.
+# Filler-keyword tracks are dropped from the request groups enabled in COVERAGE
+# (suggested/shuffled, playlists/favorites, now-playing/queue by default;
+# albums/folders and search opt-in) - see coverage_group() and filter_json.
+# Skip-heavy limits + weight reorder keep their own controls (skipMode) and
+# still apply inside REORDER_CONTAINERS regardless of coverage, so album track
+# order is preserved.
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -171,23 +185,44 @@ def _limit_skip_heavy(lst):
     return [it for it in lst if id(it) not in drop_ids]
 
 
-def filter_json(obj, own_key=None):
-    """Drop filler-keyword + skip-heavy song entries from ANY media response and
+def coverage_group(path):
+    """Map a request path to its coverage group (the plugin UI checkbox).
+
+    /rest/getAlbum.view -> "albums", /rest/search3.view -> "search", ...
+    Unknown endpoints map to "suggested" so anything unmapped keeps filtering
+    (today's behavior) rather than silently passing filler through.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if name.endswith(".view"):
+        name = name[: -len(".view")]
+    name = name.lower()
+    if name in ("getalbum", "getmusicdirectory"):
+        return "albums"
+    if name in ("search", "search2", "search3"):
+        return "search"
+    if name in ("getplaylist", "getplaylists", "getstarred", "getstarred2"):
+        return "playlists"
+    if name in ("getnowplaying", "getplayqueue"):
+        return "live"
+    return "suggested"
+
+
+def filter_json(obj, own_key=None, kw_on=True):
+    """Drop filler-keyword + skip-heavy song entries from media responses and
     reorder song lists inside auto-queue containers.
 
-    Keyword filtering now applies to every `song`/`entry` list the proxy returns
-    (albums, playlists, random, searches, genre, similar, starred, ...) - not just
-    auto-queues - so filler tracks are removed everywhere a client pulls media.
-    Only explicit user searches keep their keyword tracks (the user asked for
-    them). Reordering by weight stays limited to auto-queue containers so album
-    track order is preserved.
+    kw_on is the effective keyword decision for THIS request: the master
+    switch AND the coverage group the path belongs to (see coverage_group).
+    With kw_on the song/entry/child lists are filtered wherever they appear;
+    with it off the list is returned whole (albums/folders, search - unless the
+    user enabled those checkboxes). Reordering by weight stays limited to
+    auto-queue containers so album track order is preserved.
     """
     if isinstance(obj, dict):
-        new = {k: filter_json(v, k) for k, v in obj.items()}
-        is_search = own_key in ("searchResult", "searchResult2", "searchResult3")
-        drop_keyword = not is_search and KEYWORD_FILTER_ENABLED
-        # --- song/entry list containers (standard Subsonic) ---
-        for ck in ("song", "entry"):
+        new = {k: filter_json(v, k, kw_on) for k, v in obj.items()}
+        drop_keyword = kw_on and KEYWORD_FILTER_ENABLED
+        # --- song/entry/child list containers (standard Subsonic) ---
+        for ck in ("song", "entry", "child"):
             lst = new.get(ck)
             if not isinstance(lst, list):
                 continue
@@ -242,7 +277,7 @@ def filter_json(obj, own_key=None):
             new[mk] = kept
         return new
     if isinstance(obj, list):
-        return [filter_json(it, None) for it in obj]
+        return [filter_json(it, None, kw_on) for it in obj]
     return obj
 
 
@@ -313,6 +348,7 @@ class Handler(BaseHTTPRequestHandler):
                 "excluded": len(EXCLUDED),
                 "weights": len(WEIGHTS),
                 "keywordFilter": KEYWORD_FILTER_ENABLED,
+                "coverage": dict(COVERAGE),
                 "skipMode": SKIP_MODE,
                 "streams": list(STREAMS),
                 "filtered": list(FILTERED),
@@ -362,7 +398,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 obj = json.loads(raw.decode("utf-8", "replace"))
                 before = _count_songs(obj)
-                obj = filter_json(obj)
+                group = coverage_group(path)
+                kw_on = KEYWORD_FILTER_ENABLED and COVERAGE.get(group, True)
+                obj = filter_json(obj, None, kw_on)
                 after = _count_songs(obj)
                 if before != after:
                     log.info("filtered %s %s: removed %d of %d songs", method, path, before - after, before)
@@ -428,19 +466,28 @@ class Handler(BaseHTTPRequestHandler):
                     KEYWORDS = pushed
             if "keywordFilter" in body:
                 KEYWORD_FILTER_ENABLED = bool(body["keywordFilter"])
+            # Partial update: only the groups the payload names; the rest keep
+            # their current (startup-default) value. Older plugins that don't
+            # push coverage leave everything as-is.
+            cov = body.get("coverage")
+            if isinstance(cov, dict):
+                for k, v in cov.items():
+                    if k in COVERAGE:
+                        COVERAGE[k] = bool(v)
             mode = body.get("skipMode")
             if isinstance(mode, str) and mode in ("none", "exclude", "third", "lessThanHalf", "half"):
                 SKIP_MODE = mode
             log.info(
-                "filter set updated: %d skip-heavy IDs, %d weights, %d keywords, keywordFilter=%s, skipMode=%s",
+                "filter set updated: %d skip-heavy IDs, %d weights, %d keywords, keywordFilter=%s, coverage=%s, skipMode=%s",
                 len(EXCLUDED),
                 len(WEIGHTS),
                 len(KEYWORDS),
                 KEYWORD_FILTER_ENABLED,
+                COVERAGE,
                 SKIP_MODE,
             )
             out = json.dumps(
-                {"ok": True, "excluded": len(EXCLUDED), "weights": len(WEIGHTS), "keywords": len(KEYWORDS), "skipMode": SKIP_MODE}
+                {"ok": True, "excluded": len(EXCLUDED), "weights": len(WEIGHTS), "keywords": len(KEYWORDS), "coverage": COVERAGE, "skipMode": SKIP_MODE}
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -501,12 +548,15 @@ if __name__ == "__main__":
     log.info("listening on 0.0.0.0:%d", PORT)
     log.info("forwarding to %s", NAVIDROME_URL)
     log.info("filter keywords: %s", KEYWORDS or "(none)")
-    log.info("POST /filters {'excluded':[ids], 'weights':[[id,w,plays,skips],...], 'skipMode':..., 'keywordFilter':...} to flag/reorder")
+    log.info("POST /filters {'excluded':[ids], 'weights':[[id,w,plays,skips],...], 'coverage':{...}, 'skipMode':..., 'keywordFilter':...} to flag/reorder")
     log.info("queue containers (weight re-sort): %s", ", ".join(sorted(REORDER_CONTAINERS)))
     log.info("sonicMatch containers (findSonicPath): keyword filter + weight*similarity sort")
-    log.info("filler-keyword tracks dropped from all media responses except explicit user search")
+    on = ", ".join(k for k, v in COVERAGE.items() if v)
+    off = ", ".join(k for k, v in COVERAGE.items() if not v)
+    log.info("keyword coverage ON: %s", on or "(none)")
+    log.info("keyword coverage OFF (kept whole): %s", off or "(none)")
     log.info("skip-heavy limit mode: %s (exclude/third/lessThanHalf/half/none)", SKIP_MODE)
-    log.info("keywords ignored from the queue; albums stay whole")
+    log.info("filler tracks dropped only from covered groups; albums/search stay whole unless enabled")
     log.info("point a Subsonic-compatible client at http://<host>:%d/rest/ using Navidrome credentials", PORT)
     log.info("=" * 60)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
