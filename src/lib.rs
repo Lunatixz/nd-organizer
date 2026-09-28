@@ -624,13 +624,31 @@ pub(crate) mod wasm {
                         Err(e)
                     }
                 },
-                "stats" => match crate::stats::host_stats::poll(&cfg) {
+                "stats" => {
+                    // per-step timing: stats tasks were dying at the 30s task
+                    // deadline with no clue which step stalled.
+                    let t0 = std::time::Instant::now();
+                    match crate::stats::host_stats::poll(&cfg) {
                     Ok(report) => {
+                        crate::wasm::log_info(&format!(
+                            "stats timing: poll {}ms",
+                            t0.elapsed().as_millis()
+                        ));
                         // Lightweight callback — poll + filters.
+                        let t1 = std::time::Instant::now();
                         let filtered = crate::stats::host_stats::publish_filters(&cfg).unwrap_or(0);
+                        crate::wasm::log_info(&format!(
+                            "stats timing: publish {}ms (filtered={filtered})",
+                            t1.elapsed().as_millis()
+                        ));
                         // Pull starred ratings from webhook cache file (runs here
                         // because stats task already has a warm WASM module).
+                        let t2 = std::time::Instant::now();
                         let _starred = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
+                        crate::wasm::log_info(&format!(
+                            "stats timing: ratings {}ms",
+                            t2.elapsed().as_millis()
+                        ));
                         let heartbeat = serde_json::json!({
                             "ts": state::now_ts(),
                             "mode": mode_label(&cfg),
@@ -645,9 +663,20 @@ pub(crate) mod wasm {
                         })
                         .to_string();
                         post_webhook(&cfg, &heartbeat);
+                        crate::wasm::log_info(&format!(
+                            "stats timing: total {}ms",
+                            t0.elapsed().as_millis()
+                        ));
                         Ok(crate::stats::describe(&report, 0, filtered, 0, 0))
                     }
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        crate::wasm::log_warn(&format!(
+                            "stats timing: poll failed after {}ms: {e}",
+                            t0.elapsed().as_millis()
+                        ));
+                        Err(e)
+                    }
+                    }
                 },
                 "stats_heavy" => {
                     // Heavy stats operations: pull ratings, publish, meta tags.

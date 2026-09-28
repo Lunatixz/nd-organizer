@@ -279,8 +279,11 @@ pub mod host_stats {
     /// ingestion), so weights build up over time on older hosts.
     /// The same pass also feeds the 0-5 star tally (per filepath+filename).
     fn observe(cfg: &Config, user: &str) -> Result<StatsReport, String> {
+        let t0 = std::time::Instant::now();
         let uri = format!("getNowPlaying?u={user}");
         let json = host::subsonicapi::call(&uri).map_err(|e| e.to_string())?;
+        crate::wasm::log_info(&format!("observe timing: subsonic {}ms", t0.elapsed().as_millis()));
+        let t1 = std::time::Instant::now();
         let current = parse_nowplaying(&json);
         let key = now_key(user);
         let previous: Vec<NowPlayingEntry> = crate::store::kv().get(&key)
@@ -291,6 +294,11 @@ pub mod host_stats {
         let mut plays = 0usize;
         let mut skips = 0usize;
         let mut events: Vec<String> = Vec::new();
+        let t2 = std::time::Instant::now();
+        crate::wasm::log_info(&format!(
+            "observe timing: prev-kv get {}ms",
+            t1.elapsed().as_millis()
+        ));
         let current_ids: Vec<String> = current.iter().map(|e| e.id.clone()).collect();
         for prev in &previous {
             // A previously-playing track is no longer playing -> it ended.
@@ -327,6 +335,11 @@ pub mod host_stats {
         }
         let _ = crate::store::kv().set(&key, serde_json::to_vec(&current).unwrap_or_default());
         let (total_plays, total_skips, tracked) = totals();
+        crate::wasm::log_info(&format!(
+            "observe timing: loop+set+totals {}ms (total {}ms)",
+            t2.elapsed().as_millis(),
+            t0.elapsed().as_millis()
+        ));
         Ok(StatsReport {
             plays,
             skips,
@@ -932,38 +945,47 @@ pub mod host_stats {
 
     /// Cumulative play/skip counters + how many distinct songs are tracked.
     fn totals() -> (i64, i64, usize) {
-        let mut plays = 0i64;
-        let mut tracked = 0usize;
-        if let Ok(keys) = crate::store::kv().list("stat.play.") {
-            tracked = keys.len();
-            for k in keys {
-                if let Ok(Some(v)) = crate::store::kv().get(&k) {
-                    plays += String::from_utf8_lossy(&v).parse::<i64>().unwrap_or(0);
-                }
-            }
-        }
-        let mut skips = 0i64;
-        if let Ok(keys) = crate::store::kv().list("stat.skip.") {
-            for k in keys {
-                if let Ok(Some(v)) = crate::store::kv().get(&k) {
-                    skips += String::from_utf8_lossy(&v).parse::<i64>().unwrap_or(0);
-                }
-            }
-        }
+        // Batched: the N+1 per-key gets here (~200 round-trips) blew the 30s
+        // task deadline whenever the sidecar was under load (walk writing
+        // file-index keys at the same time) — stats tasks never completed,
+        // so filters never got published.
+        let kv = crate::store::kv();
+        let play_keys = kv.list("stat.play.").unwrap_or_default();
+        let tracked = play_keys.len();
+        let plays: i64 = kv
+            .get_many(play_keys)
+            .unwrap_or_default()
+            .values()
+            .map(|v| String::from_utf8_lossy(v).parse::<i64>().unwrap_or(0))
+            .sum();
+        let skip_keys = kv.list("stat.skip.").unwrap_or_default();
+        let skips: i64 = kv
+            .get_many(skip_keys)
+            .unwrap_or_default()
+            .values()
+            .map(|v| String::from_utf8_lossy(v).parse::<i64>().unwrap_or(0))
+            .sum();
         (plays, skips, tracked)
     }
 
     fn all_weights() -> Vec<(String, f64, i64, i64)> {
         let mut weights = Vec::new();
         if let Ok(keys) = crate::store::kv().list("stat.play.") {
-            let vals = crate::store::kv().get_many(keys).unwrap_or_default();
+            // Batch the skip lookups: one get_many instead of one get per key
+            // (N+1 blows the 30s task deadline under sidecar load).
+            let skip_keys: Vec<String> = keys
+                .iter()
+                .map(|k| skip_key(k.strip_prefix("stat.play.").unwrap_or(k)))
+                .collect();
+            let kv = crate::store::kv();
+            let vals = kv.get_many(keys).unwrap_or_default();
+            let skip_map = kv.get_many(skip_keys).unwrap_or_default();
             for (k, v) in vals {
                 let mfid = k.strip_prefix("stat.play.").unwrap_or(&k).to_string();
                 let plays = String::from_utf8_lossy(&v).parse::<i64>().unwrap_or(0);
-                let skips = crate::store::kv().get(&skip_key(&mfid))
-                    .ok()
-                    .flatten()
-                    .and_then(|v| String::from_utf8_lossy(&v).parse().ok())
+                let skips = skip_map
+                    .get(&skip_key(&mfid))
+                    .and_then(|v| String::from_utf8_lossy(v).parse::<i64>().ok())
                     .unwrap_or(0);
                 weights.push((mfid, weight(plays, skips), plays, skips));
             }
@@ -1120,7 +1142,9 @@ pub mod host_stats {
         }
         let ratio = cfg.skip_heavy_ratio.clamp(0.0, 1.0);
         const MIN_SAMPLES: i64 = 3;
+        let tw = std::time::Instant::now();
         let all = all_weights();
+        let all_len = all.len();
         // Skip-heavy = NET NEGATIVE: skipped strictly more often than ever played
         // in full (full plays forgive skips), 3+ interactions, and a skip
         // fraction at/above skipHeavyRatio. Only computed when the user wants
@@ -1160,6 +1184,11 @@ pub mod host_stats {
             "skipMode": mode.as_str(),
         })
         .to_string();
+        crate::wasm::log_info(&format!(
+            "publish timing: build {}ms ({} weights)",
+            tw.elapsed().as_millis(),
+            all_len
+        ));
         let req = host::http::HTTPRequest {
             method: "POST".into(),
             url: format!("{base}/filters"),
@@ -1168,7 +1197,13 @@ pub mod host_stats {
             body: payload.into_bytes(),
             timeout_ms: 15_000,
         };
-        match host::http::send(req) {
+        let th = std::time::Instant::now();
+        let send_result = host::http::send(req);
+        crate::wasm::log_info(&format!(
+            "publish timing: http {}ms",
+            th.elapsed().as_millis()
+        ));
+        match send_result {
             Ok(Some(resp)) if (200..300).contains(&resp.status_code) => {
                 crate::wasm::log_info(&format!(
                     "published {} skip-heavy flags + {} weights + {} keywords (mode {}) to filter proxy at {base}",
