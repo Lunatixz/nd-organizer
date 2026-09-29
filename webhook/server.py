@@ -2541,7 +2541,9 @@ header{position:sticky;top:0;z-index:30;background:rgba(10,14,26,.94);backdrop-f
 .pl .a{color:var(--text2);font-size:12px}
 .fgrid{display:grid;grid-template-columns:minmax(340px,1fr) 2fr;gap:16px;align-items:start}
 .fgrid .fi{display:grid;gap:16px}
-@media (max-width:760px){.fgrid{grid-template-columns:1fr}}
+@media (max-width:1100px){.fgrid{grid-template-columns:1fr}}
+.played-filters{display:grid;grid-template-columns:minmax(240px,360px) 1fr;gap:16px;align-items:start}
+@media (max-width:900px){.played-filters{grid-template-columns:1fr}}
 .kw{display:inline-block;background:var(--surface2);border:1px solid var(--border2);border-radius:12px;padding:3px 9px;font-size:11px;color:#cbd5e1;margin:0 4px 4px 0}
 h1{font-size:20px;margin:0;color:var(--accent);display:flex;align-items:center;gap:10px;font-weight:600}
 h1 .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite}
@@ -2729,8 +2731,10 @@ __KPI__
 </div>
 <div style="text-align:right;margin:0 0 14px"><button class="btn-grad" onclick="forceRescan()">Force Rescan</button></div>
 <details class="collapse" open id="added"><summary>Recently added</summary><div class="collapse-body">__ADDED__</div></details>
+<div class="played-filters">
 <details class="collapse" open id="played"><summary>Recently played</summary><div class="collapse-body">__PLAYED__</div></details>
 <details class="collapse" open id="filters"><summary>Filters &amp; coverage</summary><div class="collapse-body">__FILTERS__</div></details>
+</div>
 <details class="collapse" open id="health"><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
 <details class="collapse" open id="playback"><summary>Playback</summary><div class="collapse-body">__PLAYBACK__</div></details>
 <details class="collapse" open id="actions"><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
