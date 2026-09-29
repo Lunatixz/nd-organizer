@@ -71,6 +71,9 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8098
 
 STARTED = time.time()
 OPS = 0
+READS = 0    # get/has/list/get_many/health (heartbeat counters)
+WRITES = 0   # set/delete
+ERRORS = 0
 LAST_OP = ""
 LAST_OP_TS = 0
 _LAST_DB = None  # db params from the most recent successful op (never persisted)
@@ -204,9 +207,14 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def log_message(self, fmt, *args):
-        log.info("http %s", fmt % args)
+        msg = fmt % args
+        t0 = getattr(self, "_t0", None)
+        if t0:
+            msg += " (%dms)" % int((time.time() - t0) * 1000)
+        log.info("http %s", msg)
 
     def do_GET(self):
+        self._t0 = time.time()
         if self.path.startswith("/logs"):
             body = "\n".join(LOG_BUFFER).encode()
             self.send_response(200)
@@ -226,6 +234,9 @@ class Handler(BaseHTTPRequestHandler):
                 "version": ver,
                 "uptime": int(time.time() - STARTED),
                 "ops": OPS,
+                "reads": READS,
+                "writes": WRITES,
+                "errors": ERRORS,
                 "lastOp": LAST_OP,
                 "lastOpTs": LAST_OP_TS,
                 "db": None,
@@ -263,7 +274,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        global OPS, LAST_OP, LAST_OP_TS, _LAST_DB
+        global OPS, READS, WRITES, ERRORS, LAST_OP, LAST_OP_TS, _LAST_DB
+        self._t0 = time.time()
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length).decode("utf-8", "replace")) if length else {}
         op = body.get("op")
@@ -271,9 +283,22 @@ class Handler(BaseHTTPRequestHandler):
         OPS += 1
         LAST_OP = str(op)
         LAST_OP_TS = int(time.time())
+        mutating = op in ("set", "delete")
+        detail = body.get("key") or body.get("prefix") or ""
+        if op == "get_many":
+            detail = "%d keys" % len(body.get("keys") or [])
+        t0 = time.time()
         try:
             result = handle(db, op, body)
             _LAST_DB = db
+            dt = int((time.time() - t0) * 1000)
+            if mutating:
+                WRITES += 1
+                log.info("op %s %s (%dms)", op, detail, dt)
+            else:
+                READS += 1
+                if dt > 100:
+                    log.info("op %s %s slow (%dms)", op, detail, dt)
             out = json.dumps({"result": result}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -281,7 +306,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self._wfile_write(out)
         except Exception as e:
-            log.warning("op %s failed: %s", op, e)
+            ERRORS += 1
+            log.exception("op %s %s failed", op, detail)
             out = json.dumps({"result": {"error": "mysql: %s" % e}}).encode()
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
@@ -291,14 +317,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def start_heartbeat():
-    """Post a liveness heartbeat to the webhook dashboard (WEBHOOK_URL)."""
+    """Local log heartbeat every 60s + optional liveness post to the webhook
+    dashboard (WEBHOOK_URL)."""
     import threading
 
     url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
-    if not url:
-        return
 
-    def _loop():
+    def _log_loop():
+        while True:
+            time.sleep(60)
+            log.info(
+                "heartbeat: uptime=%ds ops=%d reads=%d writes=%d errors=%d lastOp=%s",
+                int(time.time() - STARTED), OPS, READS, WRITES, ERRORS, LAST_OP or "-",
+            )
+
+    def _post_loop():
         while True:
             time.sleep(60)
             try:
@@ -311,7 +344,9 @@ def start_heartbeat():
             except Exception:
                 pass
 
-    threading.Thread(target=_loop, daemon=True).start()
+    threading.Thread(target=_log_loop, daemon=True).start()
+    if url:
+        threading.Thread(target=_post_loop, daemon=True).start()
 
 
 if __name__ == "__main__":

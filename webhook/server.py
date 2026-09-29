@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -40,6 +41,8 @@ MAX_ENTRIES = 2000
 PLAYLIST_DIR = os.environ.get("PLAYLIST_DIR", "/data/playlists")
 RADIO_DB_PATH = os.environ.get("NAVIDROME_DB", "/data/navidrome.db")
 RADIO_BROWSER_API = os.environ.get("RADIO_BROWSER_API", "https://de1.api.radio-browser.info/json")
+# Content-addressed cover art lives under Navidrome's data dir (same mount).
+ARTWORK_ROOT = os.environ.get("ARTWORK_ROOT", "/data/nd/artwork")
 
 entries = []  # list of (ts, path, body)
 services = {}  # sidecar name -> last heartbeat unix ts
@@ -86,9 +89,15 @@ def _fetch_json(name, port, path, cache, ttl=30, timeout=3.0):
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             val = json.loads(resp.read().decode("utf-8", "replace"))
+        if c and c[1] is None:
+            log.info("%s%s reachable again", name, path)
         cache[key] = (time.time(), val)
         return val
-    except Exception:
+    except Exception as e:
+        # Warn only on the transition into failure (first probe or recovery ->
+        # down) so an unreachable sidecar doesn't spam a warning every ttl.
+        if not c or c[1] is not None:
+            log.warning("%s%s unreachable: %s", name, path, e)
         cache[key] = (time.time(), None)
         return None
 
@@ -118,9 +127,13 @@ def _fetch_logs(name, port, timeout=1.0):
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", "replace").rstrip("\n")
+        if c and c[1] is None:
+            log.info("%s logs reachable again", name)
         _sidecar_logs[name] = (time.time(), text)
         return text
-    except Exception:
+    except Exception as e:
+        if not c or c[1] is not None:
+            log.warning("%s logs unreachable: %s", name, e)
         _sidecar_logs[name] = (time.time(), None)
         return None
 
@@ -239,6 +252,26 @@ def _fmt_bytes(n):
     return "?"
 
 
+def audiomuse_card():
+    """AudioMuse-AI lives on its own compose stack (Flask, JWT-gated). Only
+    /api/health answers without a token, so the card shows service meta +
+    live reachability instead of request counters."""
+    host, port, path = "audiomuse-ai-flask-app", 8000, "/api/health"
+    h = _fetch_json(host, port, path, _sidecar_status)
+    up = isinstance(h, dict) and str(h.get("status", "")).lower() == "ok"
+    state, cls = ("OK", "ok") if up else ("OFFLINE", "bad")
+    return ("<div class='sc'><div class='sc-top'><b>AudioMuse-AI</b> "
+            "<span class='dim'>http://%s:%d</span>"
+            "<span class='tag %s'>%s</span></div>"
+            "<div class='sc-stats'><span>status <b>%s</b></span>"
+            "<span>role <b>acoustic analysis</b></span>"
+            "<span>api <b>JWT &middot; /apidocs/</b></span>"
+            "<span>auth <b>token</b></span></div>"
+            "<div class='dim'>genre/fingerprint/metadata enrichment &middot; notified after runs</div>"
+            "</div>") % (host, port, cls, state,
+                         esc(str((h or {}).get("status", "unknown"))))
+
+
 def sidecar_logs_html():
     """Fetch each sidecar's /health + /logs (cached 30s) and render rich cards
     so this dashboard is the single UI for the whole project. Unreachable
@@ -272,6 +305,7 @@ def sidecar_logs_html():
             card = _sidecar_card(name, _fetch_json(name, port, "/health", _sidecar_status), _fetch_logs(name, port))
         if card:
             out.append(card)
+    out.append(audiomuse_card())
     if not out:
         return "<div class='note'>No sidecar is running.</div>"
     return "".join(out)
@@ -707,6 +741,106 @@ def _docker_logs(container, tail=300):
         return None
 
 
+def _dechunk(b):
+    out, i = b"", 0
+    while i < len(b):
+        j = b.find(b"\r\n", i)
+        if j < 0:
+            break
+        try:
+            n = int(b[i:j].split(b";")[0], 16)
+        except ValueError:
+            return b
+        if n == 0:
+            break
+        out += b[j + 2:j + 2 + n]
+        i = j + 2 + n + 2
+    return out
+
+
+def _docker_http(method, path, body=None, timeout=10):
+    """Minimal HTTP over the Docker unix socket. Returns body bytes or None."""
+    if not os.path.exists(DOCKER_SOCK):
+        return None
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(DOCKER_SOCK)
+        hdr = "%s %s HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n" % (method, path)
+        if body is not None:
+            hdr += "Content-Type: application/json\r\nContent-Length: %d\r\n" % len(body)
+        sock.sendall(hdr.encode() + b"\r\n" + (body or b""))
+        raw = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            raw += chunk
+        sock.close()
+        head, _, payload = raw.partition(b"\r\n\r\n")
+        if not head.startswith(b"HTTP/1.") or b" 200 " not in head.split(b"\r\n", 1)[0] \
+                and b" 201 " not in head.split(b"\r\n", 1)[0]:
+            return None
+        if b"Transfer-Encoding: chunked" in head:
+            payload = _dechunk(payload)
+        return payload
+    except Exception:
+        return None
+
+
+_nd_container = [None]
+
+
+def _navidrome_container():
+    """Container that can read both library roots (/music + /unsorted),
+    preferring the one named navidrome. NAVIDROME_CONTAINER overrides."""
+    if _nd_container[0]:
+        return _nd_container[0]
+    env = os.environ.get("NAVIDROME_CONTAINER", "")
+    first = pref = ""
+    try:
+        for c in json.loads(_docker_http("GET", "/containers/json?all=0") or b"[]"):
+            dests = {m.get("Destination") for m in (c.get("Mounts") or [])}
+            if "/music" not in dests or "/unsorted" not in dests:
+                continue
+            cname = (c.get("Names") or [""])[0].lstrip("/")
+            if not first:
+                first = cname
+            if "navidrome" in cname:
+                pref = cname
+                break
+    except Exception:
+        pass
+    _nd_container[0] = env or pref or first or None
+    return _nd_container[0]
+
+
+def _docker_cat(container, path):
+    """cat one file out of another container via docker exec (unix socket)."""
+    ex = _docker_http("POST", "/containers/%s/exec" % container,
+                      json.dumps({"AttachStdout": True, "AttachStderr": False,
+                                  "Cmd": ["cat", path]}).encode())
+    if not ex:
+        return None
+    try:
+        exec_id = json.loads(ex).get("Id")
+    except Exception:
+        return None
+    if not exec_id:
+        return None
+    start = _docker_http("POST", "/exec/%s/start" % exec_id,
+                         json.dumps({"Detach": False, "Tty": False}).encode())
+    if not start:
+        return None
+    out, i, n = b"", 0, len(start)
+    while i + 8 <= n:
+        size = int.from_bytes(start[i + 4:i + 8], "big")
+        if start[i] == 1:
+            out += start[i + 8:i + 8 + size]
+        i += 8 + size
+    return out or None
+
+
 def load_log():
     """Load only the most recent events from the log file, then self-clean it.
 
@@ -787,6 +921,258 @@ def _self_clean_log(path):
 
 def esc(s):
     return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+# ---------------------------------------------------------------- library DB (read-only)
+#
+# KPI tiles, cover rails and now-playing art come from Navidrome's own SQLite
+# DB: opened read-only with short TTL caches, and every failure degrades to the
+# last good result (or an empty panel) so the dashboard never 500s on a DB.
+
+_DB_CACHE = {}  # (sql, params) -> (ts, rows)
+
+
+def db_query(sql, params=(), ttl=60):
+    key = (sql, params)
+    now = time.time()
+    c = _DB_CACHE.get(key)
+    if c and now - c[0] < ttl:
+        return c[1]
+    rows = c[1] if c else []
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % RADIO_DB_PATH, uri=True, timeout=3)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        finally:
+            conn.close()
+    except Exception as e:
+        # Warn only on the transition into failure, not every render.
+        if not c or c[1]:
+            log.info("db_query failed: %s", e)
+    _DB_CACHE[key] = (now, rows)
+    return rows
+
+
+def _fmt_secs(s):
+    s = int(s or 0)
+    if s >= 86400:
+        return "%dd %dh" % (s // 86400, (s % 86400) // 3600)
+    if s >= 3600:
+        return "%dh %dm" % (s // 3600, (s % 3600) // 60)
+    return "%dm %ds" % (s // 60, s % 60)
+
+
+def _age(ts):
+    """'3m ago' / 'never' for a unix ts (used for lastPublish freshness)."""
+    try:
+        d = int(time.time()) - int(ts)
+    except (TypeError, ValueError):
+        return "never"
+    if d < 60:
+        return "%ds ago" % d
+    if d < 3600:
+        return "%dm ago" % (d // 60)
+    if d < 86400:
+        return "%dh ago" % (d // 3600)
+    return "%dd ago" % (d // 86400)
+
+
+def kpi_html():
+    """Five library KPI tiles: albums, artists, songs, playtime, libraries."""
+    rows = db_query(
+        "SELECT (SELECT COUNT(*) FROM album) AS albums,"
+        " (SELECT COUNT(*) FROM artist) AS artists,"
+        " (SELECT COUNT(*) FROM media_file) AS songs,"
+        " (SELECT COALESCE(SUM(duration),0) FROM media_file) AS secs,"
+        " (SELECT COUNT(*) FROM library) AS libs",
+        ttl=300,
+    )
+    if not rows:
+        return ""
+    r = rows[0]
+    tiles = [
+        ("{:,}".format(int(r.get("albums") or 0)), "Albums"),
+        ("{:,}".format(int(r.get("artists") or 0)), "Artists"),
+        ("{:,}".format(int(r.get("songs") or 0)), "Songs"),
+        (_fmt_secs(r.get("secs")), "Playtime"),
+        ("{:,}".format(int(r.get("libs") or 0)), "Libraries"),
+    ]
+    return "<div class='kpis'>" + "".join(
+        "<div class='kpi'><b>%s</b><span>%s</span></div>" % (v, lbl) for v, lbl in tiles
+    ) + "</div>"
+
+
+def now_card_html(status_j):
+    """Hero left: what is playing right now, with album art + progress bar."""
+    out = "<div class='card npcard'><h2>Now playing</h2>"
+    np = [e for e in (latest_np() or []) if isinstance(e, dict)]
+    if not np:
+        return out + "<div class='note'>Nothing is playing right now.</div></div>"
+    primary = np[0]
+    art, dc = "", ""
+    q = db_query(
+        "SELECT ia.hash, aw.dominant_color FROM media_file mf "
+        "JOIN item_artwork ia ON ia.item_id=mf.album_id AND ia.item_kind='al' "
+        "AND ia.image_type='primary' LEFT JOIN artwork aw ON aw.hash=ia.hash "
+        "WHERE mf.id=? LIMIT 1",
+        (str(primary.get("id", "")),), ttl=60,
+    )
+    if q:
+        art = q[0].get("hash") or ""
+        dc = q[0].get("dominant_color") or ""
+    pos = int(primary.get("positionMs") or primary.get("position_ms") or 0)
+    dur = int(primary.get("duration") or 0)
+    pct = int(pos / (dur * 1000.0) * 100.0) if dur > 0 else 0
+    cover = ("<img class='np-cover' src='/art/%s' alt='' onerror='this.remove()'>" % art
+             if art else "<div class='np-cover' style='background:linear-gradient(135deg,%s,#0a0e1a)'></div>"
+             % esc(dc or "#3b82f6"))
+    out += ("<div class='np-hero'>%s<div class='np-meta'>"
+            "<div class='np-title'>%s</div>"
+            "<div class='np-artist'>%s%s</div>"
+            "<div class='bar np-bar'><i style='width:%d%%'></i></div>"
+            "<div class='dim'>%s / %s (%d%%)</div></div></div>") % (
+        cover, esc(primary.get("title", "") or "?"), esc(primary.get("artist", "")),
+        " &middot; " + esc(primary.get("album", "")) if primary.get("album") else "",
+        pct, _fmt_ms(pos), _fmt_ms(dur * 1000), pct)
+    for e in np[1:6]:
+        out += ("<div class='np'><span class='np-dot'></span>"
+                "<span class='np-a'>%s</span> <b>%s</b>"
+                "<span class='dim np-pos'>%s</span></div>") % (
+            esc(e.get("artist", "")), esc(e.get("title", "") or "?"),
+            _fmt_ms(int(e.get("duration") or 0) * 1000))
+    return out + "</div>"
+
+
+def added_html():
+    """Recently added: horizontal cover rail (18, scroll-snap)."""
+    rows = db_query(
+        "SELECT a.name, a.album_artist, a.song_count, a.created_at, ia.hash, aw.dominant_color "
+        "FROM album a "
+        "LEFT JOIN item_artwork ia ON ia.item_id=a.id AND ia.item_kind='al' "
+        "AND ia.image_type='primary' LEFT JOIN artwork aw ON aw.hash=ia.hash "
+        "WHERE a.missing=0 ORDER BY a.created_at DESC LIMIT 18",
+        ttl=120,
+    )
+    if not rows:
+        return "<div class='note'>No albums found - is the library mounted?</div>"
+    cards = ""
+    for r in rows:
+        h = r.get("hash") or ""
+        img = ("<img src='/art/%s' alt='' loading='lazy' onerror='this.remove()'>" % h) if h else ""
+        dc = esc(r.get("dominant_color") or "#3b82f6")
+        created = str(r.get("created_at") or "")[:10]
+        cards += ("<div class='acard'><div class='acov' style='background:linear-gradient(135deg,%s,#0a0e1a)'>%s</div>"
+                  "<div class='aname'>%s</div><div class='adate'>%s &middot; %s tracks</div></div>") % (
+            dc, img, esc(r.get("name", "")), created, r.get("song_count") or 0)
+    return "<div class='rail'>" + cards + "</div>"
+
+
+def _play_age(pd):
+    try:
+        ts = datetime.strptime(str(pd)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+        return _age(ts)
+    except Exception:
+        return str(pd)[:16] if pd else ""
+
+
+def played_html():
+    """Recently played: 12 rows with thumb, title/artist and time ago."""
+    rows = db_query(
+        "SELECT mf.title, mf.artist, mf.album, an.play_date, ia.hash, aw.dominant_color "
+        "FROM annotation an JOIN media_file mf ON mf.id=an.item_id "
+        "LEFT JOIN item_artwork ia ON ia.item_id=mf.album_id AND ia.item_kind='al' "
+        "AND ia.image_type='primary' LEFT JOIN artwork aw ON aw.hash=ia.hash "
+        "WHERE an.item_type='media_file' AND an.play_date>0 "
+        "ORDER BY an.play_date DESC LIMIT 12",
+        ttl=60,
+    )
+    if not rows:
+        return "<div class='note'>Nothing played yet.</div>"
+    out = ""
+    for r in rows:
+        h = r.get("hash") or ""
+        dc = esc(r.get("dominant_color") or "#3b82f6")
+        thumb = ("<img src='/art/%s' alt='' loading='lazy' onerror='this.remove()' "
+                 "style='background:linear-gradient(135deg,%s,#0a0e1a)'>" % (h, dc)) if h else \
+                "<div class='pl-ph' style='background:linear-gradient(135deg,%s,#0a0e1a)'></div>" % dc
+        out += ("<div class='pl'>%s<div class='t'>%s<div class='a'>%s%s</div></div>"
+                "<span class='dim'>%s</span></div>") % (
+            thumb, esc(r.get("title", "")), esc(r.get("artist", "")),
+            " &middot; " + esc(r.get("album", "")) if r.get("album") else "",
+            _play_age(r.get("play_date")))
+    return out
+
+
+def filters_html():
+    """Filter list panel (read-only): proxy keywords, coverage checkboxes,
+    skip mode, published set sizes and recently dropped tracks."""
+    st = _fetch_json("nd-organizer-proxy", 4534, "/status", _sidecar_status)
+    if not st:
+        return ("<div class='note'>Filter proxy is offline - the last published "
+                "filter state is unavailable. (Filter lists are edited in the "
+                "plugin settings; this panel is display-only.)</div>")
+    kws = st.get("keywords") or []
+    kw_on = bool(st.get("keywordFilter", True))
+    cov = st.get("coverage") or {}
+    skip = st.get("skipMode", "none")
+    chips = "".join("<span class='kw'>%s</span>" % esc(k) for k in kws) or "<span class='note'>(none)</span>"
+    cov_labels = [
+        ("suggested", "Suggested / shuffled"),
+        ("playlists", "Playlists / favorites"),
+        ("live", "Now playing / queue"),
+        ("albums", "Albums / folders"),
+        ("search", "Search results"),
+    ]
+    cov_pills = "".join(
+        "<span class='tag %s'>%s: %s</span>" % ("ok" if cov.get(k) else "", label, "on" if cov.get(k) else "off")
+        for k, label in cov_labels
+    )
+    filtered = [it for it in (st.get("filtered") or []) if isinstance(it, dict)][:12]
+    drop_rows = ""
+    if filtered:
+        ids = [str(it.get("id")) for it in filtered if it.get("id")]
+        art = {}
+        if ids:
+            for r in db_query(
+                "SELECT mf.id, ia.hash, aw.dominant_color FROM media_file mf "
+                "LEFT JOIN item_artwork ia ON ia.item_id=mf.album_id AND ia.item_kind='al' "
+                "AND ia.image_type='primary' LEFT JOIN artwork aw ON aw.hash=ia.hash "
+                "WHERE mf.id IN (%s)" % ",".join("?" * len(ids)),
+                tuple(ids), ttl=60,
+            ):
+                art[str(r.get("id"))] = (r.get("hash") or "", r.get("dominant_color") or "#3b82f6")
+        for it in filtered:
+            h, dc = art.get(str(it.get("id")), ("", ""))
+            dc = esc(dc)
+            thumb = ("<img src='/art/%s' alt='' loading='lazy' onerror='this.remove()' "
+                     "style='background:linear-gradient(135deg,%s,#0a0e1a)'>" % (h, dc)) if h else \
+                    "<div class='pl-ph' style='background:linear-gradient(135deg,%s,#0a0e1a)'></div>" % dc
+            reason = it.get("reason", "")
+            chip = "<span class='chip k'>%s</span>" % esc(reason) if reason else ""
+            drop_rows += ("<div class='pl'>%s<div class='t'>%s<div class='a'>%s%s</div></div>"
+                          "<span class='dim'>%s</span></div>") % (
+                thumb, esc(it.get("song", "") or it.get("id", "?")),
+                esc(it.get("artist", "")), chip, _age(int(it.get("ts") or 0)))
+    if not drop_rows:
+        drop_rows = "<div class='note'>Nothing dropped recently.</div>"
+    pub = st.get("lastPublish") or 0
+    out = "<div class='fgrid'>"
+    out += "<div class='fl'><h2>Recently filtered <span class='meta'>by the proxy</span></h2>%s</div>" % drop_rows
+    out += "<div class='fi'>"
+    out += ("<div><h2>Filler keywords <span class='meta'>%d &middot; filter <b>%s</b></span></h2>"
+            "<div>%s</div></div>") % (len(kws), "ON" if kw_on else "OFF", chips)
+    out += ("<div><h2>Coverage</h2><div class='kv'>%s</div>"
+            "<div class='sc-stats'><span>skip mode <b>%s</b></span></div></div>") % (cov_pills, esc(skip))
+    out += ("<div><h2>Published to proxy</h2><div class='sc-stats'>"
+            "<span>skip-heavy <b>%s</b></span><span>weights <b>%s</b></span>"
+            "<span>requests <b>%s</b></span><span>dropped <b>%s</b></span>"
+            "<span>errors <b>%s</b></span></div>"
+            "<div class='dim'>last publish: %s (%s)</div></div>") % (
+        st.get("excluded", 0), st.get("weights", 0), st.get("requests", 0),
+        st.get("drops", 0), st.get("errors", 0),
+        _fmt_ts(pub) if pub else "never", _age(pub) if pub else "never")
+    return out + "</div></div>"
 
 
 # ---------------------------------------------------------------- integrations
@@ -986,6 +1372,25 @@ def latest_status():
                 return j
         except Exception:
             continue
+    return None
+
+
+def latest_np():
+    """Newest entry carrying a nowPlaying list (stats heartbeats). Scan/run
+    posts include mode but not nowPlaying, so latest_status() alone went blank
+    during passes - that's why the hero card never showed playback."""
+    for _, _, body in reversed(entries):
+        try:
+            j = json.loads(body)
+        except Exception:
+            continue
+        if isinstance(j, dict) and isinstance(j.get("nowPlaying"), list):
+            try:
+                if time.time() - int(j.get("ts") or 0) > 1800:
+                    return None  # stats stopped >30min: don't show a frozen track
+            except (TypeError, ValueError):
+                pass
+            return j["nowPlaying"]
     return None
 
 
@@ -1208,13 +1613,13 @@ def playback_html(status_j):
     out = "<div class='card now'><h2>Playback</h2>"
 
     # What is playing right now.
-    np = status_j.get("nowPlaying")
+    np = latest_np()
     if isinstance(np, list) and np:
         rows = ""
         for e in np[:8]:
             if not isinstance(e, dict):
                 continue
-            pos = e.get("positionMs", 0)
+            pos = e.get("positionMs") or e.get("position_ms") or 0
             dur = e.get("duration", 0)
             pct = int(pos / (dur * 1000.0) * 100.0) if dur and dur > 0 else 0
             rows += ("<div class='np'><span class='np-dot'></span>"
@@ -1245,24 +1650,8 @@ def playback_html(status_j):
         out += ("<div class='np-head'>Playcounts &amp; star ratings</div>"
                 "<div class='note'>No ratings yet - they build up as music plays.</div>")
 
-    # What the filter proxy has been dropping - use accumulated list
-    proxy = _fetch_json("nd-organizer-proxy", 4534, "/status", _sidecar_status)
-    filtered = (proxy or {}).get("filtered") or _playback_state.get("filtered", [])
-    if filtered:
-        rows = ""
-        for it in filtered[:15]:
-            if not isinstance(it, dict):
-                continue
-            reason = it.get("reason", "")
-            chip = "<span class='chip'>%s</span>" % esc(reason) if reason in ("keyword", "excluded") else ""
-            rows += ("<div class='fh'><span class='ts'>%s</span><b>%s</b>"
-                     "<span class='dim'>%s</span>%s</div>") % (
-                _fmt_ts(it.get("ts")), esc(it.get("song", "") or it.get("id", "?")),
-                esc(it.get("artist", "")), chip)
-        out += "<div class='np-head'>Recently filtered by the proxy</div>" + rows
-    else:
-        out += ("<div class='np-head'>Recently filtered by the proxy</div>"
-                "<div class='note'>Nothing filtered recently.</div>")
+    # (Recently-dropped tracks moved to the Filters panel, which owns the
+    # proxy /status payload now.)
 
     # Cumulative stats
     plays = status_j.get("plays", 0) or _playback_state.get("plays", 0)
@@ -1596,6 +1985,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(n).decode("utf-8", "replace") if n > 0 else ""
 
     def do_POST(self):
+        self._t0 = time.time()
         body = self._read_body()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Internet radio: add a station directly to Navidrome radio table.
@@ -1620,7 +2010,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 added, skipped, errors = radio_add_stations([{"name": name, "url": url, "homepage": homepage}])
                 log.info("radio-add: added=%d skipped=%d errors=%s", added, skipped, errors)
             except Exception as e:
-                log.warning("radio-add failed: %s", e)
+                log.exception("radio-add failed")
                 self._send(502, {"ok": False, "error": str(e)})
                 return
             # Return ok:false when errors occurred so JS can show them
@@ -1644,7 +2034,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log.info("radio-remove: deleted %d station(s) name='%s'", deleted, name)
                 self._send(200, {"ok": True, "deleted": deleted})
             except Exception as e:
-                log.warning("radio-remove failed: %s", e)
+                log.exception("radio-remove failed")
                 self._send(502, {"ok": False, "error": str(e)})
             return
         if self.path.rstrip("/").endswith("/radio-rename"):
@@ -1671,23 +2061,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log.info("radio-rename: %d station(s) '%s' -> '%s'", updated, old_name, new_name)
                 self._send(200, {"ok": True, "updated": updated})
             except Exception as e:
-                log.warning("radio-rename failed: %s", e)
+                log.exception("radio-rename failed")
                 self._send(502, {"ok": False, "error": str(e)})
             return
-        # Force rescan: post a signal to the log so next scheduled run re-scans.
+        # Force rescan: record a signal entry; the plugin's next
+        # /force-rescan-check poll returns and clears it. (Posting locally
+        # instead of forwarding - WEBHOOK_URL is typically unset here, which
+        # made this branch a silent no-op.)
         if self.path.rstrip("/").endswith("/force-rescan"):
             try:
-                url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
-                if url:
-                    req = urllib.request.Request(
-                        url + "/force-rescan",
-                        data=b'{}',
-                        headers={"Content-Type": "application/json"},
-                    )
-                    urllib.request.urlopen(req, timeout=5).read()
-                self._send(200, {"ok": True})
+                entries.append((ts, "/force-rescan", json.dumps({
+                    "ts": int(time.time()),
+                    "forceRescan": True,
+                })))
+                log.info("force-rescan signal posted")
+                self._send(200, {"ok": True, "message": "rescan signal posted"})
             except Exception as e:
-                self._send(502, {"ok": False, "error": str(e)})
+                log.exception("force-rescan failed")
+                self._send(500, {"ok": False, "error": str(e)})
             return
         # Starred pull: the plugin POSTs a Subsonic getStarred2 JSON response
         # and the webhook resolves each song's path via getSong, then returns
@@ -1721,19 +2112,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(502, {"ok": False, "error": str(e)})
             return
-            log.info("force-rescan: handler entered, body=%d bytes", len(body))
-            try:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                signal = json.dumps({
-                    "ts": int(time.time()),
-                    "forceRescan": True,
-                })
-                entries.append((ts, "/force-rescan", signal))
-                self._send(200, {"ok": True, "message": "rescan signal posted"})
-            except Exception as e:
-                log.warning("force-rescan failed: %s", e)
-                self._send(500, {"ok": False, "error": str(e)})
-            return
         # Playlist: save / delete / list / deploy preset
         if self.path.rstrip("/").endswith("/playlist-save"):
             try:
@@ -1751,7 +2129,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self._wfile_write(body)
             except Exception as e:
-                log.warning("playlist-save failed: %s", e)
+                log.exception("playlist-save failed")
                 self._send(500, {"error": str(e)})
             return
         if self.path.rstrip("/").endswith("/playlist-delete"):
@@ -1767,7 +2145,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self._wfile_write(body)
             except Exception as e:
-                log.warning("playlist-delete failed: %s", e)
+                log.exception("playlist-delete failed")
                 self._send(500, {"error": str(e)})
             return
         # Sidecar heartbeat? Body is {"service": "...", "ts": ...} with no "mode".
@@ -1810,6 +2188,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         global last_any_request, _render_deadline
+        self._t0 = time.time()
         last_any_request = time.time()
         # Bound the whole render (~3.5s): sidecar probes that run past this are
         # skipped (cached/None) so the page never blocks on unreachable services.
@@ -1833,6 +2212,92 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self._wfile_write(data)
+            return
+        # Cover art for the dashboard: content-addressed hashed files, no
+        # credentials anywhere. 16-hex hash only; anything else is a 404 and the
+        # card's gradient (artwork.dominant_color) shows through instead.
+        if self.path.startswith("/art/"):
+            h = self.path[5:].split("?")[0].lower()
+            data = None
+            ctype = ""
+            if len(h) == 16 and all(c in "0123456789abcdef" for c in h):
+                for ext, mt in (("jpg", "image/jpeg"), ("png", "image/png")):
+                    p = os.path.join(ARTWORK_ROOT, "hashed", h[:2], h[2:4], h + "." + ext)
+                    if os.path.isfile(p):
+                        try:
+                            with open(p, "rb") as f:
+                                data = f.read()
+                            ctype = mt
+                        except Exception:
+                            data = None
+                        break
+            if data is None and len(h) == 16 and all(c in "0123456789abcdef" for c in h):
+                # Navidrome only materializes hashed files for embedded/lastfm
+                # art; folder covers live only in the library. Cat them out of
+                # the Navidrome container once and keep them in the hashed store
+                # so every later request is a plain file read. source_path can be
+                # stale (the plugin moves files after recording it), so also try
+                # the album's current folder from a track path.
+                try:
+                    rows = db_query(
+                        "SELECT ia.source_path, mf.path FROM item_artwork ia "
+                        "LEFT JOIN media_file mf ON mf.album_id = ia.item_id "
+                        "WHERE ia.hash=? AND ia.item_kind='al' "
+                        "AND ia.image_type='primary' LIMIT 1", (h,), ttl=3600)
+                except Exception:
+                    rows = []
+                sp = (rows[0].get("source_path") or "") if rows else ""
+                fp = (rows[0].get("path") or "") if rows else ""
+                cands = []
+                if sp:
+                    cands.append(sp)
+                # media_file.path is relative to the library root; source_path
+                # carries the root (/music or /unsorted) so rebuild from there.
+                if fp:
+                    root = ("/" + sp.split("/")[1]) if sp.startswith("/") else ""
+                    fpdir = fp.rsplit("/", 1)[0] if "/" in fp else ""
+                    if fp.startswith("/"):
+                        dirs = [fpdir]
+                    elif root and fpdir:
+                        dirs = [root + "/" + fpdir]
+                    else:
+                        dirs = []
+                    base = sp.rsplit("/", 1)[-1] if sp else "folder.jpg"
+                    for d in dirs:
+                        cands += [d + "/" + base, d + "/folder.jpg", d + "/cover.jpg"]
+                cont = _navidrome_container()
+                blob, served = None, None
+                for cand in cands:
+                    if not cand.startswith(("/music/", "/unsorted/")) \
+                            or not cand.lower().endswith((".jpg", ".jpeg", ".png")):
+                        continue
+                    blob = _docker_cat(cont, cand) if cont else None
+                    if blob:
+                        served = cand
+                        break
+                if blob:
+                    ext = ".png" if served.lower().endswith(".png") else ".jpg"
+                    try:
+                        d = os.path.join(ARTWORK_ROOT, "hashed", h[:2], h[2:4])
+                        os.makedirs(d, exist_ok=True)
+                        with open(os.path.join(d, h + ext), "wb") as f:
+                            f.write(blob)
+                    except Exception:
+                        pass  # still serve this response even if we can't keep it
+                    data = blob
+                    ctype = "image/png" if ext == ".png" else "image/jpeg"
+                    log.info("art: materialized %s from %s", h, served)
+            if data is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.end_headers()
             self._wfile_write(data)
             return
@@ -1991,6 +2456,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 .replace("__LOG__", esc(LOGFILE))
                 .replace("__MODE__", esc(mode or "unknown"))
                 .replace("__BANNER__", banner)
+                .replace("__KPI__", kpi_html())
+                .replace("__NOWCARD__", now_card_html(status_j))
+                .replace("__ADDED__", added_html())
+                .replace("__PLAYED__", played_html())
+                .replace("__FILTERS__", filters_html())
                 .replace("__INTEGRATIONS__", integrations_html())
                 .replace("__NOW__", now_html)
                 .replace("__PLAYBACK__", playback_html(status_j))
@@ -2017,8 +2487,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
-    def log_message(self, *a):
-        pass
+    def log_message(self, fmt, *args):
+        # Access log with duration (was silenced): "GET / 200 (184ms)".
+        msg = fmt % args
+        t0 = getattr(self, "_t0", None)
+        if t0:
+            msg += " (%dms)" % int((time.time() - t0) * 1000)
+        log.info("http %s", msg)
 
 
 PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -2026,11 +2501,48 @@ PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>nd-organizer</title>
 <link rel="icon" href="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png">
 <style>
-:root{color-scheme:dark;--bg:#0a0e1a;--surface:#111827;--surface2:#1a2332;--border:#1e2d3d;--border2:#2a3a4d;--text:#e2e8f0;--text2:#64748b;--accent:#00d4ff;--green:#22c55e;--green-bg:rgba(34,197,94,.12);--red:#ef4444;--red-bg:rgba(239,68,68,.1);--yellow:#eab308;--yellow-bg:rgba(234,179,8,.1);--blue:#00d4ff;--blue-bg:rgba(0,212,255,.1);--purple:#a855f7;--purple-bg:rgba(168,85,247,.1);--radius:8px;--radius-lg:12px}
+:root{color-scheme:dark;--bg:#0a0e1a;--surface:#111827;--surface2:#1a2332;--border:#1e2d3d;--border2:#2a3a4d;--text:#e2e8f0;--text2:#64748b;--accent:#00d4ff;--grad:linear-gradient(90deg,#2dd4bf,#22d3ee,#3b82f6,#a855f7);--green:#22c55e;--green-bg:rgba(34,197,94,.12);--red:#ef4444;--red-bg:rgba(239,68,68,.1);--yellow:#eab308;--yellow-bg:rgba(234,179,8,.1);--blue:#00d4ff;--blue-bg:rgba(0,212,255,.1);--purple:#a855f7;--purple-bg:rgba(168,85,247,.1);--radius:8px;--radius-lg:12px}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;margin:0;min-height:100vh;-webkit-font-smoothing:antialiased}
 .wrap{max-width:1080px;margin:0 auto;padding:28px 24px 60px}
-header{margin-bottom:24px}
+header{position:sticky;top:0;z-index:30;background:rgba(10,14,26,.94);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--border);padding:10px 0 8px;margin-bottom:14px}
+.hrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.hnav{display:flex;gap:14px;margin-left:auto;font-size:12px;flex-wrap:wrap}
+.hnav a{color:var(--text2)}
+.hnav a:hover{color:var(--accent);text-decoration:none}
+#clock{font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;color:var(--text2)}
+.grad-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.bannerimg{margin-bottom:16px}
+.btn-grad{background:var(--grad);border:0;border-radius:var(--radius);padding:7px 16px;color:#071018;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:.2px}
+.btn-grad:hover{filter:brightness(1.12)}
+.btn-grad:disabled{opacity:.6;cursor:default}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;position:relative;overflow:hidden}
+.kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--grad)}
+.kpi b{display:block;font-size:22px;font-weight:700;color:#e6eaf1;letter-spacing:-.5px}
+.kpi span{display:block;margin-top:2px;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.6px}
+.hero{display:grid;grid-template-columns:minmax(320px,420px) 1fr;gap:16px;align-items:start;margin-bottom:16px}
+.hero .card{margin-bottom:0}
+.np-hero{display:flex;gap:14px;align-items:center}
+.np-cover{width:104px;height:104px;border-radius:10px;object-fit:cover;background:var(--surface2);flex-shrink:0}
+.np-meta{flex:1;min-width:0}
+.np-title{font-size:16px;font-weight:600;color:#e6eaf1;word-break:break-word}
+.np-artist{font-size:13px;color:var(--text2);margin-bottom:6px;word-break:break-word}
+.np-bar i{background:var(--grad);animation:none;background-size:100% 100%}
+.rail{display:flex;gap:10px;overflow-x:auto;padding-bottom:8px;scroll-snap-type:x mandatory}
+.acard{flex:0 0 140px;scroll-snap-align:start}
+.acov{width:140px;height:140px;border-radius:10px;overflow:hidden;border:1px solid var(--border);display:flex;align-items:center;justify-content:center}
+.acov img{width:100%;height:100%;object-fit:cover;display:block}
+.aname{font-size:12px;color:#e6eaf1;margin-top:6px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.adate{font-size:10px;color:var(--text2);margin-top:2px}
+.pl{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px}
+.pl img,.pl-ph{width:40px;height:40px;border-radius:6px;object-fit:cover;flex-shrink:0;background:var(--surface2)}
+.pl .t{flex:1;min-width:0;color:#e6eaf1;word-break:break-word}
+.pl .a{color:var(--text2);font-size:12px}
+.fgrid{display:grid;grid-template-columns:minmax(340px,1fr) 2fr;gap:16px;align-items:start}
+.fgrid .fi{display:grid;gap:16px}
+@media (max-width:760px){.fgrid{grid-template-columns:1fr}}
+.kw{display:inline-block;background:var(--surface2);border:1px solid var(--border2);border-radius:12px;padding:3px 9px;font-size:11px;color:#cbd5e1;margin:0 4px 4px 0}
 h1{font-size:20px;margin:0;color:var(--accent);display:flex;align-items:center;gap:10px;font-weight:600}
 h1 .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
@@ -2176,6 +2688,9 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
   h1{font-size:18px}
   .sub{font-size:11px}
   .card{padding:14px 14px}
+  .hnav{display:none}
+  .hero{grid-template-columns:1fr}
+  .np-cover{width:80px;height:80px}
   details.collapse{padding:10px 12px}
   .integrations{grid-template-columns:1fr}
   .sc-stats{gap:4px 10px}
@@ -2196,22 +2711,34 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
 }
 </style></head><body><div class="wrap">
 <header>
-<div style="text-align:center;margin-bottom:16px"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/banner.png" alt="nd-organizer" style="max-width:100%;height:auto;border-radius:8px;opacity:.9"></div>
-<h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px">nd-organizer</h1>
-<div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; mode: <b>__MODE__</b> &middot; checked __UPDATED__ &middot; auto-refresh 30s &middot; log: __LOG__</div>
+<div class="hrow">
+<h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px"><span class="grad-text">nd-organizer</span></h1>
+<span class="tag mode">__MODE__</span>
+<span id="clock">&ndash;&ndash;:&ndash;&ndash;:&ndash;&ndash;</span>
+<nav class="hnav"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#playback">Playback</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a></nav>
+</div>
+<div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; checked __UPDATED__ &middot; auto-refresh 30s &middot; log: __LOG__</div>
 </header>
-<nav class="mobile-bar" id="mobileBar"><a href="#health">Health</a><a href="#activity">Activity</a><a href="#playback">Playback</a><a href="#radio">Radio</a><a href="#playlists">Playlists</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a></nav>
+<div class="bannerimg"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/banner.png" alt="nd-organizer" style="max-width:100%;height:auto;border-radius:8px;opacity:.9"></div>
+<nav class="mobile-bar" id="mobileBar"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#playback">Playback</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a><a href="#radio">Radio</a><a href="#playlists">Playlists</a></nav>
 __BANNER__
-<div style="text-align:right;margin:8px 0"><button onclick="forceRescan()" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:6px 14px;color:var(--accent);cursor:pointer;font-size:12px;font-weight:600">Force Rescan</button></div>
+__KPI__
+<div class="hero">
+<div>__NOWCARD__</div>
+<div id="activity">__NOW__</div>
+</div>
+<div style="text-align:right;margin:0 0 14px"><button class="btn-grad" onclick="forceRescan()">Force Rescan</button></div>
+<details class="collapse" open id="added"><summary>Recently added</summary><div class="collapse-body">__ADDED__</div></details>
+<details class="collapse" open id="played"><summary>Recently played</summary><div class="collapse-body">__PLAYED__</div></details>
+<details class="collapse" open id="filters"><summary>Filters &amp; coverage</summary><div class="collapse-body">__FILTERS__</div></details>
 <details class="collapse" open id="health"><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
-<details class="collapse" open id="activity"><summary>Current activity</summary><div class="collapse-body">__NOW__</div></details>
 <details class="collapse" open id="playback"><summary>Playback</summary><div class="collapse-body">__PLAYBACK__</div></details>
-<details class="collapse" open id="radio"><summary>Internet radio</summary><div class="collapse-body">__RADIO__</div></details>
-<details class="collapse" open id="playlists"><summary>Smart playlists</summary><div class="collapse-body">__PLAYLISTS__</div></details>
 <details class="collapse" open id="actions"><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
+<details class="collapse" id="recent"><summary>Recently processed</summary><div class="collapse-body">__RECENT__</div></details>
 <details class="collapse" id="tasks"><summary>Task queue</summary><div class="collapse-body">__TASKS__</div></details>
-<details class="collapse" open id="sidecars"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
-<details class="collapse" id="recent"><summary>Recent actions</summary><div class="collapse-body">__RECENT__</div></details>
+<details class="collapse" id="sidecars"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
+<details class="collapse" id="radio"><summary>Internet radio</summary><div class="collapse-body">__RADIO__</div></details>
+<details class="collapse" id="playlists"><summary>Smart playlists</summary><div class="collapse-body">__PLAYLISTS__</div></details>
 <details class="collapse" id="reports"><summary>Activity &amp; reports</summary><div class="collapse-body">__ROWS__</div></details>
 <div class="footer-art"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/footer.png" alt="" style="width:100%;max-width:700px;height:auto;border-radius:8px"></div>
 <footer>nd-organizer webhook dashboard</footer>
@@ -2235,8 +2762,13 @@ function forceRescan(){
             try { localStorage.setItem(k, d.open ? "1" : "0"); } catch (e) {}
         });
     });
+    // Sidecars + Activity & reports stay collapsed by default: ignore any
+    // stored "open" for them (user can still open them for the session).
+    var DEF_CLOSED = ["Sidecars", "Activity & reports"];
     document.querySelectorAll("details.collapse").forEach(function (d) {
-        var k = KEY + d.querySelector("summary").textContent.trim();
+        var name = d.querySelector("summary").textContent.trim();
+        if (DEF_CLOSED.indexOf(name) >= 0) return;
+        var k = KEY + name;
         var v = null;
         try { v = localStorage.getItem(k); } catch (e) {}
         if (v === "1") d.open = true;
@@ -2289,6 +2821,11 @@ function forceRescan(){
     }
     setInterval(refresh, 30000);
 })();
+// Header clock: local time, keeps ticking across silent refreshes.
+setInterval(function () {
+    var c = document.getElementById("clock");
+    if (c) c.textContent = new Date().toLocaleTimeString();
+}, 1000);
 </script>
 </body></html>"""
 

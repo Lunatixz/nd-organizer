@@ -376,8 +376,12 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def log_message(self, fmt, *args):
-        # route the built-in request line through our logger at DEBUG-ish level
-        log.info("http %s", fmt % args)
+        # route the built-in request line through our logger with a duration
+        msg = fmt % args
+        t0 = getattr(self, "_t0", None)
+        if t0:
+            msg += " (%dms)" % int((time.time() - t0) * 1000)
+        log.info("http %s", msg)
 
     def _send(self, code, obj):
         body = json.dumps(obj).encode()
@@ -388,6 +392,7 @@ class Handler(BaseHTTPRequestHandler):
         self._wfile_write(body)
 
     def do_GET(self):
+        self._t0 = time.time()
         if self.path.startswith("/logs"):
             body = "\n".join(LOG_BUFFER).encode()
             self.send_response(200)
@@ -499,10 +504,15 @@ class Handler(BaseHTTPRequestHandler):
             results.append(entry_result)
 
         STATS["lastLookup"] = int(time.time())
-        log.info("batch: processed %d files", len(results))
+        errs = sum(1 for r in results if not r.get("ok", True))
+        log.info(
+            "batch: processed %d files (%d errors, %.1fs)",
+            len(results), errs, time.time() - batch_start,
+        )
         return self._send(200, {"ok": True, "processed": len(results), "results": results})
 
     def do_POST(self):
+        self._t0 = time.time()
         try:
             n = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(n) if n > 0 else b"{}"
@@ -665,14 +675,22 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def start_heartbeat():
-    """Post a liveness heartbeat to the webhook dashboard (WEBHOOK_URL)."""
+    """Local log heartbeat every 60s + optional liveness post to the webhook
+    dashboard (WEBHOOK_URL)."""
     import threading
 
     url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
-    if not url:
-        return
 
-    def _loop():
+    def _log_loop():
+        while True:
+            time.sleep(60)
+            log.info(
+                "heartbeat: uptime=%ds lookups=%d matches=%d errors=%d replaygains=%d jobs=%d",
+                int(time.time() - STARTED), STATS["lookups"], STATS["matches"],
+                STATS["errors"], STATS.get("replaygains", 0), len(_jobs),
+            )
+
+    def _post_loop():
         while True:
             time.sleep(60)
             try:
@@ -685,7 +703,9 @@ def start_heartbeat():
             except Exception:
                 pass
 
-    threading.Thread(target=_loop, daemon=True).start()
+    threading.Thread(target=_log_loop, daemon=True).start()
+    if url:
+        threading.Thread(target=_post_loop, daemon=True).start()
 
 
 if __name__ == "__main__":

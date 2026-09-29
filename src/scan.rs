@@ -672,7 +672,17 @@ pub fn index_step(
 
     let scan_start = std::time::Instant::now();
     // 15s budget — Navidrome's WASM scheduler kills at ~27s.
+    // ponytail: the WASM clock accrues while running, not while blocked in
+    // host calls (kv HTTP, mount stats) — on IO-heavy chunks the budget
+    // starves and the task gets killed at 30s instead. iters_per_task counts
+    // ALL iterations (skips included) so every chunk ends predictably.
     let time_budget = std::time::Duration::from_secs(15);
+    let start_i = i;
+    // ponytail: count break must be SMALL — a cold index_file costs ~360ms
+    // (kv get + lofty tag read + kv set, each a WASM→sidecar HTTP hop) and
+    // elapsed() does NOT accrue host-call time, so the time budget never
+    // fires. 30 iters ≈ 11s typical / ~21s worst, under the 30s kill.
+    let iters_per_task: usize = 30;
     let mut processed = 0usize;
     let mut skipped = 0usize;
     let mut last_rel = String::new();
@@ -685,6 +695,9 @@ pub fn index_step(
     // Process files from cursor position.
     // Skip files whose mtime hasn't changed (already indexed).
     while i < files.len() {
+        if i - start_i >= iters_per_task {
+            break;
+        }
         if scan_start.elapsed() >= time_budget {
             break;
         }
@@ -694,15 +707,13 @@ pub fn index_step(
         if processed >= files_per_task {
             break;
         }
-        let (rel, stored_mtime) = &files[i];
+        let (rel, _) = &files[i];
         last_rel = rel.clone();
         let abs = root.join(rel);
-        let current_mtime = file_mtime(&abs);
-        if current_mtime == *stored_mtime {
-            skipped += 1;
-            i += 1;
-            continue;
-        }
+        // ponytail: no walk-mtime shortcut here — it compared against the
+        // walk-snapshot (always equal on a fresh pass) and skipped EVERY file
+        // before index_file could write its kv entry, leaving group_step with
+        // zero entries. index_file's own kv+mtime check is the real gate.
         let did_work = index_file(cfg, library_id, rel, &abs)?;
         if did_work {
             processed += 1;

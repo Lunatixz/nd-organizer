@@ -62,6 +62,10 @@ logging.getLogger().addHandler(_mem)
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8101
 SERVICE = "nd-organizer-essentia"
 STARTED = time.time()
+ANALYSES = 0    # /analyze requests
+FINGERPRINTS = 0  # /fingerprint requests
+COMPARES = 0
+ERRORS = 0
 ESSENTIA_AVAILABLE = False
 LIBROSA_AVAILABLE = False
 MODELS_LOADED = False
@@ -1003,7 +1007,11 @@ def check_instrumental(path):
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        log.info("http %s", fmt % args)
+        msg = fmt % args
+        t0 = getattr(self, "_t0", None)
+        if t0:
+            msg += " (%dms)" % int((time.time() - t0) * 1000)
+        log.info("http %s", msg)
 
     def _send(self, code, obj):
         body = json.dumps(obj).encode()
@@ -1024,6 +1032,7 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(raw or "{}"), None
 
     def do_GET(self):
+        self._t0 = time.time()
         path = self.path.rstrip("/")
         if path == "/health":
             ver = ""
@@ -1047,6 +1056,10 @@ class Handler(BaseHTTPRequestHandler):
                 "engage_model": ENGAGE_MODEL is not None,
                 "timbre_model": TIMBRE_MODEL is not None,
                 "uptime": int(time.time() - STARTED),
+                "analyses": ANALYSES,
+                "fingerprints": FINGERPRINTS,
+                "compares": COMPARES,
+                "errors": ERRORS,
             })
             return
         if path == "/status":
@@ -1079,8 +1092,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        global ANALYSES, FINGERPRINTS, COMPARES, ERRORS
+        self._t0 = time.time()
         path = self.path.rstrip("/")
         if path == "/analyze":
+            t0 = time.time()
             req, err = self._read_body()
             if err:
                 return self._send(400, {"error": err})
@@ -1098,10 +1114,22 @@ class Handler(BaseHTTPRequestHandler):
                 req.get("bpm", False),
             )
             if err:
+                ERRORS += 1
+                log.warning("analyze %s failed: %s", audio_path, err)
                 return self._send(200, {"ok": False, "error": err})
+            ANALYSES += 1
+            g = ", ".join(x.get("name", "") for x in (result.get("genres") or [])[:3])
+            m = ", ".join(x.get("name", "") for x in (result.get("moods") or [])[:2])
+            log.info(
+                "analyze %s -> genres=[%s] mood=[%s] bpm=%s energy=%s (%dms)",
+                audio_path, g or "-", m or "-",
+                result.get("bpm", "-"), result.get("energy", "-"),
+                int((time.time() - t0) * 1000),
+            )
             self._send(200, {"ok": True, **result})
             return
         if path == "/fingerprint":
+            t0 = time.time()
             req, err = self._read_body()
             if err:
                 return self._send(400, {"error": err})
@@ -1110,10 +1138,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "path required"})
             result, err = compute_fingerprint(audio_path)
             if err:
+                ERRORS += 1
+                log.warning("fingerprint %s failed: %s", audio_path, err)
                 return self._send(200, {"ok": False, "error": err})
+            FINGERPRINTS += 1
+            log.info(
+                "fingerprint %s duration=%s peak_count=%s (%dms)",
+                audio_path, result.get("duration"), result.get("peak_count"),
+                int((time.time() - t0) * 1000),
+            )
             self._send(200, {"ok": True, **result})
             return
         if path == "/compare":
+            t0 = time.time()
             req, err = self._read_body()
             if err:
                 return self._send(400, {"error": err})
@@ -1123,13 +1160,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "path_a and path_b required"})
             fp_a, err = compute_fingerprint(path_a)
             if err:
+                ERRORS += 1
+                log.warning("compare path_a %s failed: %s", path_a, err)
                 return self._send(200, {"ok": False, "error": f"path_a: {err}"})
             fp_b, err = compute_fingerprint(path_b)
             if err:
+                ERRORS += 1
+                log.warning("compare path_b %s failed: %s", path_b, err)
                 return self._send(200, {"ok": False, "error": f"path_b: {err}"})
             similarity = compare_fingerprints(
                 fp_a.get("fingerprint") if fp_a else None,
                 fp_b.get("fingerprint") if fp_b else None,
+            )
+            COMPARES += 1
+            log.info(
+                "compare %s vs %s -> similarity=%s cover=%s duplicate=%s (%dms)",
+                path_a, path_b, similarity,
+                0.5 <= similarity < 0.95, similarity >= 0.95,
+                int((time.time() - t0) * 1000),
             )
             self._send(200, {
                 "ok": True,
@@ -1141,6 +1189,7 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if path == "/instrumental-check":
+            t0 = time.time()
             req, err = self._read_body()
             if err:
                 return self._send(400, {"error": err})
@@ -1149,18 +1198,35 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "path required"})
             result, err = check_instrumental(audio_path)
             if err:
+                ERRORS += 1
+                log.warning("instrumental-check %s failed: %s", audio_path, err)
                 return self._send(200, {"ok": False, "error": err})
+            log.info(
+                "instrumental-check %s -> instrumental=%s confidence=%s vocalRatio=%s (%dms)",
+                audio_path, result.get("isInstrumental"), result.get("confidence"),
+                result.get("vocalRatio"), int((time.time() - t0) * 1000),
+            )
             self._send(200, {"ok": True, **result})
             return
         self._send(404, {"error": "not found"})
 
 
 def start_heartbeat():
+    """Local log heartbeat every 60s + optional liveness post to the webhook
+    dashboard (WEBHOOK_URL)."""
     import threading
     url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
-    if not url:
-        return
-    def _loop():
+
+    def _log_loop():
+        while True:
+            time.sleep(60)
+            log.info(
+                "heartbeat: uptime=%ds analyses=%d fingerprints=%d compares=%d errors=%d cache=%d",
+                int(time.time() - STARTED), ANALYSES, FINGERPRINTS, COMPARES,
+                ERRORS, len(ANALYSIS_CACHE),
+            )
+
+    def _post_loop():
         while True:
             time.sleep(60)
             try:
@@ -1172,7 +1238,10 @@ def start_heartbeat():
                 urllib.request.urlopen(req, timeout=5).read()
             except Exception:
                 pass
-    threading.Thread(target=_loop, daemon=True).start()
+
+    threading.Thread(target=_log_loop, daemon=True).start()
+    if url:
+        threading.Thread(target=_post_loop, daemon=True).start()
 
 
 if __name__ == "__main__":

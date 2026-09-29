@@ -89,6 +89,8 @@ COVERAGE = {
 
 STARTED = time.time()
 REQUESTS = 0
+ERRORS = 0        # forward/filter failures (surfaced in heartbeat + /status)
+DROPS = 0         # tracks dropped by keyword/skip-heavy filtering
 LAST_REQUEST_TS = 0.0
 LAST_PUBLISH_TS = 0.0
 STREAMS = collections.deque(maxlen=20)  # recent stream requests: {ts, id}
@@ -153,6 +155,14 @@ def weight_of(item):
 
 
 def _record_drop(item, reason):
+    global DROPS
+    DROPS += 1
+    log.info(
+        'drop "%s" by %s (%s)',
+        item.get("title", "") or item.get("path", ""),
+        item.get("artist", ""),
+        reason,
+    )
     try:
         FILTERED.appendleft({
             "ts": int(time.time()),
@@ -313,10 +323,16 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def log_message(self, fmt, *args):
-        log.info("http %s", fmt % args)
+        msg = fmt % args
+        extra = ""
+        t0 = getattr(self, "_t0", None)
+        if t0:
+            extra = " (%dms)" % int((time.time() - t0) * 1000)
+        log.info("http %s%s", msg, extra)
 
     def _handle(self, method):
-        global REQUESTS, LAST_REQUEST_TS
+        global REQUESTS, LAST_REQUEST_TS, ERRORS
+        self._t0 = time.time()
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = parsed.query
@@ -341,6 +357,8 @@ class Handler(BaseHTTPRequestHandler):
                 "version": ver,
                 "uptime": int(time.time() - STARTED),
                 "requests": REQUESTS,
+                "errors": ERRORS,
+                "drops": DROPS,
                 "lastRequest": int(LAST_REQUEST_TS) if LAST_REQUEST_TS else 0,
                 "lastPublish": int(LAST_PUBLISH_TS) if LAST_PUBLISH_TS else 0,
                 "inUse": bool(LAST_REQUEST_TS and time.time() - LAST_REQUEST_TS < 300),
@@ -384,6 +402,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             raw, ctype, status = forward(method, path, query, _safe_headers(self.headers), body)
         except Exception as e:
+            ERRORS += 1
             log.warning("forward %s %s failed: %s", method, path, e)
             self.send_response(502)
             body = json.dumps({"subsonic-response": {"status": "failed", "error": {"code": 0, "message": str(e)}}}).encode()
@@ -411,6 +430,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self._wfile_write(body)
             except Exception as e:
+                ERRORS += 1
                 log.warning("filter failed for %s: %s (passing through)", path, e)
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
@@ -518,14 +538,22 @@ def _count_songs(obj):
 
 
 def start_heartbeat():
-    """Post a liveness heartbeat to the webhook dashboard (WEBHOOK_URL)."""
+    """Local log heartbeat every 60s + optional liveness post to the webhook
+    dashboard (WEBHOOK_URL)."""
     import threading
 
     url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
-    if not url:
-        return
 
-    def _loop():
+    def _log_loop():
+        while True:
+            time.sleep(60)
+            age = int(time.time() - LAST_PUBLISH_TS) if LAST_PUBLISH_TS else -1
+            log.info(
+                "heartbeat: uptime=%ds requests=%d drops=%d errors=%d filters_age=%ss",
+                int(time.time() - STARTED), REQUESTS, DROPS, ERRORS, age,
+            )
+
+    def _post_loop():
         while True:
             time.sleep(60)
             try:
@@ -538,7 +566,9 @@ def start_heartbeat():
             except Exception:
                 pass
 
-    threading.Thread(target=_loop, daemon=True).start()
+    threading.Thread(target=_log_loop, daemon=True).start()
+    if url:
+        threading.Thread(target=_post_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
