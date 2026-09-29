@@ -1118,10 +1118,13 @@ def filters_html():
     skip = st.get("skipMode", "none")
     # ponytail: keyword list rendered as the same thumb+text rows as Recently
     # played — matching row rhythm instead of a wrapping chip cloud.
+    # Trimmed to 10 rows; header meta keeps the real total visible.
     kw_rows = "".join(
         "<div class='pl'><div class='pl-ph' style='background:linear-gradient(135deg,#2dd4bf,#0a0e1a)'></div>"
-        "<div class='t'>%s</div></div>" % esc(k) for k in kws
+        "<div class='t'>%s</div></div>" % esc(k) for k in kws[:10]
     ) or "<div class='note'>(none)</div>"
+    if len(kws) > 10:
+        kw_rows += "<div class='dim' style='padding-top:6px'>+%d more in plugin settings</div>" % (len(kws) - 10)
     cov_labels = [
         ("suggested", "Suggested / shuffled"),
         ("playlists", "Playlists / favorites"),
@@ -1163,14 +1166,6 @@ def filters_html():
     out += "<div class='fi'>"
     out += ("<div><h2>Filler keywords <span class='meta'>%d &middot; filter <b>%s</b></span></h2>"
             "%s</div>") % (len(kws), "ON" if kw_on else "OFF", kw_rows)
-    # ponytail: coverage meta condensed to a single 11px line — five verbose
-    # pills + a separate skip-mode line cost a whole block of vertical space.
-    cov_on = ", ".join(lbl.split(" / ")[0].lower() for k2, lbl in cov_labels if cov.get(k2)) or "none"
-    out += ("<div><h2>Coverage</h2><div class='sc-stats'>"
-            "<span>scope <b>%d/%d</b></span><span>on: %s</span>"
-            "<span>skip <b>%s</b></span></div></div>") % (
-        sum(1 for k2, _ in cov_labels if cov.get(k2)), len(cov_labels),
-        esc(cov_on), esc(skip))
     out += ("<div><h2>Published to proxy</h2><div class='sc-stats'>"
             "<span>skip-heavy <b>%s</b></span><span>weights <b>%s</b></span>"
             "<span>requests <b>%s</b></span><span>dropped <b>%s</b></span>"
@@ -1179,6 +1174,14 @@ def filters_html():
         st.get("excluded", 0), st.get("weights", 0), st.get("requests", 0),
         st.get("drops", 0), st.get("errors", 0),
         _fmt_ts(pub) if pub else "never", _age(pub) if pub else "never")
+    # ponytail: coverage meta condensed to a single 11px line and parked at the
+    # bottom of the box — least-important state, lowest on the page.
+    cov_on = ", ".join(lbl.split(" / ")[0].lower() for k2, lbl in cov_labels if cov.get(k2)) or "none"
+    out += ("<div><h2>Coverage</h2><div class='sc-stats'>"
+            "<span>scope <b>%d/%d</b></span><span>on: %s</span>"
+            "<span>skip <b>%s</b></span></div></div>") % (
+        sum(1 for k2, _ in cov_labels if cov.get(k2)), len(cov_labels),
+        esc(cov_on), esc(skip))
     return out + "</div></div>"
 
 
