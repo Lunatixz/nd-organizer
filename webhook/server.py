@@ -1116,7 +1116,12 @@ def filters_html():
     kw_on = bool(st.get("keywordFilter", True))
     cov = st.get("coverage") or {}
     skip = st.get("skipMode", "none")
-    chips = "".join("<span class='kw'>%s</span>" % esc(k) for k in kws) or "<span class='note'>(none)</span>"
+    # ponytail: keyword list rendered as the same thumb+text rows as Recently
+    # played — matching row rhythm instead of a wrapping chip cloud.
+    kw_rows = "".join(
+        "<div class='pl'><div class='pl-ph' style='background:linear-gradient(135deg,#2dd4bf,#0a0e1a)'></div>"
+        "<div class='t'>%s</div></div>" % esc(k) for k in kws
+    ) or "<div class='note'>(none)</div>"
     cov_labels = [
         ("suggested", "Suggested / shuffled"),
         ("playlists", "Playlists / favorites"),
@@ -1124,10 +1129,6 @@ def filters_html():
         ("albums", "Albums / folders"),
         ("search", "Search results"),
     ]
-    cov_pills = "".join(
-        "<span class='tag %s'>%s: %s</span>" % ("ok" if cov.get(k) else "", label, "on" if cov.get(k) else "off")
-        for k, label in cov_labels
-    )
     filtered = [it for it in (st.get("filtered") or []) if isinstance(it, dict)][:12]
     drop_rows = ""
     if filtered:
@@ -1161,9 +1162,15 @@ def filters_html():
     out += "<div class='fl'><h2>Recently filtered <span class='meta'>by the proxy</span></h2>%s</div>" % drop_rows
     out += "<div class='fi'>"
     out += ("<div><h2>Filler keywords <span class='meta'>%d &middot; filter <b>%s</b></span></h2>"
-            "<div>%s</div></div>") % (len(kws), "ON" if kw_on else "OFF", chips)
-    out += ("<div><h2>Coverage</h2><div class='kv'>%s</div>"
-            "<div class='sc-stats'><span>skip mode <b>%s</b></span></div></div>") % (cov_pills, esc(skip))
+            "%s</div>") % (len(kws), "ON" if kw_on else "OFF", kw_rows)
+    # ponytail: coverage meta condensed to a single 11px line — five verbose
+    # pills + a separate skip-mode line cost a whole block of vertical space.
+    cov_on = ", ".join(lbl.split(" / ")[0].lower() for k2, lbl in cov_labels if cov.get(k2)) or "none"
+    out += ("<div><h2>Coverage</h2><div class='sc-stats'>"
+            "<span>scope <b>%d/%d</b></span><span>on: %s</span>"
+            "<span>skip <b>%s</b></span></div></div>") % (
+        sum(1 for k2, _ in cov_labels if cov.get(k2)), len(cov_labels),
+        esc(cov_on), esc(skip))
     out += ("<div><h2>Published to proxy</h2><div class='sc-stats'>"
             "<span>skip-heavy <b>%s</b></span><span>weights <b>%s</b></span>"
             "<span>requests <b>%s</b></span><span>dropped <b>%s</b></span>"
@@ -2521,7 +2528,7 @@ header{position:sticky;top:0;z-index:30;background:rgba(10,14,26,.94);backdrop-f
 .kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--grad)}
 .kpi b{display:block;font-size:22px;font-weight:700;color:#e6eaf1;letter-spacing:-.5px}
 .kpi span{display:block;margin-top:2px;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.6px}
-.hero{display:grid;grid-template-columns:minmax(320px,420px) 1fr;gap:16px;align-items:start;margin-bottom:16px}
+.hero{display:grid;grid-template-columns:1fr;gap:16px;align-items:stretch;margin-bottom:16px}
 .hero .card{margin-bottom:0}
 .np-hero{display:flex;gap:14px;align-items:center}
 .np-cover{width:104px;height:104px;border-radius:10px;object-fit:cover;background:var(--surface2);flex-shrink:0}
@@ -2542,7 +2549,9 @@ header{position:sticky;top:0;z-index:30;background:rgba(10,14,26,.94);backdrop-f
 .fgrid{display:grid;grid-template-columns:minmax(340px,1fr) 2fr;gap:16px;align-items:start}
 .fgrid .fi{display:grid;gap:16px}
 @media (max-width:1100px){.fgrid{grid-template-columns:1fr}}
-.played-filters{display:grid;grid-template-columns:minmax(240px,360px) 1fr;gap:16px;align-items:start}
+.played-filters{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:stretch}
+.played-filters>details{height:100%}
+.played-filters .collapse-body{max-height:520px;overflow:auto}
 @media (max-width:900px){.played-filters{grid-template-columns:1fr}}
 .kw{display:inline-block;background:var(--surface2);border:1px solid var(--border2);border-radius:12px;padding:3px 9px;font-size:11px;color:#cbd5e1;margin:0 4px 4px 0}
 h1{font-size:20px;margin:0;color:var(--accent);display:flex;align-items:center;gap:10px;font-weight:600}
@@ -2726,8 +2735,8 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
 __BANNER__
 __KPI__
 <div class="hero">
-<div>__NOWCARD__</div>
 <div id="activity">__NOW__</div>
+<div>__NOWCARD__</div>
 </div>
 <div style="text-align:right;margin:0 0 14px"><button class="btn-grad" onclick="forceRescan()">Force Rescan</button></div>
 <details class="collapse" open id="added"><summary>Recently added</summary><div class="collapse-body">__ADDED__</div></details>
