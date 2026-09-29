@@ -150,7 +150,15 @@ impl Kv {
                     Err(e) => {
                         crate::wasm::log_warn(&format!("mysql get failed ({e}), falling back to host"));
                         MYSQL_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
-                        host::kvstore::get(key).map_err(|e| e.to_string())
+                        // ponytail: a miss in the fallback store is NOT proof the key
+                        // is absent — mysql may hold it while the sidecar is down.
+                        // Callers that treat Ok(None) as "empty" (index completion!)
+                        // corrupt state during an outage, so surface an error they
+                        // retry instead; after reconnect the real read succeeds.
+                        match host::kvstore::get(key).map_err(|e| e.to_string())? {
+                            Some(v) => Ok(Some(v)),
+                            None => Err(format!("mysql down and no host fallback for key {key}")),
+                        }
                     }
                 }
             }

@@ -632,10 +632,12 @@ pub fn index_step(
     let root = lib_root(library_id)?;
     let files_key = walk_files_key(library_id);
     let cursor_key = format!("scan.index_cursor.{library_id}");
-    let mut files: Vec<(String, i64)> = crate::store::kv()
+    // ponytail: propagate read errors — during a mysql outage the fallback
+    // store misses, and treating that as "no files" silently completed the
+    // index phase (twice: deleted cursor + enqueued group with 0 files).
+    let files: Vec<(String, i64)> = crate::store::kv()
         .get(&files_key)
-        .ok()
-        .flatten()
+        .map_err(|e| format!("index_step: files_key read failed: {e}"))?
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_default();
 
@@ -1322,10 +1324,11 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 
     let file_list: Vec<(String, i64)> = if has_remaining {
         // Resuming — load from remaining_key (smaller, already truncated).
+        // ponytail: propagate read errors — an outage-miss must fail the task
+        // (retry after reconnect), not look like an empty list ending the pass.
         let remaining: Vec<(String, i64)> = crate::store::kv()
             .get(&remaining_key)
-            .ok()
-            .flatten()
+            .map_err(|e| format!("group_step: remaining_key read failed: {e}"))?
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
         crate::wasm::log_info(&format!(
@@ -1338,8 +1341,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         let paths_key = format!("scan.group_paths.{library_id}");
         let paths: Vec<String> = crate::store::kv()
             .get(&paths_key)
-            .ok()
-            .flatten()
+            .map_err(|e| format!("group_step: paths_key read failed: {e}"))?
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
         if paths.is_empty() {
@@ -1426,7 +1428,10 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
                 }
             }
             Err(e) => {
+                // ponytail: fail the task on kv errors — swallowing them made the
+                // group phase "complete" with 0 files whenever mysql was down.
                 crate::wasm::log_warn(&format!("group_step: get_many failed: {e}"));
+                return Err(format!("group_step: get_many: {e}"));
             }
         }
         cursor += chunk.len();
@@ -1454,15 +1459,21 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     // Previous chunks saved their entries under scan.group_entries.{id}.{count}.
     let mut all_entries: Vec<(String, TrackTags)> = entries;
     // Scan for any chunk entry keys from previous invocations.
-    if let Ok(keys) = crate::store::kv().list(&format!("scan.group_entries.{library_id}.")) {
-        for k in keys {
-            if let Ok(Some(v)) = crate::store::kv().get(&k) {
-                if let Ok(mut prev) = serde_json::from_slice::<Vec<(String, TrackTags)>>(&v) {
-                    all_entries.append(&mut prev);
-                }
+    // ponytail: propagate kv errors here — swallowing them merged partial
+    // entries during an outage and planned an incomplete pass.
+    let chunk_keys = crate::store::kv()
+        .list(&format!("scan.group_entries.{library_id}."))
+        .map_err(|e| format!("group_step: list group entries: {e}"))?;
+    for k in chunk_keys {
+        if let Some(v) = crate::store::kv()
+            .get(&k)
+            .map_err(|e| format!("group_step: read {k}: {e}"))?
+        {
+            if let Ok(mut prev) = serde_json::from_slice::<Vec<(String, TrackTags)>>(&v) {
+                all_entries.append(&mut prev);
             }
-            let _ = crate::store::kv().delete(&k);
         }
+        let _ = crate::store::kv().delete(&k);
     }
     let _ = crate::store::kv().delete(&cursor_key);
     let _ = crate::store::kv().delete(&entries_key);
