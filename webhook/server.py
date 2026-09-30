@@ -423,11 +423,11 @@ SMART_PRESETS = [
     {"name": "Recently Played", "comment": "Tracks played in the last 30 days",
      "all": [{"inTheLast": {"lastplayed": 30}}], "sort": "-lastplayed"},
     {"name": "Most Played", "comment": "Top 100 most-played tracks",
-     "all": [{"gt": {"playcount": 10}}], "sort": "-playcount", "limit": 100},
+     "all": [{"gt": {"playcount": 0}}], "sort": "-playcount", "limit": 100},
     {"name": "Loved Tracks", "comment": "All favourited tracks",
      "all": [{"is": {"loved": True}}], "sort": "-dateadded"},
     {"name": "Top Rated", "comment": "Tracks rated 4+ stars",
-     "all": [{"gt": {"rating": 4}}], "sort": "-rating"},
+     "all": [{"gt": {"rating": 3}}], "sort": "-rating"},
     {"name": "Never Played", "comment": "Tracks you haven't heard yet",
      "all": [{"or": [{"is": {"playcount": 0}}, {"is": {"lastplayed": 0}}]}], "sort": "random"},
     {"name": "Recently Added", "comment": "Newest additions to your library",
@@ -545,8 +545,8 @@ def playlist_html():
             "<option value='bpm'>BPM</option><option value='duration'>Duration (s)</option>"
             "<option value='albumartist'>Artist</option><option value='album'>Album</option>"
             "<option value='filetype'>File Type</option></select>"
-            "<select id='plOp'><option value='gt'>>=</option>"
-            "<option value='lt'>&lt;=</option><option value='is'>equals</option>"
+            "<select id='plOp'><option value='gt'>&gt;</option>"
+            "<option value='lt'>&lt;</option><option value='is'>equals</option>"
             "<option value='contains'>contains</option></select>"
             "<input id='plVal' placeholder='value' style='width:120px'>"
             "<button type='submit'>Save</button></form>")
