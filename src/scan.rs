@@ -1328,21 +1328,15 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let entries_key = format!("scan.group_entries.{library_id}");
     let remaining_key = format!("scan.group_remaining.{library_id}");
 
-    // Load or initialize file list.
-    let mut cursor: usize = crate::store::kv()
-        .get(&cursor_key)
-        .ok()
-        .flatten()
-        .and_then(|v| String::from_utf8(v).ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    // Always prefer remaining_key (set by previous chunks) over indexed_key.
-    // Loading from indexed_key (full list) is slow for large libraries.
+    // Load the working list. The remaining list itself IS the cursor: each
+    // task consumes the list it loads, and only a mid-list budget hit saves a
+    // tail. (The old first-chunk truncation only worked when the 15s budget
+    // actually hit — with fast KV reads it fell through to the completion
+    // path with 500 files, deleted the 42k tail and grouped a sliver.)
     let has_remaining = crate::store::kv().get(&remaining_key).ok().flatten().is_some();
 
-    let file_list: Vec<(String, i64)> = if has_remaining {
-        // Resuming — load from remaining_key (smaller, already truncated).
+    let mut file_list: Vec<(String, i64)> = if has_remaining {
+        // Resuming — load the tail left by the previous task.
         // ponytail: propagate read errors — an outage-miss must fail the task
         // (retry after reconnect), not look like an empty list ending the pass.
         let remaining: Vec<(String, i64)> = crate::store::kv()
@@ -1350,13 +1344,11 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             .map_err(|e| format!("group_step: remaining_key read failed: {e}"))?
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
-        crate::wasm::log_info(&format!(
-            "group_step: resuming from remaining list, {} files, cursor={}",
-            remaining.len(), cursor
-        ));
         remaining
     } else {
-        // First chunk — load from paths_key (file paths only, fast deserialization).
+        Vec::new()
+    };
+    if file_list.is_empty() {
         let paths_key = format!("scan.group_paths.{library_id}");
         let paths: Vec<String> = crate::store::kv()
             .get(&paths_key)
@@ -1367,37 +1359,23 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             crate::wasm::log_info("group_step: indexed key empty, skipping (walk not complete yet)");
             return Ok((0, 0));
         }
-        let _ = crate::store::kv().set(&entries_key, paths.len().to_string().into_bytes());
         crate::wasm::log_info(&format!(
             "group_step: loaded {} files from paths key, processing...",
             paths.len()
         ));
-        // Convert paths to (path, mtime=0) tuples for compatibility with existing code.
-        let list: Vec<(String, i64)> = paths.into_iter().map(|p| (p, 0i64)).collect();
-        // For large lists, save the remainder immediately so subsequent calls
-        // load from remaining_key instead of re-loading the full list.
-        let chunk_size = 500;
-        if list.len() > chunk_size {
-            let remaining: Vec<(String, i64)> = list[chunk_size..].to_vec();
-            let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&remaining).unwrap_or_default());
-            let _ = crate::store::kv().set(&cursor_key, chunk_size.to_string().into_bytes());
-            list[..chunk_size].to_vec()
-        } else {
-            list
-        }
-    };
-
-    if file_list.is_empty() {
-        // No files — check if we already grouped.
-        if let Ok(Some(v)) = crate::store::kv().get(&format!("scan.donev2.{library_id}")) {
-            if v == b"1" {
-                crate::wasm::log_info("group_step: already done, skipping");
-                return Ok((0, 0));
-            }
-        }
-        crate::wasm::log_info("group_step: no files to group");
-        return Ok((0, 0));
+        file_list = paths.into_iter().map(|p| (p, 0i64)).collect();
+    } else {
+        crate::wasm::log_info(&format!(
+            "group_step: resuming from remaining list, {} files",
+            file_list.len()
+        ));
     }
+    // Mark grouping active so is_pipeline_active holds stats/meta off the
+    // queue while group tasks chain (rewritten on each budget hit, deleted
+    // when the pass really completes).
+    let _ = crate::store::kv().set(&cursor_key, b"0".to_vec());
+    // ponytail: per-task local offset only — the saved tail carries position.
+    let mut cursor: usize = 0;
 
     crate::wasm::log_info(&format!(
         "group_step: reading tags from cursor {}/{}...",
@@ -1406,9 +1384,11 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 
     // Read tags from individual KV entries in time-budgeted batches.
     let scan_start = std::time::Instant::now();
-    let time_budget = std::time::Duration::from_secs(15);
+    // 10s, not 15: the completion path (merge + reports + plan enqueue) needs
+    // the rest of the 24s budget before the 30s host deadline.
+    let time_budget = std::time::Duration::from_secs(10);
     let mut entries: Vec<(String, TrackTags)> = Vec::new();
-    // ponytail: 500 KV reads per chunk → slow in WASM. 50 keeps each chunk under 15s.
+    // ponytail: 500 KV reads per chunk → slow in WASM. 50 keeps each chunk under budget.
     let batch_size = 50;
     let mut hit_budget = false;
 
@@ -1463,8 +1443,13 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&remaining).unwrap_or_default());
         let _ = crate::store::kv().set(&cursor_key, cursor.to_string().into_bytes());
         // Save this chunk's entries to a numbered key to avoid O(n²)
-        // reload-extend-save on every chunk. Merge at the end.
-        let chunk_entries_key = format!("scan.group_entries.{library_id}.{}", entries.len());
+        // reload-extend-save on every chunk. Merge at the end. Index from the
+        // existing key count — entries.len() collides across tasks.
+        let idx = crate::store::kv()
+            .list(&format!("scan.group_entries.{library_id}."))
+            .map_err(|e| format!("group_step: list group entries: {e}"))?
+            .len();
+        let chunk_entries_key = format!("scan.group_entries.{library_id}.{idx}");
         let _ = crate::store::kv().set(&chunk_entries_key, serde_json::to_vec(&entries).unwrap_or_default());
         crate::wasm::log_info(&format!(
             "group_step: time budget hit, {} remaining files, {} entries this chunk, re-enqueueing",
@@ -1520,18 +1505,25 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         ));
     }
 
-    // Report files across the library that share an audio fingerprint (size +
-    // content sample) - possible duplicates. Report-only, nothing moves.
-    if cfg.detect_duplicates {
-        report_cross_duplicates(cfg, &real_root, &verified, task_start, task_budget);
-    }
-    // Essentia fingerprint-based duplicate/cover detection (enhanced detection).
+    // Report-only, nothing moves; both truncate to a partial report rather
+    // than cost us the plan enqueue at the end of this step. Essentia first —
+    // HTTP compares need the bigger window, cross-dup below is cheap local
+    // stats per file.
     if cfg.essentia_fingerprint && !cfg.essentia_url.trim().is_empty() {
         report_essentia_duplicates(cfg, &real_root, &verified, task_start, task_budget);
+        crate::wasm::log_info("group_step: essentia-dup report done");
+    }
+    if cfg.detect_duplicates {
+        report_cross_duplicates(cfg, &real_root, &verified, task_start, task_budget);
+        crate::wasm::log_info("group_step: cross-dup report done");
     }
 
     let groups = crate::organizer::group_entries(&verified);
     let groups = apply_album_budget(cfg, groups);
+    crate::wasm::log_info(&format!(
+        "group_step: {} album groups after budget, enqueueing plans...",
+        groups.len()
+    ));
     if cfg.star_tally_enabled {
         let pruned = crate::stats::host_stats::prune_star_tallies();
         if pruned > 0 {
@@ -1567,7 +1559,7 @@ fn report_cross_duplicates(
     let mut truncated = false;
     let mut by_size: HashMap<u64, Vec<String>> = HashMap::new();
     for (rel, _) in verified {
-        if remain_ms(start, budget) < 1_000 {
+        if remain_ms(start, budget) < 6_000 {
             truncated = true;
             break;
         }
@@ -1578,7 +1570,7 @@ fn report_cross_duplicates(
     let mut fp_map: HashMap<u64, Vec<String>> = HashMap::new();
     'files: for (_, rels) in by_size.iter().filter(|(_, v)| v.len() > 1) {
         for rel in rels {
-            if remain_ms(start, budget) < 1_000 {
+            if remain_ms(start, budget) < 6_000 {
                 truncated = true;
                 break 'files;
             }

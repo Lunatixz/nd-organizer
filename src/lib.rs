@@ -180,6 +180,11 @@ pub(crate) mod wasm {
                 batch_total: total as i32,
             })?;
             enqueued += 1;
+            if enqueued % 100 == 0 {
+                log_info(&format!(
+                    "enqueue_plan_tasks: {enqueued}/{total} plan tasks"
+                ));
+            }
         }
         Ok(enqueued)
     }
@@ -334,6 +339,41 @@ pub(crate) mod wasm {
                         }
                     }
                     log_info(&format!("init: enqueued {} walk tasks", target_libs.len()));
+                }
+            }
+            // Enable-time pipeline resume: a mid-pass re-enable with intact
+            // scan state (run_on_startup off) would otherwise stall — nothing
+            // re-enqueues group after its task dies. Fires only at the group
+            // phase: walk/index/verify chain on their own, plan/apply tasks
+            // are queued by group itself. Normal restarts wipe these keys
+            // above, so this stays silent on a fresh start.
+            for &library_id in &target_libraries(&cfg) {
+                let present = |p: &str| {
+                    crate::store::kv()
+                        .get(&format!("{p}{library_id}"))
+                        .ok()
+                        .flatten()
+                        .is_some()
+                };
+                if present("scan.group_paths.")
+                    && !present("scan.unverified.")
+                    && !present("scan.index_cursor.")
+                    && !present("scan.walkv2.")
+                    && !present("scan.donev2.")
+                    && crate::store::kv()
+                        .get(&format!("run.current.{library_id}"))
+                        .ok()
+                        .flatten()
+                        .is_none()
+                {
+                    match enqueue_group_task(library_id) {
+                        Ok(()) => log_info(&format!(
+                            "init: resuming pipeline at group for library {library_id}"
+                        )),
+                        Err(e) => log_warn(&format!(
+                            "init: resume group enqueue failed for {library_id}: {e}"
+                        )),
+                    }
                 }
             }
             if !cfg.schedule_cron.trim().is_empty() {
