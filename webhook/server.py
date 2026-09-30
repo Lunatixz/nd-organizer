@@ -2728,8 +2728,8 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
 <header>
 <div class="hrow">
 <h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px"><span class="grad-text">nd-organizer</span></h1>
-<span class="tag mode">__MODE__</span>
 <span id="clock">&ndash;&ndash;:&ndash;&ndash;:&ndash;&ndash;</span>
+<button class="btn-grad" onclick="forceRescan()" style="padding:5px 14px;font-size:.85rem">Force Rescan</button>
 <nav class="hnav"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#playback">Playback</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a></nav>
 </div>
 <div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; checked __UPDATED__ &middot; auto-refresh 30s &middot; log: __LOG__</div>
@@ -2742,7 +2742,6 @@ __KPI__
 <div id="activity">__NOW__</div>
 <div>__NOWCARD__</div>
 </div>
-<div style="text-align:right;margin:0 0 14px"><button class="btn-grad" onclick="forceRescan()">Force Rescan</button></div>
 <details class="collapse" open id="added"><summary>Recently added</summary><div class="collapse-body">__ADDED__</div></details>
 <div class="played-filters">
 <details class="collapse" open id="played"><summary>Recently played</summary><div class="collapse-body">__PLAYED__</div></details>
