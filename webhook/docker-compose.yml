@@ -23,7 +23,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - NAVIDROME_DB=/data/nd/navidrome.db   # radio management
-      - PLAYLIST_DIR=/data/nd/playlists      # smart playlist writing
+      - PLAYLIST_DIR=/data/nd/playlist     # smart playlist writing (matches ND_PLAYLISTSPATH=playlist)
     networks:
       - stack_network
 
