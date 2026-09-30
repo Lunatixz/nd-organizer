@@ -1431,6 +1431,20 @@ pub(crate) mod wasm {
                                 let _ = crate::store::kv().delete(&k);
                             }
                         }
+                        // Derived per-pass state too: init clears these on reload,
+                        // but a dashboard force-rescan runs without one — a stale
+                        // index cursor or list would resume the fresh pass wrong.
+                        for prefix in [
+                            "scan.indexed.", "scan.group_paths.", "scan.index_cursor.",
+                            "scan.unverified.", "scan.group_cursor.", "scan.group_entries.",
+                            "scan.group_remaining.", "scan.verify_job.", "scan.donev2.",
+                        ] {
+                            if let Ok(keys) = crate::store::kv().list(prefix) {
+                                for k in keys {
+                                    let _ = crate::store::kv().delete(&k);
+                                }
+                            }
+                        }
                         // Clear the DB change fingerprint so detect_db_change resets
                         let _ = crate::store::kv().delete("scan.last_db_hash");
                     }

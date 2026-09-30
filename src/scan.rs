@@ -633,6 +633,8 @@ pub fn index_step(
     let root = lib_root(library_id)?;
     let files_key = walk_files_key(library_id);
     let cursor_key = format!("scan.index_cursor.{library_id}");
+    let indexed_key = format!("scan.indexed.{library_id}");
+    let paths_key = format!("scan.group_paths.{library_id}");
     // ponytail: propagate read errors — during a mysql outage the fallback
     // store misses, and treating that as "no files" silently completed the
     // index phase (twice: deleted cursor + enqueued group with 0 files).
@@ -663,6 +665,14 @@ pub fn index_step(
     if i > files.len() {
         i = 0;
     }
+
+    // Both list keys hold walk_files content, which is frozen for the whole
+    // index phase (walk completes first; init/force-rescan clear both keys),
+    // so after the first chunk of a pass they never change. Re-serializing
+    // them every chunk costs ~10s of wasm CPU + two multi-MB KV writes —
+    // the tail that was killing tasks at the 30s deadline mid-pass.
+    let have_lists = crate::store::kv().get(&indexed_key).ok().flatten().is_some()
+        && crate::store::kv().get(&paths_key).ok().flatten().is_some();
 
     let files_per_task = cfg.files_per_scan_task.max(1);
     let cap = cfg.max_scan_entries;
@@ -747,13 +757,14 @@ pub fn index_step(
         );
         // Save incremental progress to indexed key so group_step can read it
         // even if the final completion times out (40K serialization can exceed WASM budget).
-        let indexed_key = format!("scan.indexed.{library_id}");
-        let _ = crate::store::kv().set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default());
-        // Also save paths-only for group_step.
-        let paths_key = format!("scan.group_paths.{library_id}");
-        let paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
-        if let Err(e) = crate::store::kv().set(&paths_key, serde_json::to_vec(&paths).unwrap_or_default()) {
-            crate::wasm::log_warn(&format!("index_step: failed to write paths_key (incremental): {e}"));
+        // Skipped when both keys already exist this pass — content unchanged.
+        if !have_lists {
+            let _ = crate::store::kv().set(&indexed_key, serde_json::to_vec(&files).unwrap_or_default());
+            // Also save paths-only for group_step.
+            let paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
+            if let Err(e) = crate::store::kv().set(&paths_key, serde_json::to_vec(&paths).unwrap_or_default()) {
+                crate::wasm::log_warn(&format!("index_step: failed to write paths_key (incremental): {e}"));
+            }
         }
         post_scan_status(cfg, library_id, processed, &last_rel);
         crate::wasm::enqueue_index_task(library_id)?;
@@ -764,22 +775,25 @@ pub fn index_step(
         // This prevents temporarily doubling storage (which can hit the 100MB KV limit
         // and cause WAL bloat that blocks plugin reload after crashes).
         let _ = crate::store::kv().delete(&files_key);
-        let indexed_key = format!("scan.indexed.{library_id}");
-        let files_bytes = serde_json::to_vec(&files).unwrap_or_default();
-        crate::store::kv()
-            .set(&indexed_key, files_bytes.clone())
-            .map_err(|e| e.to_string())?;
-        // Store file paths only (no mtimes) for group_step to read quickly.
-        // The full indexed_key (with mtimes) is too slow to deserialize in WASM.
-        let paths_key = format!("scan.group_paths.{library_id}");
-        let paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
-        let paths_bytes = serde_json::to_vec(&paths).unwrap_or_default();
-        crate::wasm::log_info(&format!(
-            "index_step: writing paths_key={}, size={} bytes",
-            paths_key, paths_bytes.len()
-        ));
-        if let Err(e) = crate::store::kv().set(&paths_key, paths_bytes) {
-            crate::wasm::log_warn(&format!("index_step: failed to write paths_key: {e}"));
+        // Rewrite the list keys only if the incremental copy never landed —
+        // with files_key gone, have_lists is what group_step falls back on
+        // when this completion call dies mid-write.
+        if !have_lists {
+            let files_bytes = serde_json::to_vec(&files).unwrap_or_default();
+            crate::store::kv()
+                .set(&indexed_key, files_bytes)
+                .map_err(|e| e.to_string())?;
+            // Store file paths only (no mtimes) for group_step to read quickly.
+            // The full indexed_key (with mtimes) is too slow to deserialize in WASM.
+            let paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
+            let paths_bytes = serde_json::to_vec(&paths).unwrap_or_default();
+            crate::wasm::log_info(&format!(
+                "index_step: writing paths_key={}, size={} bytes",
+                paths_key, paths_bytes.len()
+            ));
+            if let Err(e) = crate::store::kv().set(&paths_key, paths_bytes) {
+                crate::wasm::log_warn(&format!("index_step: failed to write paths_key: {e}"));
+            }
         }
         // Delete cursor AFTER paths_key is written — group checks cursor to defer.
         let _ = crate::store::kv().delete(&cursor_key);
