@@ -108,7 +108,7 @@ pub mod host_lidarr {
             "lidarr",
             &format!("{}/api/v1/system/status", base_url(cfg)),
             &headers_with_key(cfg),
-            10_000,
+            5_000,
         ) {
             return Err("Lidarr offline (cooldown)".into());
         }
@@ -120,7 +120,7 @@ pub mod host_lidarr {
             headers,
             no_follow_redirects: false,
             body,
-            timeout_ms: 15_000,
+            timeout_ms: 8_000,
         };
         match host::http::send(req) {
             Ok(Some(resp)) if (200..300).contains(&resp.status_code) => {

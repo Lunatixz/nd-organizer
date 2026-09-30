@@ -62,7 +62,7 @@ pub fn fetch(release_mbid: &str, kind: ArtKind) -> Option<Vec<u8>> {
         "coverartarchive",
         "https://coverartarchive.org",
         &HashMap::new(),
-        15_000,
+        5_000,
     ) {
         return None; // offline - fail fast (auto-recovers via probe)
     }
@@ -78,7 +78,7 @@ pub fn fetch(release_mbid: &str, kind: ArtKind) -> Option<Vec<u8>> {
         )]),
         no_follow_redirects: false,
         body: vec![],
-        timeout_ms: 15_000,
+        timeout_ms: 8_000,
     };
     match host::http::send(req) {
         Ok(Some(resp)) if resp.status_code == 200 && !resp.body.is_empty() => {

@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, Mode};
 use crate::organizer::is_audio;
+use crate::state::{cap_ms, remain_ms};
 use crate::tags::TrackTags;
 
 fn lib_root(library_id: i32) -> Result<std::path::PathBuf, String> {
@@ -1277,6 +1278,10 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 
     // Post group phase so the dashboard shows "Grouping files..."
     post_phase_status(cfg, library_id, "group");
+    // ponytail: 24s of 30 — the dup reports below must never cost us the
+    // enqueue_plan_tasks call at the end of this step.
+    let task_start = std::time::Instant::now();
+    let task_budget = std::time::Duration::from_secs(24);
 
     // Skip if verify is still active — the unverified list means verify hasn't
     // finished. Stale group tasks from previous runs can block the queue otherwise.
@@ -1504,11 +1509,11 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     // Report files across the library that share an audio fingerprint (size +
     // content sample) - possible duplicates. Report-only, nothing moves.
     if cfg.detect_duplicates {
-        report_cross_duplicates(cfg, &real_root, &verified);
+        report_cross_duplicates(cfg, &real_root, &verified, task_start, task_budget);
     }
     // Essentia fingerprint-based duplicate/cover detection (enhanced detection).
     if cfg.essentia_fingerprint && !cfg.essentia_url.trim().is_empty() {
-        report_essentia_duplicates(cfg, &real_root, &verified);
+        report_essentia_duplicates(cfg, &real_root, &verified, task_start, task_budget);
     }
 
     let groups = crate::organizer::group_entries(&verified);
@@ -1541,27 +1546,48 @@ fn report_cross_duplicates(
     cfg: &Config,
     root: &str,
     verified: &[(String, crate::tags::TrackTags)],
+    start: std::time::Instant,
+    budget: std::time::Duration,
 ) {
     use std::collections::HashMap;
+    let mut truncated = false;
     let mut by_size: HashMap<u64, Vec<String>> = HashMap::new();
     for (rel, _) in verified {
+        if remain_ms(start, budget) < 1_000 {
+            truncated = true;
+            break;
+        }
         if let Ok(md) = std::fs::metadata(std::path::Path::new(root).join(rel)) {
             by_size.entry(md.len()).or_default().push(rel.clone());
         }
     }
     let mut fp_map: HashMap<u64, Vec<String>> = HashMap::new();
-    for (_, rels) in by_size.iter().filter(|(_, v)| v.len() > 1) {
+    'files: for (_, rels) in by_size.iter().filter(|(_, v)| v.len() > 1) {
         for rel in rels {
+            if remain_ms(start, budget) < 1_000 {
+                truncated = true;
+                break 'files;
+            }
             if let Some(fp) = content_fingerprint(&std::path::Path::new(root).join(rel)) {
                 fp_map.entry(fp).or_default().push(rel.clone());
             }
         }
+    }
+    if truncated {
+        crate::wasm::log_warn(&format!(
+            "cross-dup: deadline hit — partial duplicate scan ({} size bucket(s) of {} file(s))",
+            by_size.len(),
+            verified.len()
+        ));
     }
     let dupes: Vec<&Vec<String>> = fp_map.values().filter(|v| v.len() > 1).collect();
     if dupes.is_empty() {
         return;
     }
     let mut summary = String::from("nd-organizer: possible duplicate audio files:\n");
+    if truncated {
+        summary.push_str("  (partial: scan deadline hit, more pairs next run)\n");
+    }
     for d in dupes {
         let joined = d.join(" <=> ");
         crate::wasm::log_warn(&format!("duplicate audio fingerprint: {joined}"));
@@ -1577,6 +1603,8 @@ fn report_essentia_duplicates(
     cfg: &Config,
     root: &str,
     verified: &[(String, crate::tags::TrackTags)],
+    start: std::time::Instant,
+    budget: std::time::Duration,
 ) {
     let base = cfg.essentia_url.trim().trim_end_matches('/');
     if base.is_empty() {
@@ -1585,11 +1613,18 @@ fn report_essentia_duplicates(
     let groups = crate::organizer::group_entries(verified);
     let mut covers = Vec::new();
     let mut dupes = Vec::new();
+    let mut truncated = false;
     for group in &groups {
         // Compare each pair within the group (cap at 20 files to avoid O(n^2) explosion).
         let limit = group.len().min(20);
         for i in 0..limit {
             for j in (i + 1)..limit {
+                // Gate with room for one full capped compare — the 30s task
+                // deadline kills everything past it.
+                if remain_ms(start, budget) < 9_000 {
+                    truncated = true;
+                    break;
+                }
                 let abs_a = std::path::Path::new(root).join(&group[i]);
                 let abs_b = std::path::Path::new(root).join(&group[j]);
                 let body = serde_json::json!({
@@ -1604,7 +1639,7 @@ fn report_essentia_duplicates(
                     headers,
                     no_follow_redirects: false,
                     body: body.to_string().into_bytes(),
-                    timeout_ms: 30_000,
+                    timeout_ms: cap_ms(start, budget, 8_000),
                 };
                 if let Ok(Some(resp)) = host::http::send(req) {
                     if resp.status_code == 200 {
@@ -1619,7 +1654,19 @@ fn report_essentia_duplicates(
                     }
                 }
             }
+            if truncated {
+                break;
+            }
         }
+        if truncated {
+            break;
+        }
+    }
+    if truncated {
+        crate::wasm::log_warn(&format!(
+            "essentia-dup: deadline hit — {} pair(s) compared, partial duplicate pass this run",
+            dupes.len() + covers.len()
+        ));
     }
     if !dupes.is_empty() {
         let summary = format!("nd-organizer: Essentia duplicate audio:\n  {}", dupes.join("\n  "));
@@ -1860,6 +1907,7 @@ pub fn plan_move_step(
     let mut plans: Vec<serde_json::Value> = Vec::new();
     let move_start = std::time::Instant::now();
     let move_budget = std::time::Duration::from_secs(15);
+    let task_budget = std::time::Duration::from_secs(24);
 
     for (gi, group) in groups.iter().enumerate() {
         if move_start.elapsed() >= move_budget {
@@ -1900,7 +1948,12 @@ pub fn plan_move_step(
         let mb_release = if cfg.classify_from_mb
             && cfg.primary_source == crate::config::PrimarySource::MusicBrainz
         {
-            crate::musicbrainz::lookup(&info.album_artist, &info.album, &cfg.musicbrainz_token)
+            if remain_ms(move_start, task_budget) >= 9_000 {
+                crate::musicbrainz::lookup(&info.album_artist, &info.album, &cfg.musicbrainz_token)
+            } else {
+                crate::wasm::log_info("plan_move: MB classify skipped (deadline)");
+                None
+            }
         } else {
             None
         };
@@ -1921,7 +1974,10 @@ pub fn plan_move_step(
                 }
             })
             .unwrap_or_default();
-        if cfg.lidarr_force_search_incomplete && !cfg.lidarr_url.trim().is_empty() {
+        if cfg.lidarr_force_search_incomplete
+            && !cfg.lidarr_url.trim().is_empty()
+            && remain_ms(move_start, task_budget) >= 9_000
+        {
             if let Some(album_id) = crate::lidarr::host_lidarr::incomplete_monitored(
                 cfg,
                 info.track_count,
@@ -1932,9 +1988,11 @@ pub fn plan_move_step(
                     "Lidarr: '{}' - '{}' is incomplete and monitored; submitting AlbumSearch (album {})",
                     info.album_artist, info.album, album_id
                 ));
-                match crate::lidarr::host_lidarr::force_search(cfg, album_id) {
-                    Ok(()) => crate::wasm::log_info("Lidarr AlbumSearch submitted"),
-                    Err(e) => crate::wasm::log_warn(&format!("Lidarr AlbumSearch failed: {e}")),
+                if remain_ms(move_start, task_budget) >= 9_000 {
+                    match crate::lidarr::host_lidarr::force_search(cfg, album_id) {
+                        Ok(()) => crate::wasm::log_info("Lidarr AlbumSearch submitted"),
+                        Err(e) => crate::wasm::log_warn(&format!("Lidarr AlbumSearch failed: {e}")),
+                    }
                 }
             }
         }
@@ -2019,7 +2077,7 @@ pub fn plan_move_step(
                     "text": format!("moved {} -> {}", m.from, m.to),
                 }));
             }
-            if cfg.scan_after_album {
+            if cfg.scan_after_album && remain_ms(move_start, task_budget) >= 6_000 {
                 if let Err(e) = crate::wasm::trigger_navidrome_scan(cfg) {
                     crate::wasm::log_warn(&format!("early scan trigger failed: {e}"));
                 }
@@ -2194,6 +2252,7 @@ pub fn plan_enrich_step(
     let mut total_replaygains = 0usize;
     let enrich_start = std::time::Instant::now();
     let enrich_budget = std::time::Duration::from_secs(15);
+    let task_budget = std::time::Duration::from_secs(24);
 
     for group in groups {
         // Check time budget before starting each album.
@@ -2228,7 +2287,11 @@ pub fn plan_enrich_step(
         let mb_release = if cfg.classify_from_mb
             && cfg.primary_source == crate::config::PrimarySource::MusicBrainz
         {
-            crate::musicbrainz::lookup(&info.album_artist, &info.album, &cfg.musicbrainz_token)
+            if remain_ms(enrich_start, task_budget) >= 9_000 {
+                crate::musicbrainz::lookup(&info.album_artist, &info.album, &cfg.musicbrainz_token)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -2241,7 +2304,7 @@ pub fn plan_enrich_step(
         report_parts.push(group_report(&plan, false));
 
         if !plan.moves.is_empty() {
-            if cfg.auto_tag_from_mb {
+            if cfg.auto_tag_from_mb && remain_ms(enrich_start, task_budget) >= 9_000 {
                 if let Some(rel) = &mb_release {
                     if let Some(tagged) = autotag_album(cfg, &root, &files, rel, &info) {
                         total_autotags += tagged;
@@ -2303,7 +2366,9 @@ pub fn plan_enrich_step(
                     }));
                 }
             }
-            if cfg.embed_artwork || cfg.write_cover_jpg {
+            if (cfg.embed_artwork || cfg.write_cover_jpg)
+                && remain_ms(enrich_start, task_budget) >= 16_000
+            {
                 let mbid = files.iter().find_map(|(_, t)| {
                     if !t.mbid_album.trim().is_empty() {
                         Some(t.mbid_album.clone())
@@ -2348,8 +2413,19 @@ pub fn plan_enrich_step(
                     }
                 }
             }
-            if cfg.lyrics_source == "lrclib" || cfg.lyrics_source == "genius" {
-                let n = download_lyrics_for(&root, &plan, &files, cfg.lyrics_format.as_str(), &cfg.lyrics_source, cfg);
+            if (cfg.lyrics_source == "lrclib" || cfg.lyrics_source == "genius")
+                && remain_ms(enrich_start, task_budget) >= 11_000
+            {
+                let n = download_lyrics_for(
+                    &root,
+                    &plan,
+                    &files,
+                    cfg.lyrics_format.as_str(),
+                    &cfg.lyrics_source,
+                    cfg,
+                    enrich_start,
+                    task_budget,
+                );
                 if n > 0 {
                     actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
@@ -2357,7 +2433,7 @@ pub fn plan_enrich_step(
                     }));
                 }
             }
-            if !cfg.genre_source.is_empty() {
+            if !cfg.genre_source.is_empty() && remain_ms(enrich_start, task_budget) >= 2_000 {
                 let mbid = files.iter().find_map(|(_, t)| {
                     if !t.mbid_album.trim().is_empty() {
                         Some(t.mbid_album.clone())
@@ -2378,6 +2454,8 @@ pub fn plan_enrich_step(
                     &info.album_artist,
                     &info.album,
                     &nfo_genres,
+                    enrich_start,
+                    task_budget,
                 ) {
                     for (rel, _tags) in files.iter() {
                         if enrich_start.elapsed() >= enrich_budget { break; }
@@ -2390,8 +2468,11 @@ pub fn plan_enrich_step(
                     }));
                 }
             }
-            if cfg.write_acoustic_tags && !cfg.audiomuse_url.trim().is_empty() {
-                let n = write_acoustic_tags_for(cfg, &root, &plan, &files);
+            if cfg.write_acoustic_tags
+                && !cfg.audiomuse_url.trim().is_empty()
+                && remain_ms(enrich_start, task_budget) >= 9_000
+            {
+                let n = write_acoustic_tags_for(cfg, &root, &plan, &files, enrich_start, task_budget);
                 if n > 0 {
                     actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
@@ -2419,12 +2500,13 @@ pub fn plan_enrich_step(
                     let path_str = abs.to_string_lossy().to_string();
                     let cache_key = format!("instrumental:{}", path_str);
 
-                    // Check cache first.
-                    let is_instrumental = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                    // Check cache first. A failed or timed-out call is
+                    // "unknown" (None) — skip the label check rather than
+                    // strip a correct "(Instrumental)" on a network error.
+                    let is_instrumental: Option<bool> = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
                         serde_json::from_slice::<serde_json::Value>(&v)
                             .ok()
                             .and_then(|v| v.get("isInstrumental").and_then(|v| v.as_bool()))
-                            .unwrap_or(true)
                     } else {
                         // Call Essentia /instrumental-check.
                         let base = cfg.essentia_url.trim().trim_end_matches('/');
@@ -2435,20 +2517,15 @@ pub fn plan_enrich_step(
                             headers: std::collections::HashMap::new(),
                             no_follow_redirects: false,
                             body: body.to_string().into_bytes(),
-                            timeout_ms: 30_000,
+                            timeout_ms: cap_ms(enrich_start, task_budget, 8_000),
                         };
-                        if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
-                            if resp.status_code == 200 {
+                        match nd_pdk::host::http::send(req) {
+                            Ok(Some(resp)) if resp.status_code == 200 => {
                                 let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
                                 let _ = crate::store::kv().set(&cache_key, resp.body);
-                                val.get("isInstrumental")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false)
-                            } else {
-                                false
+                                val.get("isInstrumental").and_then(|v| v.as_bool())
                             }
-                        } else {
-                            false
+                            _ => None,
                         }
                     };
 
@@ -2464,6 +2541,7 @@ pub fn plan_enrich_step(
                     let current_lower = current_title.to_lowercase();
                     let current_has_label = current_lower.contains("instrumental");
 
+                    if let Some(is_instrumental) = is_instrumental {
                     if current_has_label && !is_instrumental {
                         // Labeled instrumental but NOT actually instrumental — strip the label.
                         let stripped = crate::tags::strip_instrumental(&current_title);
@@ -2497,6 +2575,7 @@ pub fn plan_enrich_step(
                             let _ = crate::wasm::trigger_navidrome_scan(cfg);
                         }
                     }
+                    }
                 }
             }
             // Pass 2: Verify acoustic performance — trust but verify.
@@ -2511,12 +2590,12 @@ pub fn plan_enrich_step(
                     let path_str = abs.to_string_lossy().to_string();
                     let cache_key = format!("acoustic:{}", path_str);
 
-                    // Check cache first.
-                    let is_acoustic = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                    // Check cache first. Failed/timeout call = unknown (None):
+                    // skip the label check instead of stripping on network error.
+                    let is_acoustic: Option<bool> = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
                         serde_json::from_slice::<serde_json::Value>(&v)
                             .ok()
                             .and_then(|v| v.get("isAcoustic").and_then(|v| v.as_bool()))
-                            .unwrap_or(false)
                     } else {
                         // Use librosa HPSS to detect acoustic character:
                         // High harmonic ratio relative to percussive = acoustic.
@@ -2528,29 +2607,23 @@ pub fn plan_enrich_step(
                             headers: std::collections::HashMap::new(),
                             no_follow_redirects: false,
                             body: body.to_string().into_bytes(),
-                            timeout_ms: 30_000,
+                            timeout_ms: cap_ms(enrich_start, task_budget, 8_000),
                         };
-                        if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
-                            if resp.status_code == 200 {
+                        match nd_pdk::host::http::send(req) {
+                            Ok(Some(resp)) if resp.status_code == 200 => {
                                 let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
                                 let _ = crate::store::kv().set(&cache_key, resp.body);
                                 // Acoustic = NOT instrumental AND has vocal content.
-                                // If instrumental check says not instrumental (has vocals),
-                                // and vocal ratio is low-to-moderate (acoustic performance).
-                                let not_instrumental = val.get("isInstrumental")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false) == false;
-                                let vocal_ratio = val.get("vocalRatio")
-                                    .and_then(|v| v.as_f64())
-                                    .unwrap_or(0.0);
                                 // Acoustic: has vocals but low vocal energy (0.05-0.3 range).
                                 // Pure instrumental = not acoustic. High vocal energy = not acoustic.
-                                not_instrumental && vocal_ratio > 0.05 && vocal_ratio < 0.3
-                            } else {
-                                false
+                                val.get("isInstrumental").and_then(|v| v.as_bool()).map(|is_instr| {
+                                    let vocal_ratio = val.get("vocalRatio")
+                                        .and_then(|v| v.as_f64())
+                                        .unwrap_or(0.0);
+                                    !is_instr && vocal_ratio > 0.05 && vocal_ratio < 0.3
+                                })
                             }
-                        } else {
-                            false
+                            _ => None,
                         }
                     };
 
@@ -2563,6 +2636,7 @@ pub fn plan_enrich_step(
                     let current_lower = current_title.to_lowercase();
                     let current_has_label = current_lower.contains("acoustic");
 
+                    if let Some(is_acoustic) = is_acoustic {
                     if current_has_label && !is_acoustic {
                         // Labeled acoustic but NOT actually acoustic — strip the label.
                         let stripped = crate::tags::strip_acoustic(&current_title);
@@ -2596,14 +2670,18 @@ pub fn plan_enrich_step(
                             let _ = crate::wasm::trigger_navidrome_scan(cfg);
                         }
                     }
+                    }
                 }
             }
-            if cfg.scan_after_tag_write {
+            if cfg.scan_after_tag_write && remain_ms(enrich_start, task_budget) >= 6_000 {
                 if let Err(e) = crate::wasm::trigger_navidrome_scan(cfg) {
                     crate::wasm::log_warn(&format!("scan trigger failed: {e}"));
                 }
             }
-            if cfg.notify_audiomuse_after_run && !cfg.audiomuse_url.trim().is_empty() {
+            if cfg.notify_audiomuse_after_run
+                && !cfg.audiomuse_url.trim().is_empty()
+                && remain_ms(enrich_start, task_budget) >= 9_000
+            {
                 match crate::audiomuse::re_sync(cfg) {
                     Ok(()) => actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
@@ -2615,6 +2693,7 @@ pub fn plan_enrich_step(
             if cfg.lidarr_mode == crate::config::LidarrMode::MetadataPlusRescan
                 && !cfg.lidarr_url.trim().is_empty()
                 && !cfg.lidarr_api_key.trim().is_empty()
+                && remain_ms(enrich_start, task_budget) >= 17_000
             {
                 if let Some(lidar) =
                     crate::lidarr::host_lidarr::find_album(cfg, &info.album, &info.album_artist)
@@ -2638,6 +2717,10 @@ pub fn plan_enrich_step(
                 for src_artist in &info.distinct_artists {
                     if src_artist.eq_ignore_ascii_case(&info.album_artist) {
                         continue;
+                    }
+                    // Each source artist costs find + refresh (≤8s each).
+                    if remain_ms(enrich_start, task_budget) < 17_000 {
+                        break;
                     }
                     if let Some(src_album) = crate::lidarr::host_lidarr::find_album(
                         cfg,
@@ -2859,7 +2942,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                     None
                 };
                 if let Some((genres, _source)) = fetch_genre_with_fallback(
-                    cfg, mbid.as_deref(), &tags.artist, &tags.album, &Vec::new(),
+                    cfg, mbid.as_deref(), &tags.artist, &tags.album, &Vec::new(), start, budget,
                 ) {
                     let _ = crate::tags::write_genre(&abs, &genres);
                     changed = true;
@@ -2885,11 +2968,12 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 let abs = root.join(rel);
                 let path_str = abs.to_string_lossy().to_string();
                 let cache_key = format!("instrumental:{}", path_str);
-                let is_instrumental = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                // Failed/timeout call = unknown (None): skip the label check
+                // instead of stripping a correct "(Instrumental)" label.
+                let is_instrumental: Option<bool> = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
                     serde_json::from_slice::<serde_json::Value>(&v)
                         .ok()
                         .and_then(|v| v.get("isInstrumental").and_then(|v| v.as_bool()))
-                        .unwrap_or(true)
                 } else {
                     let base = cfg.essentia_url.trim().trim_end_matches('/');
                     let body = serde_json::json!({"path": path_str});
@@ -2899,20 +2983,15 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         headers: std::collections::HashMap::new(),
                         no_follow_redirects: false,
                         body: body.to_string().into_bytes(),
-                        timeout_ms: 30_000,
+                        timeout_ms: cap_ms(start, budget, 8_000),
                     };
-                    if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
-                        if resp.status_code == 200 {
+                    match nd_pdk::host::http::send(req) {
+                        Ok(Some(resp)) if resp.status_code == 200 => {
                             let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
                             let _ = crate::store::kv().set(&cache_key, resp.body);
-                            val.get("isInstrumental")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                        } else {
-                            false
+                            val.get("isInstrumental").and_then(|v| v.as_bool())
                         }
-                    } else {
-                        false
+                        _ => None,
                     }
                 };
                 // Re-read title from file tag to avoid stale KV cache causing
@@ -2923,6 +3002,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                     .unwrap_or_else(|| title.clone());
                 let lower_title = current_title.to_lowercase();
                 let has_instrumental_label = lower_title.contains("instrumental");
+                if let Some(is_instrumental) = is_instrumental {
                 if has_instrumental_label && !is_instrumental {
                     let stripped = crate::tags::strip_instrumental(&current_title);
                     if stripped != current_title {
@@ -2934,6 +3014,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                     let _ = crate::tags::write_title(&abs, &new_title);
                     changed = true;
                 }
+                }
             }
 
             // Acoustic check — trust but verify.
@@ -2943,11 +3024,12 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 let abs = root.join(rel);
                 let path_str = abs.to_string_lossy().to_string();
                 let cache_key = format!("acoustic:{}", path_str);
-                let is_acoustic = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+                // Failed/timeout call = unknown (None): skip the label check
+                // instead of stripping a correct "(Acoustic)" label.
+                let is_acoustic: Option<bool> = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
                     serde_json::from_slice::<serde_json::Value>(&v)
                         .ok()
                         .and_then(|v| v.get("isAcoustic").and_then(|v| v.as_bool()))
-                        .unwrap_or(false)
                 } else {
                     let base = cfg.essentia_url.trim().trim_end_matches('/');
                     let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false});
@@ -2957,24 +3039,20 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         headers: std::collections::HashMap::new(),
                         no_follow_redirects: false,
                         body: body.to_string().into_bytes(),
-                        timeout_ms: 30_000,
+                        timeout_ms: cap_ms(start, budget, 8_000),
                     };
-                    if let Ok(Some(resp)) = nd_pdk::host::http::send(req) {
-                        if resp.status_code == 200 {
+                    match nd_pdk::host::http::send(req) {
+                        Ok(Some(resp)) if resp.status_code == 200 => {
                             let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
                             let _ = crate::store::kv().set(&cache_key, resp.body);
-                            let not_instrumental = val.get("isInstrumental")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false) == false;
-                            let vocal_ratio = val.get("vocalRatio")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(0.0);
-                            not_instrumental && vocal_ratio > 0.05 && vocal_ratio < 0.3
-                        } else {
-                            false
+                            val.get("isInstrumental").and_then(|v| v.as_bool()).map(|is_instr| {
+                                let vocal_ratio = val.get("vocalRatio")
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0);
+                                !is_instr && vocal_ratio > 0.05 && vocal_ratio < 0.3
+                            })
                         }
-                    } else {
-                        false
+                        _ => None,
                     }
                 };
                 // Re-read title from file tag to avoid stale KV cache causing
@@ -2985,6 +3063,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                     .unwrap_or_else(|| title.clone());
                 let lower_title = current_title.to_lowercase();
                 let has_acoustic_label = lower_title.contains("acoustic");
+                if let Some(is_acoustic) = is_acoustic {
                 if has_acoustic_label && !is_acoustic {
                     let stripped = crate::tags::strip_acoustic(&current_title);
                     if stripped != current_title {
@@ -2995,6 +3074,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                     let new_title = format!("{} (Acoustic)", current_title);
                     let _ = crate::tags::write_title(&abs, &new_title);
                     changed = true;
+                }
                 }
             }
 
@@ -3105,7 +3185,8 @@ fn replaygain_for(cfg: &Config, abs_path: &str) -> Option<(f64, Option<f64>)> {
         headers: std::collections::HashMap::new(),
         no_follow_redirects: false,
         body: body.into_bytes(),
-        timeout_ms: 30_000,
+        // 30s hard extism deadline — keep well inside it.
+        timeout_ms: 8_000,
     };
     match host::http::send(req) {
         Ok(Some(resp)) if resp.status_code == 200 => {
@@ -3424,11 +3505,17 @@ fn write_acoustic_tags_for(
     root: &Path,
     plan: &crate::organizer::GroupPlan,
     files: &[(String, TrackTags)],
+    start: std::time::Instant,
+    budget: std::time::Duration,
 ) -> usize {
     use std::collections::HashMap;
     let by_src: HashMap<&str, &TrackTags> = files.iter().map(|(r, t)| (r.as_str(), t)).collect();
     let mut written = 0usize;
     for m in &plan.moves {
+        // Each audiomuse fetch costs up to ~8s against the task's 30s cap.
+        if remain_ms(start, budget) < 9_000 {
+            break;
+        }
         let Some(t) = by_src.get(m.from.as_str()) else { continue };
         if !crate::wasm::should_write_tags(cfg, &t.album_artist) {
             continue;
@@ -3461,11 +3548,17 @@ fn download_lyrics_for(
     format: &str,
     lyrics_source: &str,
     cfg: &crate::config::Config,
+    start: std::time::Instant,
+    budget: std::time::Duration,
 ) -> usize {
     use std::collections::HashMap;
     let by_src: HashMap<&str, &TrackTags> = files.iter().map(|(r, t)| (r.as_str(), t)).collect();
     let mut written = 0usize;
     for m in &plan.moves {
+        // Each LRCLIB/Genius fetch costs up to ~8s against the task's 30s cap.
+        if remain_ms(start, budget) < 9_000 {
+            break;
+        }
         let Some(t) = by_src.get(m.from.as_str()) else { continue };
         // Try LRCLIB first (always), then Genius as fallback.
         let lyr = crate::lyrics::fetch(&t.artist, &t.title, &t.album, 0)
@@ -3495,14 +3588,27 @@ fn download_lyrics_for(
 }
 
 /// Genre fallback chain: try selected source, then others in order.
-/// Returns (genres, source_name) on success.
+/// Returns (genres, source_name) on success. Network results are cached in
+/// KV for 7 days keyed by lowercase artist|album.
 fn fetch_genre_with_fallback(
     cfg: &crate::config::Config,
     mbid: Option<&str>,
     artist: &str,
     album: &str,
     nfo_genres: &[String],
+    start: std::time::Instant,
+    budget: std::time::Duration,
 ) -> Option<(Vec<String>, String)> {
+    let cache_key = format!(
+        "genres:{}|{}",
+        artist.trim().to_lowercase(),
+        album.trim().to_lowercase()
+    );
+    if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+        if let Ok(val) = serde_json::from_slice::<(Vec<String>, String)>(&v) {
+            return Some(val);
+        }
+    }
     let sources = match cfg.genre_source.as_str() {
         "musicbrainz" => vec!["musicbrainz", "discogs", "theaudiodb", "essentia", "nfo"],
         "discogs" => vec!["discogs", "musicbrainz", "theaudiodb", "essentia", "nfo"],
@@ -3512,42 +3618,39 @@ fn fetch_genre_with_fallback(
         _ => vec!["musicbrainz", "discogs", "theaudiodb", "essentia", "nfo"],
     };
     for source in sources {
-        match source {
-            "musicbrainz" => {
-                if let Some(m) = mbid {
-                    if let Some(genres) = crate::musicbrainz::fetch_genres(m, &cfg.musicbrainz_token) {
-                        return Some((genres, "musicbrainz".into()));
-                    }
+        // Network sources cost up to 8s each (module timeout) — never start
+        // one with less than 9s of the task's 30s deadline left. nfo/essentia
+        // are local/skipped here.
+        if matches!(source, "musicbrainz" | "discogs" | "theaudiodb")
+            && remain_ms(start, budget) < 9_000
+        {
+            break;
+        }
+        let hit = match source {
+            "musicbrainz" => mbid
+                .and_then(|m| crate::musicbrainz::fetch_genres(m, &cfg.musicbrainz_token))
+                .map(|g| (g, "musicbrainz".to_string())),
+            "discogs" if !cfg.discogs_token.is_empty() => crate::discogs::host_discogs::fetch_genres(cfg, artist, album)
+                .map(|g| (g, "discogs".to_string())),
+            "theaudiodb" if !cfg.theaudiodb_key.is_empty() => crate::theaudiodb::host_theaudiodb::fetch_genres(cfg, artist, album)
+                .map(|g| (g, "theaudiodb".to_string())),
+            // Essentia genres are written by write_essentia_genres() separately.
+            "essentia" => None,
+            "nfo" if !nfo_genres.is_empty() => Some((nfo_genres.to_vec(), "nfo".to_string())),
+            _ => None,
+        };
+        if let Some((genres, src)) = hit {
+            if src != "nfo" {
+                if let Ok(bytes) = serde_json::to_vec(&(genres.clone(), src.clone())) {
+                    let _ = crate::store::kv().set_with_ttl(&cache_key, bytes, 7 * 24 * 3600);
                 }
             }
-            "discogs" => {
-                if !cfg.discogs_token.is_empty() {
-                    if let Some(genres) = crate::discogs::host_discogs::fetch_genres(cfg, artist, album) {
-                        return Some((genres, "discogs".into()));
-                    }
-                }
-            }
-            "theaudiodb" => {
-                if !cfg.theaudiodb_key.is_empty() {
-                    if let Some(genres) = crate::theaudiodb::host_theaudiodb::fetch_genres(cfg, artist, album) {
-                        return Some((genres, "theaudiodb".into()));
-                    }
-                }
-            }
-            "essentia" => {
-                // Essentia genres are written by write_essentia_genres() separately.
-                // In the fallback chain, skip Essentia and try other sources.
-            }
-            "nfo" => {
-                if !nfo_genres.is_empty() {
-                    return Some((nfo_genres.to_vec(), "nfo".into()));
-                }
-            }
-            _ => {}
+            return Some((genres, src));
         }
     }
     None
 }
+
 
 
 

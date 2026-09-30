@@ -51,7 +51,7 @@ pub mod host_discogs {
             "discogs",
             "https://api.discogs.com",
             &HashMap::new(),
-            10_000,
+            5_000,
         ) {
             return None;
         }
@@ -66,7 +66,7 @@ pub mod host_discogs {
             headers: headers(cfg),
             no_follow_redirects: false,
             body: vec![],
-            timeout_ms: 15_000,
+            timeout_ms: 8_000,
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
@@ -116,7 +116,7 @@ pub mod host_discogs {
             "discogs",
             "https://api.discogs.com",
             &HashMap::new(),
-            10_000,
+            5_000,
         ) {
             return Some(Vec::new());
         }
@@ -127,7 +127,7 @@ pub mod host_discogs {
             headers: headers(cfg),
             no_follow_redirects: false,
             body: vec![],
-            timeout_ms: 15_000,
+            timeout_ms: 8_000,
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {

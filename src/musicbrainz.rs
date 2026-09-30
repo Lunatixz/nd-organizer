@@ -48,7 +48,7 @@ pub fn lookup(artist: &str, album: &str, token: &str) -> Option<MbRelease> {
         "musicbrainz",
         "https://musicbrainz.org/ws/2/",
         &HashMap::new(),
-        15_000,
+        5_000,
     ) {
         return None; // offline - fail fast (auto-recovers via probe)
     }
@@ -76,7 +76,7 @@ pub fn lookup(artist: &str, album: &str, token: &str) -> Option<MbRelease> {
         headers,
         no_follow_redirects: false,
         body: vec![],
-        timeout_ms: 15_000,
+        timeout_ms: 8_000,
     };
     let result: Option<MbRelease> = match host::http::send(req) {
         Ok(Some(resp)) if resp.status_code == 200 => {
@@ -184,7 +184,7 @@ pub fn release_tracks(mbid: &str, token: &str) -> Option<Vec<MbTrack>> {
         "musicbrainz",
         "https://musicbrainz.org/ws/2/",
         &HashMap::new(),
-        15_000,
+        5_000,
     ) {
         return None;
     }
@@ -208,7 +208,7 @@ pub fn release_tracks(mbid: &str, token: &str) -> Option<Vec<MbTrack>> {
         headers,
         no_follow_redirects: false,
         body: vec![],
-        timeout_ms: 15_000,
+        timeout_ms: 8_000,
     };
     let tracks: Option<Vec<MbTrack>> = match host::http::send(req) {
         Ok(Some(resp)) if resp.status_code == 200 => {
@@ -315,7 +315,7 @@ pub fn fetch_genres(release_mbid: &str, token: &str) -> Option<Vec<String>> {
         "musicbrainz",
         "https://musicbrainz.org/ws/2/",
         &HashMap::new(),
-        15_000,
+        5_000,
     ) {
         return None;
     }
@@ -339,7 +339,7 @@ pub fn fetch_genres(release_mbid: &str, token: &str) -> Option<Vec<String>> {
         headers,
         no_follow_redirects: false,
         body: vec![],
-        timeout_ms: 15_000,
+        timeout_ms: 8_000,
     };
     match host::http::send(req) {
         Ok(Some(resp)) if resp.status_code == 200 => {

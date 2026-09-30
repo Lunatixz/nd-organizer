@@ -1468,7 +1468,7 @@ pub(crate) mod wasm {
             headers,
             no_follow_redirects: false,
             body: body.as_bytes().to_vec(),
-            timeout_ms: 10_000,
+            timeout_ms: 3_000,
         };
         match host::http::send(req) {
             Ok(Some(resp)) => log_info(&format!("webhook log post: HTTP {}", resp.status_code)),

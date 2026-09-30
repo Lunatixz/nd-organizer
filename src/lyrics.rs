@@ -39,7 +39,7 @@ pub fn fetch(artist: &str, title: &str, album: &str, duration_secs: i64) -> Opti
             return Some(l);
         }
     }
-    if !crate::net::circuit_probe("lrclib", "https://lrclib.net/api", &HashMap::new(), 10_000) {
+    if !crate::net::circuit_probe("lrclib", "https://lrclib.net/api", &HashMap::new(), 5_000) {
         return None; // offline - fail fast (auto-recovers via probe)
     }
     if !crate::net::throttle("lrclib", 1000) {
@@ -62,7 +62,7 @@ pub fn fetch(artist: &str, title: &str, album: &str, duration_secs: i64) -> Opti
         headers: HashMap::new(),
         no_follow_redirects: false,
         body: vec![],
-        timeout_ms: 10_000,
+        timeout_ms: 8_000,
     };
     let lyrics: Option<Lyrics> = match host::http::send(req) {
         Ok(Some(resp)) if resp.status_code == 200 => {

@@ -173,7 +173,7 @@ pub fn re_sync(cfg: &crate::config::Config) -> Result<(), String> {
         headers: headers(cfg),
         no_follow_redirects: false,
         body: b"{}".to_vec(),
-        timeout_ms: 15_000,
+        timeout_ms: 8_000,
     };
     match host::http::send(req) {
         Ok(Some(resp)) if (200..300).contains(&resp.status_code) => {
@@ -214,7 +214,7 @@ pub fn fetch(cfg: &crate::config::Config, artist: &str, title: &str) -> Option<A
     if base.is_empty() || artist.trim().is_empty() || title.trim().is_empty() {
         return None;
     }
-    if !crate::net::circuit_probe(CIRCUIT_KEY, &base, &headers(cfg), 20_000) {
+    if !crate::net::circuit_probe(CIRCUIT_KEY, &base, &headers(cfg), 5_000) {
         return None; // offline - fail fast (auto-recovers via probe)
     }
     let cache_key = format!("am:{}|{}", artist.to_lowercase(), title.to_lowercase());
@@ -237,7 +237,7 @@ pub fn fetch(cfg: &crate::config::Config, artist: &str, title: &str) -> Option<A
         headers: headers(cfg),
         no_follow_redirects: false,
         body: vec![],
-        timeout_ms: 15_000,
+        timeout_ms: 8_000,
     };
     let ac: Option<Acoustic> = match host::http::send(req) {
         Ok(Some(resp)) if resp.status_code == 200 => {

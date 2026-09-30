@@ -270,10 +270,38 @@ pub fn run_timestamp(id: &str) -> Option<i64> {
     id.strip_prefix("run-").and_then(|s| s.parse::<i64>().ok())
 }
 
+// ponytail: navidrome's extism runtime kills every plugin call at 30s
+// (plugins/manager.go defaultTimeout). Budgeted loops still die when one
+// HTTP call outlives the task, so every in-task network op is gated on the
+// remaining phase budget (room for a full call) and its timeout capped to
+// what's left. Ceiling: duplicate reports cover only what fits before the
+// deadline on huge libraries — a pair-cursor background task is the upgrade
+// path if full-album coverage is ever needed.
+pub fn remain_ms(start: std::time::Instant, budget: std::time::Duration) -> i32 {
+    budget.saturating_sub(start.elapsed()).as_millis() as i32
+}
+
+pub fn cap_ms(start: std::time::Instant, budget: std::time::Duration, cap: i32) -> i32 {
+    remain_ms(start, budget).clamp(250, cap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn remain_and_cap_track_deadline() {
+        let start = std::time::Instant::now();
+        let budget = std::time::Duration::from_secs(24);
+        let left = remain_ms(start, budget);
+        assert!(left > 23_000 && left <= 24_000, "left={left}");
+        assert_eq!(cap_ms(start, budget, 8_000), 8_000);
+        // With almost no budget left, cap clamps to the 250ms floor.
+        let tight = std::time::Instant::now() - std::time::Duration::from_secs(23_999);
+        assert_eq!(cap_ms(tight, budget, 8_000), 250);
+        assert!(remain_ms(tight, budget) < 100);
+    }
 
     fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let root =

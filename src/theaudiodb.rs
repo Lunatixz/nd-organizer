@@ -43,7 +43,7 @@ pub mod host_theaudiodb {
             "theaudiodb",
             "https://theaudiodb.com",
             &HashMap::new(),
-            10_000,
+            5_000,
         ) {
             return None;
         }
@@ -58,7 +58,7 @@ pub mod host_theaudiodb {
             headers: HashMap::new(),
             no_follow_redirects: false,
             body: vec![],
-            timeout_ms: 15_000,
+            timeout_ms: 8_000,
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
@@ -95,7 +95,7 @@ pub mod host_theaudiodb {
             "theaudiodb",
             "https://theaudiodb.com",
             &HashMap::new(),
-            10_000,
+            5_000,
         ) {
             return None;
         }
@@ -110,7 +110,7 @@ pub mod host_theaudiodb {
             headers: HashMap::new(),
             no_follow_redirects: false,
             body: vec![],
-            timeout_ms: 15_000,
+            timeout_ms: 8_000,
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
@@ -150,7 +150,7 @@ pub mod host_theaudiodb {
                 return Some(v);
             }
         }
-        if !net::circuit_probe("theaudiodb", "https://theaudiodb.com", &HashMap::new(), 10_000) {
+        if !net::circuit_probe("theaudiodb", "https://theaudiodb.com", &HashMap::new(), 5_000) {
             return None;
         }
         if !net::throttle("theaudiodb", 1000) {
@@ -162,7 +162,7 @@ pub mod host_theaudiodb {
             headers: HashMap::new(),
             no_follow_redirects: false,
             body: vec![],
-            timeout_ms: 15_000,
+            timeout_ms: 8_000,
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 && !resp.body.is_empty() => {
