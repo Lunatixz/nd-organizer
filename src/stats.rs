@@ -1109,7 +1109,17 @@ pub mod host_stats {
             .flatten()
             .and_then(|v| String::from_utf8(v).ok())
             .filter(|s| !s.is_empty());
-        let resp = match host::subsonicapi::call(&build_q(stored.as_deref())) {
+        // subsonicapi::call returns Ok(body) even for {"status":"failed"}
+        // (HTTP 200) — treat that as an error so the stale-id recovery below
+        // actually runs instead of silently keeping the dead id forever.
+        let attempt = |playlist_id: Option<&str>| -> Result<String, String> {
+            let r = host::subsonicapi::call(&build_q(playlist_id)).map_err(|e| e.to_string())?;
+            if r.contains("\"status\":\"failed\"") || r.contains("\"error\"") {
+                return Err(format!("createPlaylist failed: {r}"));
+            }
+            Ok(r)
+        };
+        let resp = match attempt(stored.as_deref()) {
             Ok(r) => r,
             Err(e) => {
                 // ponytail: the stored id may point at a deleted playlist —
@@ -1121,11 +1131,10 @@ pub mod host_stats {
                 let listed = host::subsonicapi::call("getPlaylists")
                     .map_err(|err| format!("top picks: update failed ({e}); getPlaylists: {err}"))?;
                 match playlist_id_named(&listed, "nd-organizer: Top Picks") {
-                    Some(id) => host::subsonicapi::call(&build_q(Some(&id)))
-                        .map_err(|err| err.to_string())?,
+                    Some(id) => attempt(Some(&id))?,
                     None => {
                         let _ = crate::store::kv().delete("stat.playlist.id");
-                        host::subsonicapi::call(&build_q(None)).map_err(|err| err.to_string())?
+                        attempt(None)?
                     }
                 }
             }
