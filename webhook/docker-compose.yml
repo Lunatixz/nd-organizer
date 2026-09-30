@@ -18,14 +18,25 @@ services:
       - "8099:8099"
     volumes:
       - ./data:/data          # webhook.log persists here
+      - /opt/navidrome/data:/data/nd   # navidrome.db (radio management)
       # Read-only Docker socket: lets the dashboard read octo-fiesta's logs
       # (octo exposes only the Subsonic API, no /logs endpoint).
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Navidrome's music library volume — smart playlists are written to
+      # /music/playlist, which must be the library-root-relative ND_PLAYLISTSPATH.
+      - mnt_music:/music:rw
     environment:
       - NAVIDROME_DB=/data/nd/navidrome.db   # radio management
-      - PLAYLIST_DIR=/data/nd/playlist     # smart playlist writing (matches ND_PLAYLISTSPATH=playlist)
+      - PLAYLIST_DIR=/music/playlist         # must sit inside the Navidrome music library
     networks:
       - stack_network
+
+volumes:
+  mnt_music:
+    # Navidrome stack's music volume — pin the real name so this compose joins
+    # it instead of creating an empty ./mnt_music (prefix = <project>_).
+    name: audiomuse-navidrome_mnt_music
+    external: true
 
 networks:
   stack_network:
