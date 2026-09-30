@@ -47,7 +47,6 @@ ARTWORK_ROOT = os.environ.get("ARTWORK_ROOT", "/data/nd/artwork")
 entries = []  # list of (ts, path, body)
 services = {}  # sidecar name -> last heartbeat unix ts
 last_any_request = time.time()  # webhook's own liveness
-_playback_state = {}  # accumulated playback data across status posts
 
 # Known sidecars and their HTTP ports, so the dashboard can pull each one's
 # /logs by container name (they must share a Docker network with this webhook).
@@ -1582,107 +1581,6 @@ def _fmt_ms(ms):
         return "0:00"
 
 
-def _stars_html(stars):
-    try:
-        stars = float(stars or 0)
-    except (TypeError, ValueError):
-        stars = 0.0
-    s = ""
-    for i in range(1, 6):
-        if stars >= i - 0.25:
-            s += "&#9733;"
-        elif stars >= i - 0.75:
-            s += "&#189;"
-        else:
-            s += "&#9734;"
-    return s + " <span class='dim'>%s</span>" % stars
-
-
-def _accumulate_playback(status_j):
-    """Accumulate playback data across multiple status posts so the panel
-    retains history between refreshes."""
-    global _playback_state
-    if not status_j:
-        return
-    # Merge topRated - keep top 20 by rating
-    existing = {t.get("name"): t for t in _playback_state.get("topRated", [])}
-    for t in (status_j.get("topRated") or []):
-        if isinstance(t, dict) and t.get("name"):
-            name = t["name"]
-            if name not in existing or t.get("stars", 0) > existing[name].get("stars", 0):
-                existing[name] = t
-    _playback_state["topRated"] = sorted(existing.values(), key=lambda x: x.get("stars", 0), reverse=True)[:20]
-    # Accumulate filtered items (keep last 50)
-    filtered = _playback_state.get("filtered", [])
-    new_filtered = status_j.get("filtered") or []
-    if new_filtered:
-        filtered = (new_filtered + filtered)[:50]
-        _playback_state["filtered"] = filtered
-    # Accumulate stats
-    _playback_state["plays"] = _playback_state.get("plays", 0) + (status_j.get("playsDelta") or 0)
-    _playback_state["skips"] = _playback_state.get("skips", 0) + (status_j.get("skipsDelta") or 0)
-
-
-def playback_html(status_j):
-    """'Playback' panel: what is playing right now, playcounts + star ratings,
-    and what the filter proxy has been filtering/skipping. Uses accumulated data
-    so the panel retains history between status posts."""
-    if not status_j:
-        return "<div class='card now'><h2>Playback</h2><div class='note'>Waiting for playback data&hellip;</div></div>"
-    out = "<div class='card now'><h2>Playback</h2>"
-
-    # What is playing right now.
-    np = latest_np()
-    if isinstance(np, list) and np:
-        rows = ""
-        for e in np[:8]:
-            if not isinstance(e, dict):
-                continue
-            pos = e.get("positionMs") or e.get("position_ms") or 0
-            dur = e.get("duration", 0)
-            pct = int(pos / (dur * 1000.0) * 100.0) if dur and dur > 0 else 0
-            rows += ("<div class='np'><span class='np-dot'></span>"
-                     "<span class='np-a'>%s</span> <b>%s</b>"
-                     "<span class='dim'>%s</span>"
-                     "<span class='dim np-pos'>%s / %s (%d%%)</span></div>") % (
-                esc(e.get("artist", "")), esc(e.get("title", "") or "?"),
-                esc(e.get("album", "")), _fmt_ms(pos), _fmt_ms(dur * 1000), pct)
-        out += "<div class='np-head'>Now playing</div>" + rows
-    else:
-        out += "<div class='np-head'>Now playing</div><div class='note'>Nothing is playing right now.</div>"
-
-    # Playcounts + star ratings - merge current with accumulated
-    current_tr = {t.get("name"): t for t in (status_j.get("topRated") or []) if isinstance(t, dict)}
-    acc_tr = {t.get("name"): t for t in _playback_state.get("topRated", []) if isinstance(t, dict)}
-    acc_tr.update(current_tr)  # current takes precedence
-    merged_tr = sorted(acc_tr.values(), key=lambda x: x.get("stars", 0), reverse=True)[:10]
-    if merged_tr:
-        rows = ""
-        for t in merged_tr:
-            rows += ("<div class='tr'><span class='tr-stars'>%s</span>"
-                     "<span class='tr-name'>%s</span>"
-                     "<span class='dim'>%d plays</span></div>") % (
-                _stars_html(t.get("stars", 0)), esc(t.get("name", "")),
-                int(t.get("plays", 0)))
-        out += "<div class='np-head'>Playcounts &amp; star ratings</div>" + rows
-    else:
-        out += ("<div class='np-head'>Playcounts &amp; star ratings</div>"
-                "<div class='note'>No ratings yet - they build up as music plays.</div>")
-
-    # (Recently-dropped tracks moved to the Filters panel, which owns the
-    # proxy /status payload now.)
-
-    # Cumulative stats
-    plays = status_j.get("plays", 0) or _playback_state.get("plays", 0)
-    skips = status_j.get("skips", 0) or _playback_state.get("skips", 0)
-    ratings = status_j.get("ratings", 0)
-    out += ("<div class='sc-stats'><span>plays observed <b>%s</b></span>"
-            "<span>skips observed <b>%s</b></span>"
-            "<span>ratings published <b>%s</b></span></div>") % (plays, skips, ratings)
-    out += "</div>"
-    return out
-
-
 def now_panel(j):
     """The 'Current activity' hero: a plain-English line about the current action, a
     pipeline stepper, run/batch chips, rollback info, warnings and the per-library
@@ -2188,11 +2086,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         entries.append((ts, self.path, body))
         if len(entries) > MAX_ENTRIES:
             del entries[: len(entries) - MAX_ENTRIES]
-        # Accumulate playback data for the Playback panel
-        try:
-            _accumulate_playback(json.loads(body))
-        except Exception:
-            pass
         # Never crash the request on a log-file problem: create the directory if
         # needed and fall back to memory-only if it still can't be written.
         try:
@@ -2495,7 +2388,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 .replace("__FILTERS__", filters_html())
                 .replace("__INTEGRATIONS__", integrations_html())
                 .replace("__NOW__", now_html)
-                .replace("__PLAYBACK__", playback_html(status_j))
                 .replace("__RADIO__", radio_html())
                 .replace("__PLAYLISTS__", playlist_html())
                 .replace("__ALBUMS__", albums_html)
@@ -2751,12 +2643,12 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
 <h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px"><span class="grad-text">nd-organizer</span></h1>
 <span id="clock">&ndash;&ndash;:&ndash;&ndash;:&ndash;&ndash;</span>
 <button class="btn-grad" onclick="forceRescan()" style="padding:5px 14px;font-size:.85rem">Force Rescan</button>
-<nav class="hnav"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#playback">Playback</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a></nav>
+<nav class="hnav"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a></nav>
 </div>
 <div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; checked __UPDATED__ &middot; auto-refresh 30s &middot; log: __LOG__</div>
 </header>
 <div class="bannerimg"><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/banner.png" alt="nd-organizer" style="max-width:100%;height:auto;border-radius:8px;opacity:.9"></div>
-<nav class="mobile-bar" id="mobileBar"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#playback">Playback</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a><a href="#radio">Radio</a><a href="#playlists">Playlists</a></nav>
+<nav class="mobile-bar" id="mobileBar"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a><a href="#radio">Radio</a><a href="#playlists">Playlists</a></nav>
 __BANNER__
 __KPI__
 <div class="hero">
@@ -2769,7 +2661,6 @@ __KPI__
 <details class="collapse" open id="filters"><summary>Filters &amp; coverage</summary><div class="collapse-body">__FILTERS__</div></details>
 </div>
 <details class="collapse" open id="health"><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
-<details class="collapse" open id="playback"><summary>Playback</summary><div class="collapse-body">__PLAYBACK__</div></details>
 <details class="collapse" open id="actions"><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
 <details class="collapse" id="recent"><summary>Recently processed</summary><div class="collapse-body">__RECENT__</div></details>
 <details class="collapse" id="tasks"><summary>Task queue</summary><div class="collapse-body">__TASKS__</div></details>
