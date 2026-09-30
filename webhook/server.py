@@ -600,8 +600,9 @@ def playlist_html():
             "  var NUM={rating:1,playcount:1,year:1,bpm:1,duration:1,track:1};"
             "  var num=Number(val);"
             "  if(NUM[field]&&isNaN(num)){alert('This field needs a number');return}"
-            "  var rule={}; rule[field]={};"
-            "  rule[field][op]=NUM[field]?num:(field==='loved'?(val==='true'||val==='1'||val==='yes'):val);"
+            # Navidrome criteria is operator-first: {"gt":{"playcount":10}}.
+            "  var rule={}; rule[op]={};"
+            "  rule[op][field]=NUM[field]?num:(field==='loved'?(val==='true'||val==='1'||val==='yes'):val);"
             "  var nsp={name:n,comment:c,all:[rule]};"
             "  playlistSave(n,c,nsp);"
             "}"
@@ -2127,9 +2128,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Playlist: save / delete / list / deploy preset
         if self.path.rstrip("/").endswith("/playlist-save"):
             try:
-                n = int(self.headers.get("Content-Length", 0))
-                raw = self.rfile.read(n) if n > 0 else b"{}"
-                req = json.loads(raw or "{}")
+                # ponytail: body was already consumed by _read_body() above;
+                # reading self.rfile again blocks until the socket times out.
+                req = json.loads(body) if body else {}
                 ok, filename, err = save_playlist(
                     req.get("name", ""),
                     req.get("comment", ""),
@@ -2146,9 +2147,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.path.rstrip("/").endswith("/playlist-delete"):
             try:
-                n = int(self.headers.get("Content-Length", 0))
-                raw = self.rfile.read(n) if n > 0 else b"{}"
-                req = json.loads(raw or "{}")
+                req = json.loads(body) if body else {}
                 ok, err = delete_playlist(req.get("file", ""))
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
