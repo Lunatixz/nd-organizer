@@ -497,16 +497,22 @@ def save_playlist(name, comment, nsp_body):
 
 
 def delete_playlist(filename):
-    """Delete a .nsp file. Returns (ok, error)."""
+    """Delete a .nsp file. Returns (ok, error, playlist_name)."""
     if not filename.endswith(".nsp"):
-        return False, "must be a .nsp file"
+        return False, "must be a .nsp file", ""
     path = os.path.join(playlist_dir(), filename)
+    name = filename[:-4]
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            name = json.load(fh).get("name") or name
+    except Exception:
+        pass  # ponytail: fall back to the file stem if content is unreadable
     try:
         os.remove(path)
         log.info("playlist deleted: %s", filename)
-        return True, ""
+        return True, "", name
     except Exception as e:
-        return False, str(e)
+        return False, str(e), ""
 
 
 def playlist_html():
@@ -2148,7 +2154,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.rstrip("/").endswith("/playlist-delete"):
             try:
                 req = json.loads(body) if body else {}
-                ok, err = delete_playlist(req.get("file", ""))
+                ok, err, name = delete_playlist(req.get("file", ""))
+                if ok and name:
+                    # Signal the plugin to drop the Navidrome playlist row too
+                    # (Navidrome never deletes rows for missing .nsp files).
+                    entries.append((ts, "/playlist-delete",
+                                    json.dumps({"name": name}).encode()))
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 body = json.dumps({"ok": ok, "error": err}).encode()
@@ -2328,7 +2339,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             break
                     except Exception:
                         pass
-            data = json.dumps({"forceRescan": signal}).encode()
+            # Drain one pending playlist-row delete as well.
+            pl_name = None
+            for i, (ts, path, body) in enumerate(reversed(entries)):
+                if path == "/playlist-delete":
+                    try:
+                        pl_name = json.loads(body).get("name")
+                        entries.pop(len(entries) - 1 - i)
+                        break
+                    except Exception:
+                        pass
+            data = json.dumps({"forceRescan": signal, "playlistDelete": pl_name}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))

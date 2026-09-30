@@ -1434,6 +1434,13 @@ pub(crate) mod wasm {
                         // Clear the DB change fingerprint so detect_db_change resets
                         let _ = crate::store::kv().delete("scan.last_db_hash");
                     }
+                    if let Some(name) = val.get("playlistDelete").and_then(|v| v.as_str()) {
+                        if !name.is_empty() {
+                            if let Err(e) = crate::stats::host_stats::delete_playlist_by_name(cfg, name) {
+                                log_warn(&format!("playlist-delete: {e}"));
+                            }
+                        }
+                    }
                 }
             }
             _ => {} // Webhook offline or error — skip silently

@@ -1136,6 +1136,35 @@ pub mod host_stats {
         Ok(top.len())
     }
 
+    /// Delete the Navidrome playlist named `name` (webhook dashboard file-delete
+    /// signal — Navidrome keeps rows whose .nsp file vanished). Idempotent: a
+    /// missing playlist is not an error.
+    pub fn delete_playlist_by_name(cfg: &Config, name: &str) -> Result<(), String> {
+        let user = crate::wasm::scan_user(cfg);
+        if user.is_empty() {
+            return Err("no Navidrome user available (grant one in User Access) to delete playlist".into());
+        }
+        let listed = host::subsonicapi::call("getPlaylists")
+            .map_err(|err| format!("getPlaylists: {err}"))?;
+        let Some(id) = playlist_id_named(&listed, name) else {
+            crate::wasm::log_info(&format!("playlist-delete: '{name}' not found (already gone)"));
+            return Ok(());
+        };
+        let resp = host::subsonicapi::call(&format!(
+            "deletePlaylist?id={}",
+            urlencode(&id)
+        ))
+        .map_err(|err| format!("deletePlaylist: {err}"))?;
+        if resp.contains("\"status\":\"failed\"") || resp.contains("\"error\"") {
+            return Err(format!("deletePlaylist failed: {resp}"));
+        }
+        if name == "nd-organizer: Top Picks" {
+            let _ = crate::store::kv().delete("stat.playlist.id");
+        }
+        crate::wasm::log_info(&format!("playlist-delete: removed '{name}' ({id})"));
+        Ok(())
+    }
+
     fn urlencode(s: &str) -> String {
         let mut out = String::new();
         for b in s.bytes() {
