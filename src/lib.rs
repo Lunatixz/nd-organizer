@@ -649,6 +649,28 @@ pub(crate) mod wasm {
                             "stats timing: ratings {}ms",
                             t2.elapsed().as_millis()
                         ));
+                        // Refresh the "nd-organizer: Top Picks" playlist from
+                        // the weights (advertised with playback stats). Never
+                        // fails the stats task — log and continue.
+                        let t3 = std::time::Instant::now();
+                        let picks = if cfg.playback_stats_enabled {
+                            match crate::stats::host_stats::refresh_top_picks(
+                                &cfg,
+                                cfg.top_picks_count,
+                            ) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    crate::wasm::log_warn(&format!("top picks: {e}"));
+                                    0
+                                }
+                            }
+                        } else {
+                            0
+                        };
+                        crate::wasm::log_info(&format!(
+                            "stats timing: toppicks {}ms (picks={picks})",
+                            t3.elapsed().as_millis()
+                        ));
                         let heartbeat = serde_json::json!({
                             "ts": state::now_ts(),
                             "mode": mode_label(&cfg),
@@ -667,7 +689,7 @@ pub(crate) mod wasm {
                             "stats timing: total {}ms",
                             t0.elapsed().as_millis()
                         ));
-                        Ok(crate::stats::describe(&report, 0, filtered, 0, 0))
+                        Ok(crate::stats::describe(&report, picks, filtered, 0, 0))
                     }
                     Err(e) => {
                         crate::wasm::log_warn(&format!(

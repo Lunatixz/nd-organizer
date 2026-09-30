@@ -87,6 +87,27 @@ pub fn parse_playlist_id(json: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Extract the id of the playlist named `name` from a Subsonic `getPlaylists`
+/// response (array or single-object form). Used to recover from a stale
+/// stored playlist id without creating duplicate playlists.
+pub fn playlist_id_named(json: &str, name: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let pl = v
+        .pointer("/subsonic-response/playlists/playlist")?
+        .clone();
+    let items = match pl {
+        Value::Array(a) => a,
+        other => vec![other],
+    };
+    items.into_iter().find_map(|p| {
+        if p.get("name").and_then(|n| n.as_str()) == Some(name) {
+            p.get("id").and_then(|i| i.as_str()).map(|s| s.to_string())
+        } else {
+            None
+        }
+    })
+}
+
 // ---------------------------------------------------------------- star rating
 
 /// Per-file playback tally for the 0-5 star system. `full` is also the
@@ -1068,22 +1089,47 @@ pub mod host_stats {
         if top.is_empty() {
             return Ok(0);
         }
-        let mut q = format!(
-            "createPlaylist?name={}&u={user}",
-            urlencode("nd-organizer: Top Picks")
-        );
-        for (mfid, _) in &top {
-            q.push_str(&format!("&songId={}", urlencode(mfid)));
-        }
+        let build_q = |playlist_id: Option<&str>| {
+            let mut q = format!(
+                "createPlaylist?name={}&u={user}",
+                urlencode("nd-organizer: Top Picks")
+            );
+            for (mfid, _) in &top {
+                q.push_str(&format!("&songId={}", urlencode(mfid)));
+            }
+            if let Some(id) = playlist_id {
+                q.push_str(&format!("&playlistId={}", urlencode(id)));
+            }
+            q
+        };
         // Update an existing playlist if we've created one before.
-        if let Some(id) = crate::store::kv().get("stat.playlist.id").ok().flatten() {
-            if let Ok(id) = String::from_utf8(id) {
-                if !id.is_empty() {
-                    q.push_str(&format!("&playlistId={}", urlencode(&id)));
+        let stored = crate::store::kv()
+            .get("stat.playlist.id")
+            .ok()
+            .flatten()
+            .and_then(|v| String::from_utf8(v).ok())
+            .filter(|s| !s.is_empty());
+        let resp = match host::subsonicapi::call(&build_q(stored.as_deref())) {
+            Ok(r) => r,
+            Err(e) => {
+                // ponytail: the stored id may point at a deleted playlist —
+                // resolve the current one by name (avoids duplicates), else
+                // drop the stale id and create fresh.
+                crate::wasm::log_warn(&format!(
+                    "top picks: createPlaylist failed ({e}), resolving by name"
+                ));
+                let listed = host::subsonicapi::call("getPlaylists")
+                    .map_err(|err| format!("top picks: update failed ({e}); getPlaylists: {err}"))?;
+                match playlist_id_named(&listed, "nd-organizer: Top Picks") {
+                    Some(id) => host::subsonicapi::call(&build_q(Some(&id)))
+                        .map_err(|err| err.to_string())?,
+                    None => {
+                        let _ = crate::store::kv().delete("stat.playlist.id");
+                        host::subsonicapi::call(&build_q(None)).map_err(|err| err.to_string())?
+                    }
                 }
             }
-        }
-        let resp = host::subsonicapi::call(&q).map_err(|e| e.to_string())?;
+        };
         if let Some(pid) = parse_playlist_id(&resp) {
             let _ = crate::store::kv().set("stat.playlist.id", pid.into_bytes());
         }
@@ -1468,6 +1514,27 @@ mod tests {
             parse_playlist_id(r#"{"subsonic-response":{"playlist":{"id":"pl-9"}}}"#),
             Some("pl-9".into())
         );
+    }
+
+    #[test]
+    fn finds_playlist_id_by_name() {
+        let arr = r#"{"subsonic-response":{"playlists":{"playlist":[
+            {"id":"aaa","name":"Other Playlist"},
+            {"id":"bbb","name":"nd-organizer: Top Picks"}
+        ]}}}"#;
+        assert_eq!(
+            playlist_id_named(arr, "nd-organizer: Top Picks").as_deref(),
+            Some("bbb")
+        );
+        assert_eq!(playlist_id_named(arr, "Nope"), None);
+        // single-object form (some servers omit the array for one entry)
+        let one = r#"{"subsonic-response":{"playlists":{"playlist":
+            {"id":"ccc","name":"nd-organizer: Top Picks"}}}}"#;
+        assert_eq!(
+            playlist_id_named(one, "nd-organizer: Top Picks").as_deref(),
+            Some("ccc")
+        );
+        assert_eq!(playlist_id_named("not json", "x"), None);
     }
 
     #[test]
