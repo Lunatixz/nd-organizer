@@ -259,7 +259,7 @@
           "title": "Top Picks playlist size",
           "minimum": 5,
           "default": 50,
-          "description": "Number of highest-weight songs to put in the 'nd-organizer: Top Picks' playlist."
+          "description": "Number of highest-weight songs to put in the 'Top Picks' playlist."
         },
         "keywordFilterEnabled": {
           "type": "boolean",

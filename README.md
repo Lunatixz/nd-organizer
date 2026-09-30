@@ -50,7 +50,7 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   tracks; any Subsonic-compatible client participates automatically through
   server-side stars.
 - **Playback stats**: tracks plays vs skips and builds an
-  **"nd-organizer: Top Picks"** Navidrome playlist of the highest-weight songs.
+  **"Top Picks"** Navidrome playlist of the highest-weight songs.
   Weights + skip-heavy flags are published to the **filter proxy**, which
   re-sorts returned song lists so skipped tracks sink. A full play forgives a
   skip, and only net-negative tracks (skipped more than ever played fully, past
@@ -838,7 +838,7 @@ Enable **Playback stats** (`playbackStatsEnabled`). Every `statsPollMinutes`
    **skip**; leaving after the threshold is a **full play** (which also forgives
    one previous skip).
 2. Computes a **weight** = plays − 2×skips and builds/updates the
-   **"nd-organizer: Top Picks"** playlist (top `topPicksCount` songs by weight).
+   **"Top Picks"** playlist (top `topPicksCount` songs by weight).
 3. If a **Navidrome filter proxy URL** (`filterUrl`) is set, publishes every
    track's weight + the skip-heavy ID set (`skipContentMode`) + the filler
    keyword list and coverage checkboxes (`keywordFilterEnabled`) to the proxy

@@ -649,7 +649,7 @@ pub(crate) mod wasm {
                             "stats timing: ratings {}ms",
                             t2.elapsed().as_millis()
                         ));
-                        // Refresh the "nd-organizer: Top Picks" playlist from
+                        // Refresh the "Top Picks" playlist from
                         // the weights (advertised with playback stats). Never
                         // fails the stats task — log and continue.
                         let t3 = std::time::Instant::now();

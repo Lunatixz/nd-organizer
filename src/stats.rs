@@ -1074,7 +1074,7 @@ pub mod host_stats {
         Ok(written)
     }
 
-    /// Rebuild the "nd-organizer: Top Picks" Navidrome playlist from the weights.
+    /// Rebuild the "Top Picks" Navidrome playlist from the weights.
     pub fn refresh_top_picks(cfg: &Config, count: usize) -> Result<usize, String> {
         let user = crate::wasm::scan_user(cfg);
         if user.is_empty() {
@@ -1092,7 +1092,7 @@ pub mod host_stats {
         let build_q = |playlist_id: Option<&str>| {
             let mut q = format!(
                 "createPlaylist?name={}&u={user}",
-                urlencode("nd-organizer: Top Picks")
+                urlencode("Top Picks")
             );
             for (mfid, _) in &top {
                 q.push_str(&format!("&songId={}", urlencode(mfid)));
@@ -1130,7 +1130,7 @@ pub mod host_stats {
                 ));
                 let listed = host::subsonicapi::call("getPlaylists")
                     .map_err(|err| format!("top picks: update failed ({e}); getPlaylists: {err}"))?;
-                match playlist_id_named(&listed, "nd-organizer: Top Picks") {
+                match playlist_id_named(&listed, "Top Picks") {
                     Some(id) => attempt(Some(&id))?,
                     None => {
                         let _ = crate::store::kv().delete("stat.playlist.id");
@@ -1167,7 +1167,7 @@ pub mod host_stats {
         if resp.contains("\"status\":\"failed\"") || resp.contains("\"error\"") {
             return Err(format!("deletePlaylist failed: {resp}"));
         }
-        if name == "nd-organizer: Top Picks" {
+        if name == "Top Picks" {
             let _ = crate::store::kv().delete("stat.playlist.id");
         }
         crate::wasm::log_info(&format!("playlist-delete: removed '{name}' ({id})"));
@@ -1558,18 +1558,18 @@ mod tests {
     fn finds_playlist_id_by_name() {
         let arr = r#"{"subsonic-response":{"playlists":{"playlist":[
             {"id":"aaa","name":"Other Playlist"},
-            {"id":"bbb","name":"nd-organizer: Top Picks"}
+            {"id":"bbb","name":"Top Picks"}
         ]}}}"#;
         assert_eq!(
-            playlist_id_named(arr, "nd-organizer: Top Picks").as_deref(),
+            playlist_id_named(arr, "Top Picks").as_deref(),
             Some("bbb")
         );
         assert_eq!(playlist_id_named(arr, "Nope"), None);
         // single-object form (some servers omit the array for one entry)
         let one = r#"{"subsonic-response":{"playlists":{"playlist":
-            {"id":"ccc","name":"nd-organizer: Top Picks"}}}}"#;
+            {"id":"ccc","name":"Top Picks"}}}}"#;
         assert_eq!(
-            playlist_id_named(one, "nd-organizer: Top Picks").as_deref(),
+            playlist_id_named(one, "Top Picks").as_deref(),
             Some("ccc")
         );
         assert_eq!(playlist_id_named("not json", "x"), None);
