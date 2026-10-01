@@ -1514,6 +1514,30 @@ def _phase_eta(kind, cur, total):
     return None
 
 
+def _seed_verify_total():
+    """First render of a verify phase: recover the pass's initial total from
+    the newest run of verify entries. The walk stops at the index-phase
+    boundary so older passes' entries can't pollute the high-water mark.
+    (scan.verify_total itself is rewritten to the shrinking remainder on every
+    batch send, and a webhook restart mid-verify only sees the shrunk value.)"""
+    best = 0
+    for _, _, body in reversed(entries):
+        if '"phase":"index"' in body:
+            break
+        if '"phase":"verify"' not in body or '"currentFile"' not in body:
+            continue
+        try:
+            cf = json.loads(body).get("currentFile") or ""
+            for tok in cf.replace("verified", "").split():
+                if "/" in tok:
+                    m = int(tok.split("/")[1])
+                    if m > 1000:  # job-mode strings ("50/100") are not totals
+                        best = max(best, m)
+        except Exception:
+            continue
+    return best
+
+
 def _group_stats(lib):
     """(total files to group, still remaining) from KV, or None."""
     paths = kv_get_json("scan.group_paths.%s" % lib)
@@ -1951,6 +1975,8 @@ def now_panel(j):
     elif phase == "verify":
         now = "Verifying track identities (MusicBrainz / ISRC / AcoustID)&hellip;"
         lib = ((j.get("libraries") or [{}])[0]).get("id", 2)
+        if _VERIFY_TOTAL[0] == 0:
+            _VERIFY_TOTAL[0] = _seed_verify_total()
         read = kv_get_int("scan.verify_total.%s" % lib)
         if read:
             _VERIFY_TOTAL[0] = max(_VERIFY_TOTAL[0], read)
