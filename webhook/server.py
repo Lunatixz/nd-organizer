@@ -974,6 +974,7 @@ def db_query(sql, params=(), ttl=60):
 
 _KV_CACHE = {}
 _PLUGIN_CFG = [0, None]
+_VERIFY_TOTAL = [0]  # high-water of scan.verify_total for the active verify phase
 
 
 def plugin_config():
@@ -1900,6 +1901,11 @@ def now_panel(j):
     mode = j.get("mode", "")
     dry = mode != "apply"
     phase = j.get("phase", "")
+    # scan.verify_total is rewritten to the shrinking remainder on every batch
+    # send - keep the high-water mark (the pass's real total) instead. Reset
+    # whenever verify isn't the active phase so the next pass re-seeds.
+    if phase != "verify":
+        _VERIFY_TOTAL[0] = 0
 
     # Big state pill.
     if j.get("rollbackOfRun"):
@@ -1945,7 +1951,10 @@ def now_panel(j):
     elif phase == "verify":
         now = "Verifying track identities (MusicBrainz / ISRC / AcoustID)&hellip;"
         lib = ((j.get("libraries") or [{}])[0]).get("id", 2)
-        total = kv_get_int("scan.verify_total.%s" % lib)
+        read = kv_get_int("scan.verify_total.%s" % lib)
+        if read:
+            _VERIFY_TOTAL[0] = max(_VERIFY_TOTAL[0], read)
+        total = _VERIFY_TOTAL[0] or None
         rem = kv_get_json("scan.unverified.%s" % lib)
         if total and isinstance(rem, list):
             done = max(0, total - len(rem))
