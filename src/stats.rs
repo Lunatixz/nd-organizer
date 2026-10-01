@@ -1128,7 +1128,7 @@ pub mod host_stats {
                 crate::wasm::log_warn(&format!(
                     "top picks: createPlaylist failed ({e}), resolving by name"
                 ));
-                let listed = host::subsonicapi::call("getPlaylists")
+                let listed = host::subsonicapi::call(&format!("getPlaylists?u={user}"))
                     .map_err(|err| format!("top picks: update failed ({e}); getPlaylists: {err}"))?;
                 match playlist_id_named(&listed, "Top Picks") {
                     Some(id) => attempt(Some(&id))?,
@@ -1153,14 +1153,15 @@ pub mod host_stats {
         if user.is_empty() {
             return Err("no Navidrome user available (grant one in User Access) to delete playlist".into());
         }
-        let listed = host::subsonicapi::call("getPlaylists")
+        let listed = host::subsonicapi::call(&format!("getPlaylists?u={user}"))
             .map_err(|err| format!("getPlaylists: {err}"))?;
         let Some(id) = playlist_id_named(&listed, name) else {
             crate::wasm::log_info(&format!("playlist-delete: '{name}' not found (already gone)"));
             return Ok(());
         };
         let resp = host::subsonicapi::call(&format!(
-            "deletePlaylist?id={}",
+            "deletePlaylist?u={}&id={}",
+            user,
             urlencode(&id)
         ))
         .map_err(|err| format!("deletePlaylist: {err}"))?;
@@ -1313,9 +1314,8 @@ pub mod host_stats {
     /// Returns the count of files whose tags were actually modified.
     pub fn write_essentia_genres(
         cfg: &crate::config::Config,
-        root: &std::path::Path,
-        _plan: &crate::organizer::GroupPlan,
         files: &[(String, crate::tags::TrackTags)],
+        fin: &std::collections::HashMap<String, std::path::PathBuf>,
     ) -> usize {
         let base = cfg.essentia_url.trim().trim_end_matches('/');
         if base.is_empty() {
@@ -1324,7 +1324,7 @@ pub mod host_stats {
         let mut written = 0usize;
         let total = files.len();
         for (rel, _ft) in files {
-            let abs = root.join(rel);
+            let Some(abs) = fin.get(rel) else { continue };
             let path_str = abs.to_string_lossy().to_string();
             let cache_key = format!("essentia:{}", path_str);
             // Check cache first (7-day TTL).

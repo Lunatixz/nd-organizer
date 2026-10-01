@@ -2323,10 +2323,34 @@ pub fn plan_enrich_step(
         }).unwrap_or_default());
         report_parts.push(group_report(&plan, false));
 
-        if !plan.moves.is_empty() {
+        // plan_move_step applied the moves before this task ran (Apply mode):
+        // resolve every rel to its post-move location, including the
+        // cross-library relocation to moveDestinationLibrary.
+        let dest_root = (!cfg.move_destination_library.trim().is_empty())
+            .then(|| crate::wasm::resolve_library_id(&cfg.move_destination_library))
+            .flatten()
+            .and_then(|id| lib_root(id).ok());
+        let cross =
+            !plan.moves.is_empty() && dest_root.as_deref().is_some_and(|d| d != root.as_path());
+        let dst_of = |rel: &str| -> std::path::PathBuf {
+            match &dest_root {
+                Some(d) if cross => d.join(rel),
+                _ => root.join(rel),
+            }
+        };
+        let fin: std::collections::HashMap<String, std::path::PathBuf> = files
+            .iter()
+            .map(|(r, _)| (r.clone(), root.join(r)))
+            .chain(plan.moves.iter().map(|m| (m.from.clone(), dst_of(&m.to))))
+            .collect();
+        let target_abs = dst_of(&plan.target_dir);
+        let abs_of =
+            |rel: &str| -> std::path::PathBuf { fin.get(rel).cloned().unwrap_or_else(|| root.join(rel)) };
+
+        if !files.is_empty() {
             if cfg.auto_tag_from_mb && remain_ms(enrich_start, task_budget) >= 9_000 {
                 if let Some(rel) = &mb_release {
-                    if let Some(tagged) = autotag_album(cfg, &root, &files, rel, &info) {
+                    if let Some(tagged) = autotag_album(cfg, &files, rel, &info, &fin) {
                         total_autotags += tagged;
                         actions.push(serde_json::json!({
                             "ts": crate::state::now_ts(),
@@ -2342,7 +2366,7 @@ pub fn plan_enrich_step(
                 let mut rg_entries: Vec<(std::path::PathBuf, f64, Option<f64>)> = Vec::new();
                 for (rel, _) in &files {
                     if past(enrich_start, enrich_budget) { break; }
-                    let abs = root.join(rel);
+                    let abs = abs_of(rel);
                     if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
                         if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
                             .unwrap_or(false)
@@ -2402,15 +2426,15 @@ pub fn plan_enrich_step(
                     &info.album_artist,
                     &info.album,
                 ) {
-                    let dir = root.join(&plan.target_dir);
+                    let dir = target_abs.clone();
                     let mut embedded = 0usize;
                     let mut sidecar = false;
                     if cfg.embed_artwork {
-                        let first = files.first().map(|(r, _)| root.join(r)).unwrap_or_default();
+                        let first = files.first().map(|(r, _)| abs_of(r)).unwrap_or_default();
                         if cfg.overwrite_art || !crate::artwork::has_embedded(&first) {
                             for (rel, _) in files.iter() {
                                 if past(enrich_start, enrich_budget) { break; }
-                                let path = root.join(rel);
+                                let path = abs_of(rel);
                                 if crate::artwork::embed(&path, bytes.clone(), crate::artwork::ArtKind::Front).is_ok() {
                                     embedded += 1;
                                 }
@@ -2437,9 +2461,9 @@ pub fn plan_enrich_step(
                 && remain_ms(enrich_start, task_budget) >= 11_000
             {
                 let n = download_lyrics_for(
-                    &root,
                     &plan,
                     &files,
+                    &fin,
                     cfg.lyrics_format.as_str(),
                     &cfg.lyrics_source,
                     cfg,
@@ -2462,7 +2486,7 @@ pub fn plan_enrich_step(
                     }
                 });
                 let nfo_genres = if cfg.read_nfo {
-                    crate::nfo::read_album_nfo(&root.join(&plan.target_dir))
+                    crate::nfo::read_album_nfo(&target_abs)
                         .map(|n| n.genres)
                         .unwrap_or_default()
                 } else {
@@ -2479,7 +2503,7 @@ pub fn plan_enrich_step(
                 ) {
                     for (rel, _tags) in files.iter() {
                         if past(enrich_start, enrich_budget) { break; }
-                        let path = root.join(rel);
+                        let path = abs_of(rel);
                         let _ = crate::tags::write_genre(&path, &genres);
                     }
                     actions.push(serde_json::json!({
@@ -2492,7 +2516,7 @@ pub fn plan_enrich_step(
                 && !cfg.audiomuse_url.trim().is_empty()
                 && remain_ms(enrich_start, task_budget) >= 9_000
             {
-                let n = write_acoustic_tags_for(cfg, &root, &plan, &files, enrich_start, task_budget);
+                let n = write_acoustic_tags_for(cfg, &plan, &files, &fin, enrich_start, task_budget);
                 if n > 0 {
                     actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
@@ -2501,7 +2525,7 @@ pub fn plan_enrich_step(
                 }
             }
             if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() {
-                let n = crate::stats::host_stats::write_essentia_genres(cfg, &root, &plan, &files);
+                let n = crate::stats::host_stats::write_essentia_genres(cfg, &files, &fin);
                 if n > 0 {
                     actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
@@ -2516,7 +2540,7 @@ pub fn plan_enrich_step(
                 for (rel, tags) in &files {
                     if past(enrich_start, enrich_budget) { break; }
                     let title = tags.title.clone();
-                    let abs = root.join(rel);
+                    let abs = abs_of(rel);
                     let path_str = abs.to_string_lossy().to_string();
                     let cache_key = format!("instrumental:{}", path_str);
 
@@ -2606,7 +2630,7 @@ pub fn plan_enrich_step(
                 for (rel, tags) in &files {
                     if past(enrich_start, enrich_budget) { break; }
                     let title = tags.title.clone();
-                    let abs = root.join(rel);
+                    let abs = abs_of(rel);
                     let path_str = abs.to_string_lossy().to_string();
                     let cache_key = format!("acoustic:{}", path_str);
 
@@ -2773,8 +2797,8 @@ pub fn plan_enrich_step(
         }
         // Write NFO at the end — after ALL metadata sources have been queried.
         // This ensures the NFO contains the most complete metadata possible.
-        if cfg.write_nfo && !plan.moves.is_empty() {
-            write_group_nfo(&root, cfg, &plan, &files);
+        if cfg.write_nfo {
+            write_group_nfo(cfg, &plan, &files, &fin, &target_abs);
             actions.push(serde_json::json!({
                 "ts": crate::state::now_ts(),
                 "text": "wrote album.nfo (unified metadata)".to_string(),
@@ -3132,10 +3156,10 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
 /// Returns Some(count) when any track was/would be tagged.
 fn autotag_album(
     cfg: &Config,
-    root: &std::path::Path,
     files: &[(String, crate::tags::TrackTags)],
     rel: &crate::musicbrainz::MbRelease,
     info: &crate::organizer::AlbumInfo,
+    fin: &std::collections::HashMap<String, std::path::PathBuf>,
 ) -> Option<usize> {
     let tracks = crate::musicbrainz::release_tracks(&rel.release_mbid, &cfg.musicbrainz_token)?;
     if tracks.is_empty() {
@@ -3154,9 +3178,9 @@ fn autotag_album(
             if dry {
                 tagged += 1;
             } else {
-                let abs = root.join(relpath);
+                let Some(abs) = fin.get(relpath) else { continue };
                 match crate::tags::fill_missing_from_mb(
-                    &abs,
+                    abs,
                     &mbt.title,
                     &mbt.artist,
                     &mbt.recording_mbid,
@@ -3311,10 +3335,11 @@ fn basename(rel: &str) -> &str {
 
 /// Write album.nfo at the group's target dir from the group's metadata.
 fn write_group_nfo(
-    root: &Path,
     cfg: &Config,
     plan: &crate::organizer::GroupPlan,
     files: &[(String, TrackTags)],
+    fin: &std::collections::HashMap<String, std::path::PathBuf>,
+    target_abs: &std::path::Path,
 ) {
     let info = crate::organizer::album_info_from_tags(files);
     let genre = if info.genre.is_empty() {
@@ -3337,8 +3362,10 @@ fn write_group_nfo(
     let description = am_description.unwrap_or_default();
     // Fetch Essentia data (structure, chords, BPM/key) for NFO from cache or sidecar.
     let essentia_data = if cfg.essentia_structure || cfg.essentia_chords || cfg.essentia_bpm {
-        files.first().and_then(|(rel, _)| {
-            let abs = root.join(rel);
+        files
+            .first()
+            .and_then(|(rel, _)| fin.get(rel).cloned())
+            .and_then(|abs| {
             let path_str = abs.to_string_lossy().to_string();
             let cache_key = format!("essentia:{}", path_str);
             // Try cache first.
@@ -3460,7 +3487,7 @@ fn write_group_nfo(
         credits,
         ..Default::default()
     };
-    let path = root.join(&plan.target_dir).join("album.nfo");
+    let path = target_abs.join("album.nfo");
     if let Some(p) = path.parent() {
         let _ = std::fs::create_dir_all(p);
     }
@@ -3469,7 +3496,7 @@ fn write_group_nfo(
     }
     // Also write artist.nfo into the artist folder (parent of the album dir)
     // with the artist name + genres + similar artists. Kodi reads it there.
-    if let Some(artist_dir) = Path::new(&plan.target_dir).parent() {
+    if let Some(artist_dir) = target_abs.parent().filter(|_| !plan.target_dir.is_empty()) {
         if !info.album_artist.trim().is_empty() {
             // Fetch Apple Music similar artists (gated by appleMusicSimilarArtists).
             let similar_artists = if cfg.apple_music_similar_artists {
@@ -3494,7 +3521,7 @@ fn write_group_nfo(
             }
             .unwrap_or_default();
             // Read existing artist.nfo if present to preserve other fields.
-            let a_path = root.join(artist_dir).join("artist.nfo");
+            let a_path = artist_dir.join("artist.nfo");
             let existing_nfo = if let Ok(xml) = std::fs::read_to_string(&a_path) {
                 crate::nfo::parse_artist_nfo(&xml)
             } else {
@@ -3522,31 +3549,28 @@ fn write_group_nfo(
 /// tracks got tags.
 fn write_acoustic_tags_for(
     cfg: &Config,
-    root: &Path,
     plan: &crate::organizer::GroupPlan,
     files: &[(String, TrackTags)],
+    fin: &std::collections::HashMap<String, std::path::PathBuf>,
     start: std::time::SystemTime,
     budget: std::time::Duration,
 ) -> usize {
-    use std::collections::HashMap;
-    let by_src: HashMap<&str, &TrackTags> = files.iter().map(|(r, t)| (r.as_str(), t)).collect();
     let mut written = 0usize;
-    for m in &plan.moves {
+    for (rel, t) in files {
         // Each audiomuse fetch costs up to ~8s against the task's 30s cap.
         if remain_ms(start, budget) < 9_000 {
             break;
         }
-        let Some(t) = by_src.get(m.from.as_str()) else { continue };
         if !crate::wasm::should_write_tags(cfg, &t.album_artist) {
             continue;
         }
+        let Some(final_path) = fin.get(rel) else { continue };
         let Some(ac) = crate::audiomuse::fetch(cfg, &t.artist, &t.title) else {
             continue;
         };
-        let final_path = root.join(&m.to);
-        match crate::audiomuse::write_tags(&final_path, &ac, cfg.overwrite_existing_tags) {
+        match crate::audiomuse::write_tags(final_path, &ac, cfg.overwrite_existing_tags) {
             Ok(()) => written += 1,
-            Err(e) => crate::wasm::log_warn(&format!("acoustic tags for {}: {e}", m.from)),
+            Err(e) => crate::wasm::log_warn(&format!("acoustic tags for {}: {e}", rel)),
         }
     }
     if written > 0 {
@@ -3562,24 +3586,22 @@ fn write_acoustic_tags_for(
 /// its final location. Best-effort - never fails the run. Returns how many
 /// sidecars were written.
 fn download_lyrics_for(
-    root: &Path,
     plan: &crate::organizer::GroupPlan,
     files: &[(String, TrackTags)],
+    fin: &std::collections::HashMap<String, std::path::PathBuf>,
     format: &str,
     lyrics_source: &str,
     cfg: &crate::config::Config,
     start: std::time::SystemTime,
     budget: std::time::Duration,
 ) -> usize {
-    use std::collections::HashMap;
-    let by_src: HashMap<&str, &TrackTags> = files.iter().map(|(r, t)| (r.as_str(), t)).collect();
     let mut written = 0usize;
-    for m in &plan.moves {
+    for (rel, t) in files {
         // Each LRCLIB/Genius fetch costs up to ~8s against the task's 30s cap.
         if remain_ms(start, budget) < 9_000 {
             break;
         }
-        let Some(t) = by_src.get(m.from.as_str()) else { continue };
+        let Some(final_path) = fin.get(rel) else { continue };
         // Try LRCLIB first (always), then Genius as fallback.
         let lyr = crate::lyrics::fetch(&t.artist, &t.title, &t.album, 0)
             .or_else(|| {
@@ -3592,10 +3614,9 @@ fn download_lyrics_for(
                 }
             });
         let Some(lyr) = lyr else { continue };
-        let final_path = root.join(&m.to);
-        match crate::lyrics::write_sidecar(&final_path, &lyr, format) {
+        match crate::lyrics::write_sidecar(final_path, &lyr, format) {
             Ok(()) => written += 1,
-            Err(e) => crate::wasm::log_warn(&format!("lyrics for {}: {e}", m.from)),
+            Err(e) => crate::wasm::log_warn(&format!("lyrics for {}: {e}", rel)),
         }
     }
     if written > 0 {
