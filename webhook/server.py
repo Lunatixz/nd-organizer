@@ -1019,29 +1019,45 @@ def now_card_html(status_j):
         return out + "<div class='note'>Nothing is playing right now.</div></div>"
     primary = np[0]
     art, dc = "", ""
+    rating, starred = 0, 0
     q = db_query(
-        "SELECT ia.hash, aw.dominant_color FROM media_file mf "
-        "JOIN item_artwork ia ON ia.item_id=mf.album_id AND ia.item_kind='al' "
+        "SELECT ia.hash, aw.dominant_color, an.rating, an.starred FROM media_file mf "
+        "LEFT JOIN item_artwork ia ON ia.item_id=mf.album_id AND ia.item_kind='al' "
         "AND ia.image_type='primary' LEFT JOIN artwork aw ON aw.hash=ia.hash "
+        "LEFT JOIN annotation an ON an.item_id=mf.id AND an.item_type='media_file' "
+        "AND an.user_id=(SELECT id FROM user WHERE is_admin=1 LIMIT 1) "
         "WHERE mf.id=? LIMIT 1",
         (str(primary.get("id", "")),), ttl=60,
     )
     if q:
         art = q[0].get("hash") or ""
         dc = q[0].get("dominant_color") or ""
+        try:
+            rating = max(0, min(5, int(q[0].get("rating") or 0)))
+        except (TypeError, ValueError):
+            rating = 0
+        starred = 1 if q[0].get("starred") else 0
     pos = int(primary.get("positionMs") or primary.get("position_ms") or 0)
     dur = int(primary.get("duration") or 0)
     pct = int(pos / (dur * 1000.0) * 100.0) if dur > 0 else 0
     cover = ("<img class='np-cover' src='/art/%s' alt='' onerror='this.remove()'>" % art
              if art else "<div class='np-cover' style='background:linear-gradient(135deg,%s,#0a0e1a)'></div>"
              % esc(dc or "#3b82f6"))
+    stars = "<span class='np-stars'>%s%s</span>" % (
+        "<span class='np-star-on'>★</span>" * rating,
+        "<span class='np-star-off'>☆</span>" * (5 - rating))
+    love = "♥ Loved" if starred else "♡ Not loved"
+    album_line = ("<div class='np-album'>%s</div>" % esc(primary.get("album", ""))
+                  if primary.get("album") else "")
     out += ("<div class='np-hero'>%s<div class='np-meta'>"
             "<div class='np-title'>%s</div>"
-            "<div class='np-artist'>%s%s</div>"
+            "<div class='np-artist'>%s</div>"
+            "%s"
+            "<div class='np-badges'>%s<span class='np-love%s'>%s</span></div>"
             "<div class='bar np-bar'><i style='width:%d%%'></i></div>"
             "<div class='dim'>%s / %s (%d%%)</div></div></div>") % (
         cover, esc(primary.get("title", "") or "?"), esc(primary.get("artist", "")),
-        " &middot; " + esc(primary.get("album", "")) if primary.get("album") else "",
+        album_line, stars, "" if starred else " off", love,
         pct, _fmt_ms(pos), _fmt_ms(dur * 1000), pct)
     for e in np[1:6]:
         out += ("<div class='np'><span class='np-dot'></span>"
@@ -2452,6 +2468,13 @@ header{position:sticky;top:0;z-index:30;background:rgba(10,14,26,.94);backdrop-f
 .np-meta{flex:1;min-width:0}
 .np-title{font-size:16px;font-weight:600;color:#e6eaf1;word-break:break-word}
 .np-artist{font-size:13px;color:var(--text2);margin-bottom:6px;word-break:break-word}
+.np-album{font-size:12px;color:var(--text2);opacity:.75;margin-bottom:6px;word-break:break-word}
+.np-badges{display:flex;gap:10px;align-items:center;font-size:12px;margin-bottom:6px}
+.np-stars{letter-spacing:1px}
+.np-star-on{color:#eab308}
+.np-star-off{color:#39415a}
+.np-love{color:#f43f5e;font-weight:600}
+.np-love.off{color:var(--text2);font-weight:400}
 .np-bar i{background:var(--grad);animation:none;background-size:100% 100%}
 .rail{display:flex;gap:10px;overflow-x:auto;padding-bottom:8px;scroll-snap-type:x mandatory}
 .acard{flex:0 0 140px;scroll-snap-align:start}
