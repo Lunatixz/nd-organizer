@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, Mode};
 use crate::organizer::is_audio;
-use crate::state::{cap_ms, remain_ms};
+use crate::state::{cap_ms, past, remain_ms, since};
 use crate::tags::TrackTags;
 
 fn lib_root(library_id: i32) -> Result<std::path::PathBuf, String> {
@@ -126,7 +126,7 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
     let _initial_stack = stack.len();
     // Hard time cap: break out before the WASM deadline regardless of
     // dir/file counters. Check every 200 dirs to avoid syscall overhead.
-    let scan_start = std::time::Instant::now();
+    let scan_start = std::time::SystemTime::now();
     let time_budget = std::time::Duration::from_secs(15);
     let mut dirs_since_check: usize = 0;
 
@@ -143,7 +143,7 @@ pub fn scan_step(cfg: &Config, library_id: i32) -> Result<(ScanOutcome, usize), 
         dirs_since_check += 1;
         if dirs_since_check >= 200 {
             dirs_since_check = 0;
-            if scan_start.elapsed() >= time_budget {
+            if past(scan_start, time_budget) {
                 stack.push(dir_rel);
                 hit_limit = true;
                 break;
@@ -478,7 +478,7 @@ pub fn walk_step(
     // Track seen files to avoid counting duplicates (symlinks, hardlinks).
     let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    let scan_start = std::time::Instant::now();
+    let scan_start = std::time::SystemTime::now();
     let time_budget = std::time::Duration::from_secs(15);
     let mut dirs_since_check: usize = 0;
     let mut dirs_walked: usize = 0;
@@ -504,7 +504,7 @@ pub fn walk_step(
         dirs_since_check += 1;
         if dirs_since_check >= 10 {
             dirs_since_check = 0;
-            if scan_start.elapsed() >= time_budget {
+            if past(scan_start, time_budget) {
                 stack.push(dir_rel);
                 break;
             }
@@ -542,7 +542,7 @@ pub fn walk_step(
             entries_since_check += 1;
             if entries_since_check >= 200 {
                 entries_since_check = 0;
-                if scan_start.elapsed() >= time_budget || files.len() >= entries_per_chunk {
+                if past(scan_start, time_budget) || files.len() >= entries_per_chunk {
                     hit_limit = true;
                     break;
                 }
@@ -683,7 +683,7 @@ pub fn index_step(
         .and_then(|v| String::from_utf8_lossy(&v).parse().ok())
         .unwrap_or(0);
 
-    let scan_start = std::time::Instant::now();
+    let scan_start = std::time::SystemTime::now();
     // 15s budget — Navidrome's WASM scheduler kills at ~27s.
     // ponytail: the WASM clock accrues while running, not while blocked in
     // host calls (kv HTTP, mount stats) — on IO-heavy chunks the budget
@@ -711,7 +711,7 @@ pub fn index_step(
         if i - start_i >= iters_per_task {
             break;
         }
-        if scan_start.elapsed() >= time_budget {
+        if past(scan_start, time_budget) {
             break;
         }
         if cap > 0 && pass_count + processed >= cap {
@@ -734,7 +734,7 @@ pub fn index_step(
             skipped += 1;
         }
         i += 1;
-        if scan_start.elapsed() >= time_budget {
+        if past(scan_start, time_budget) {
             break;
         }
     }
@@ -845,7 +845,7 @@ fn load_unverified(
         })
         .unwrap_or_else(|| {
             crate::wasm::log_info("verify_step: recomputing unverified list from indexed key");
-            let recompute_start = std::time::Instant::now();
+            let recompute_start = std::time::SystemTime::now();
             let recompute_budget = std::time::Duration::from_secs(20);
 
             let file_list: Vec<(String, i64)> = match crate::store::kv()
@@ -858,7 +858,7 @@ fn load_unverified(
                 None => return vec![],
             };
 
-            if recompute_start.elapsed() >= recompute_budget {
+            if past(recompute_start, recompute_budget) {
                 crate::wasm::log_warn("verify_step: recompute budget exceeded after loading indexed list");
                 return vec![];
             }
@@ -867,7 +867,7 @@ fn load_unverified(
             let batch_size_kv = 500;
             let mut verified_set: std::collections::HashSet<String> = std::collections::HashSet::new();
             for chunk in file_keys.chunks(batch_size_kv) {
-                if recompute_start.elapsed() >= recompute_budget {
+                if past(recompute_start, recompute_budget) {
                     break;
                 }
                 if let Ok(entries) = crate::store::kv().get_many(chunk.to_vec()) {
@@ -904,7 +904,7 @@ fn load_unverified(
             }).cloned().collect();
             crate::wasm::log_info(&format!(
                 "verify_step: recompute done in {:?}, {} unverified of {} total (checked {}/{})",
-                recompute_start.elapsed(), list.len(), file_list.len(),
+                since(recompute_start), list.len(), file_list.len(),
                 verified_set.len(), file_keys.len()
             ));
             let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&list).unwrap_or_default());
@@ -1294,7 +1294,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     post_phase_status(cfg, library_id, "group");
     // ponytail: 24s of 30 — the dup reports below must never cost us the
     // enqueue_plan_tasks call at the end of this step.
-    let task_start = std::time::Instant::now();
+    let task_start = std::time::SystemTime::now();
     let task_budget = std::time::Duration::from_secs(24);
 
     // Skip if verify is still active — the unverified list means verify hasn't
@@ -1383,7 +1383,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     ));
 
     // Read tags from individual KV entries in time-budgeted batches.
-    let scan_start = std::time::Instant::now();
+    let scan_start = std::time::SystemTime::now();
     // 10s, not 15: the completion path (merge + reports + plan enqueue) needs
     // the rest of the 24s budget before the 30s host deadline.
     let time_budget = std::time::Duration::from_secs(10);
@@ -1393,7 +1393,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let mut hit_budget = false;
 
     for chunk in file_list[cursor..].chunks(batch_size) {
-        if scan_start.elapsed() >= time_budget {
+        if past(scan_start, time_budget) {
             hit_budget = true;
             break;
         }
@@ -1434,10 +1434,21 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             }
         }
         cursor += chunk.len();
+        if cursor == batch_size || cursor % 1000 == 0 {
+            crate::wasm::log_info(&format!(
+                "group_step: {}/{} tags read in {:?}",
+                cursor, file_list.len(), since(scan_start)
+            ));
+        }
     }
 
     // If we hit the time budget, save remaining list and re-enqueue.
     if hit_budget {
+        crate::wasm::log_info(&format!(
+            "group_step: budget reached after {:?} at cursor {}, saving tail",
+            since(scan_start),
+            cursor
+        ));
         // Save only the unprocessed remaining files — much smaller than full list.
         let remaining: Vec<(String, i64)> = file_list[cursor..].to_vec();
         let _ = crate::store::kv().set(&remaining_key, serde_json::to_vec(&remaining).unwrap_or_default());
@@ -1555,7 +1566,7 @@ fn report_cross_duplicates(
     cfg: &Config,
     root: &str,
     verified: &[(String, crate::tags::TrackTags)],
-    start: std::time::Instant,
+    start: std::time::SystemTime,
     budget: std::time::Duration,
 ) {
     use std::collections::HashMap;
@@ -1612,7 +1623,7 @@ fn report_essentia_duplicates(
     cfg: &Config,
     root: &str,
     verified: &[(String, crate::tags::TrackTags)],
-    start: std::time::Instant,
+    start: std::time::SystemTime,
     budget: std::time::Duration,
 ) {
     let base = cfg.essentia_url.trim().trim_end_matches('/');
@@ -1733,7 +1744,7 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or_else(|| {
             // First chunk — collect directories with a time budget.
-            let start = std::time::Instant::now();
+            let start = std::time::SystemTime::now();
             let budget = std::time::Duration::from_secs(12);
             let mut all_dirs = Vec::new();
             collect_dirs_bounded(&root, &root, cfg, &mut all_dirs, &start, &budget);
@@ -1760,12 +1771,12 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let scan_start = std::time::Instant::now();
+    let scan_start = std::time::SystemTime::now();
     let time_budget = std::time::Duration::from_secs(15);
     let mut processed = 0;
 
     for dir_rel in dirs.iter().take(batch_size) {
-        if scan_start.elapsed() >= time_budget {
+        if past(scan_start, time_budget) {
             break;
         }
         let dir_path = root.join(dir_rel);
@@ -1826,10 +1837,10 @@ fn collect_dirs_bounded(
     root: &std::path::Path,
     cfg: &Config,
     dirs: &mut Vec<String>,
-    start: &std::time::Instant,
+    start: &std::time::SystemTime,
     budget: &std::time::Duration,
 ) {
-    if start.elapsed() >= *budget {
+    if past(*start, *budget) {
         return;
     }
     let rel = dir
@@ -1847,7 +1858,7 @@ fn collect_dirs_bounded(
         return;
     };
     for e in entries.flatten() {
-        if start.elapsed() >= *budget {
+        if past(*start, *budget) {
             return;
         }
         let name = e.file_name().to_string_lossy().to_string();
@@ -1914,12 +1925,12 @@ pub fn plan_move_step(
     let mut total_dupes = 0usize;
     let mut total_to_move = 0usize;
     let mut plans: Vec<serde_json::Value> = Vec::new();
-    let move_start = std::time::Instant::now();
+    let move_start = std::time::SystemTime::now();
     let move_budget = std::time::Duration::from_secs(15);
     let task_budget = std::time::Duration::from_secs(24);
 
     for (gi, group) in groups.iter().enumerate() {
-        if move_start.elapsed() >= move_budget {
+        if past(move_start, move_budget) {
             // Re-enqueue remaining groups.
             let remaining = &groups[gi..];
             crate::wasm::log_info(&format!(
@@ -2259,14 +2270,14 @@ pub fn plan_enrich_step(
     let mut actions: Vec<serde_json::Value> = Vec::new();
     let mut total_autotags = 0usize;
     let mut total_replaygains = 0usize;
-    let enrich_start = std::time::Instant::now();
+    let enrich_start = std::time::SystemTime::now();
     let enrich_budget = std::time::Duration::from_secs(15);
     let task_budget = std::time::Duration::from_secs(24);
 
     for group in groups {
         // Check time budget before starting each album.
         // Cached sidecar results make re-processing fast on resume.
-        if enrich_start.elapsed() >= enrich_budget {
+        if past(enrich_start, enrich_budget) {
             crate::wasm::log_info("enrich_step: time budget hit, pausing (cached results on resume)");
             break;
         }
@@ -2330,7 +2341,7 @@ pub fn plan_enrich_step(
             if cfg.write_replaygain {
                 let mut rg_entries: Vec<(std::path::PathBuf, f64, Option<f64>)> = Vec::new();
                 for (rel, _) in &files {
-                    if enrich_start.elapsed() >= enrich_budget { break; }
+                    if past(enrich_start, enrich_budget) { break; }
                     let abs = root.join(rel);
                     if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
                         if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
@@ -2350,7 +2361,7 @@ pub fn plan_enrich_step(
                             .filter_map(|(_, _, p)| *p)
                             .fold(f64::NEG_INFINITY, f64::max);
                         for (abs, _, _) in &rg_entries {
-                            if enrich_start.elapsed() >= enrich_budget { break; }
+                            if past(enrich_start, enrich_budget) { break; }
                             let peak = if album_peak.is_finite() { Some(album_peak) } else { None };
                             if crate::tags::write_replaygain_album(
                                 abs,
@@ -2398,7 +2409,7 @@ pub fn plan_enrich_step(
                         let first = files.first().map(|(r, _)| root.join(r)).unwrap_or_default();
                         if cfg.overwrite_art || !crate::artwork::has_embedded(&first) {
                             for (rel, _) in files.iter() {
-                                if enrich_start.elapsed() >= enrich_budget { break; }
+                                if past(enrich_start, enrich_budget) { break; }
                                 let path = root.join(rel);
                                 if crate::artwork::embed(&path, bytes.clone(), crate::artwork::ArtKind::Front).is_ok() {
                                     embedded += 1;
@@ -2467,7 +2478,7 @@ pub fn plan_enrich_step(
                     task_budget,
                 ) {
                     for (rel, _tags) in files.iter() {
-                        if enrich_start.elapsed() >= enrich_budget { break; }
+                        if past(enrich_start, enrich_budget) { break; }
                         let path = root.join(rel);
                         let _ = crate::tags::write_genre(&path, &genres);
                     }
@@ -2503,7 +2514,7 @@ pub fn plan_enrich_step(
             // If not labeled but IS instrumental, append "(Instrumental)".
             if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() {
                 for (rel, tags) in &files {
-                    if enrich_start.elapsed() >= enrich_budget { break; }
+                    if past(enrich_start, enrich_budget) { break; }
                     let title = tags.title.clone();
                     let abs = root.join(rel);
                     let path_str = abs.to_string_lossy().to_string();
@@ -2593,7 +2604,7 @@ pub fn plan_enrich_step(
             // Acoustic = high harmonic content relative to percussive (HPSS separation).
             if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() {
                 for (rel, tags) in &files {
-                    if enrich_start.elapsed() >= enrich_budget { break; }
+                    if past(enrich_start, enrich_budget) { break; }
                     let title = tags.title.clone();
                     let abs = root.join(rel);
                     let path_str = abs.to_string_lossy().to_string();
@@ -2898,7 +2909,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
     }
 
     let budget = std::time::Duration::from_secs(15);
-    let start = std::time::Instant::now();
+    let start = std::time::SystemTime::now();
     let mut processed = 0usize;
     let mut refreshed = 0usize;
 
@@ -2909,7 +2920,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
 
     // Process files with time budget.
     while cursor < file_list.len() {
-        if start.elapsed() >= budget {
+        if past(start, budget) {
             break;
         }
 
@@ -2933,7 +2944,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
             let mut changed = false;
 
             // ReplayGain
-            if cfg.write_replaygain && start.elapsed() < budget {
+            if cfg.write_replaygain && !past(start, budget) {
                 if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
                     if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
                         .unwrap_or(false)
@@ -2944,7 +2955,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
             }
 
             // Genre
-            if !cfg.genre_source.is_empty() && start.elapsed() < budget {
+            if !cfg.genre_source.is_empty() && !past(start, budget) {
                 let mbid = if !tags.mbid_album.is_empty() {
                     Some(tags.mbid_album.clone())
                 } else {
@@ -2959,20 +2970,20 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
             }
 
             // Acoustic tags
-            if cfg.write_acoustic_tags && !cfg.audiomuse_url.trim().is_empty() && start.elapsed() < budget {
+            if cfg.write_acoustic_tags && !cfg.audiomuse_url.trim().is_empty() && !past(start, budget) {
                 // Per-file acoustic tag fetch would be expensive; skip in refresh mode.
                 // Acoustic tags are written during organize pass.
             }
 
             // Essentia genres
-            if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() && start.elapsed() < budget {
+            if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() && !past(start, budget) {
                 // Essentia genre write would be expensive per-file; skip in refresh mode.
             }
 
             // Instrumental check — trust but verify.
             // If labeled "(Instrumental)", verify and strip if not instrumental.
             // If not labeled but IS instrumental, append "(Instrumental)".
-            if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() && start.elapsed() < budget {
+            if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() && !past(start, budget) {
                 let title = tags.title.clone();
                 let abs = root.join(rel);
                 let path_str = abs.to_string_lossy().to_string();
@@ -3028,7 +3039,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
 
             // Acoustic check — trust but verify.
             // Uses instrumental-check endpoint: acoustic = not instrumental + low vocal ratio.
-            if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() && start.elapsed() < budget {
+            if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() && !past(start, budget) {
                 let title = tags.title.clone();
                 let abs = root.join(rel);
                 let path_str = abs.to_string_lossy().to_string();
@@ -3514,7 +3525,7 @@ fn write_acoustic_tags_for(
     root: &Path,
     plan: &crate::organizer::GroupPlan,
     files: &[(String, TrackTags)],
-    start: std::time::Instant,
+    start: std::time::SystemTime,
     budget: std::time::Duration,
 ) -> usize {
     use std::collections::HashMap;
@@ -3557,7 +3568,7 @@ fn download_lyrics_for(
     format: &str,
     lyrics_source: &str,
     cfg: &crate::config::Config,
-    start: std::time::Instant,
+    start: std::time::SystemTime,
     budget: std::time::Duration,
 ) -> usize {
     use std::collections::HashMap;
@@ -3605,7 +3616,7 @@ fn fetch_genre_with_fallback(
     artist: &str,
     album: &str,
     nfo_genres: &[String],
-    start: std::time::Instant,
+    start: std::time::SystemTime,
     budget: std::time::Duration,
 ) -> Option<(Vec<String>, String)> {
     let cache_key = format!(

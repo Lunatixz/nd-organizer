@@ -277,12 +277,29 @@ pub fn run_timestamp(id: &str) -> Option<i64> {
 // what's left. Ceiling: duplicate reports cover only what fits before the
 // deadline on huge libraries — a pair-cursor background task is the upgrade
 // path if full-album coverage is ever needed.
-pub fn remain_ms(start: std::time::Instant, budget: std::time::Duration) -> i32 {
-    budget.saturating_sub(start.elapsed()).as_millis() as i32
+//
+// Clock: WASM Instant accrues CPU time only — host-call waits (kv, HTTP)
+// don't count, so budgets never fired and tasks died at the 30s host
+// deadline instead. SystemTime is wall clock and matches the real kill.
+pub fn remain_ms(start: std::time::SystemTime, budget: std::time::Duration) -> i32 {
+    budget
+        .saturating_sub(start.elapsed().unwrap_or(std::time::Duration::ZERO))
+        .as_millis() as i32
 }
 
-pub fn cap_ms(start: std::time::Instant, budget: std::time::Duration, cap: i32) -> i32 {
+pub fn cap_ms(start: std::time::SystemTime, budget: std::time::Duration, cap: i32) -> i32 {
     remain_ms(start, budget).clamp(250, cap)
+}
+
+/// True once `budget` wall time has passed since `start` (clock failure =
+/// treat as spent; failing closed beats overrunning the host deadline).
+pub fn past(start: std::time::SystemTime, budget: std::time::Duration) -> bool {
+    start.elapsed().map(|d| d >= budget).unwrap_or(true)
+}
+
+/// Wall time since `start` for log lines.
+pub fn since(start: std::time::SystemTime) -> std::time::Duration {
+    start.elapsed().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -292,15 +309,17 @@ mod tests {
 
     #[test]
     fn remain_and_cap_track_deadline() {
-        let start = std::time::Instant::now();
+        let start = std::time::SystemTime::now();
         let budget = std::time::Duration::from_secs(24);
         let left = remain_ms(start, budget);
         assert!(left > 23_000 && left <= 24_000, "left={left}");
         assert_eq!(cap_ms(start, budget, 8_000), 8_000);
         // With almost no budget left, cap clamps to the 250ms floor.
-        let tight = std::time::Instant::now() - std::time::Duration::from_secs(23_999);
+        let tight = std::time::SystemTime::now() - std::time::Duration::from_secs(23_999);
         assert_eq!(cap_ms(tight, budget, 8_000), 250);
         assert!(remain_ms(tight, budget) < 100);
+        assert!(!past(start, budget));
+        assert!(past(tight, budget));
     }
 
     fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
