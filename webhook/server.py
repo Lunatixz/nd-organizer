@@ -329,8 +329,8 @@ def radio_html():
     for s in stations[:50]:
         n = esc(s.get("name", "?"))
         u = esc(s.get("url", ""))
-        name_json = json.dumps(s.get("name", "")).replace('"', '&quot;')
-        url_json = json.dumps(s.get("url", "")).replace('"', '&quot;')
+        name_json = json.dumps(s.get("name", "")).replace('&', '&amp;').replace('"', '&quot;')
+        url_json = json.dumps(s.get("url", "")).replace('&', '&amp;').replace('"', '&quot;')
         rows += ("<div class='fh'><b>%s</b> <span class='dim'>%s</span>"
                  " <button class='radio-rm' onclick='radioRemove(%s,%s)'>Remove</button>"
                  "</div>") % (n, u, name_json, url_json)
@@ -352,6 +352,7 @@ def radio_html():
     # --- Inline JavaScript ---
     out += ("<script>"
             "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;')}"
+            "function jq(s){return JSON.stringify(s).replace(/&/g,'&amp;').replace(/\"/g,'&quot;')}"
             "function radioSearch(e){"
             "  e.preventDefault();"
             "  var q=document.getElementById('radioQ').value.trim();"
@@ -366,7 +367,7 @@ def radio_html():
             "      if(!results.length){el.innerHTML='<div class=\"note\">No results for \"'+esc(q)+'\"</div>';return}"
             "      var h='<div class=\"np-head\">Results</div>';"
             "      results.slice(0,20).forEach(function(s){"
-            "        var nn=JSON.stringify(s.name);var u=JSON.stringify(s.url);var hp=JSON.stringify(s.homepage||'');"
+            "        var nn=jq(s.name);var u=jq(s.url);var hp=jq(s.homepage||'');"
             "        h+='<div class=\"fh\"><b>'+esc(s.name||'')+'</b> <span class=\"dim\">'+esc((s.tags||'').substring(0,35))+'</span>'"
             "          +'<button class=\"radio-add\" onclick=\"radioAdd(this,'+nn+','+u+','+hp+')\">Add</button></div>';"
             "      });"
@@ -399,7 +400,7 @@ def radio_html():
             "    if(!st.length){el.innerHTML='<div class=\"note\">No stations configured.</div>';return;}"
             "    var h='';"
             "    st.forEach(function(s){"
-            "      var nj=JSON.stringify(s.name);var uj=JSON.stringify(s.url);"
+            "    var nj=jq(s.name);var uj=jq(s.url);"
             "      h+='<div class=\"fh\"><b>'+esc(s.name)+'</b> <span class=\"dim\">'+esc(s.url)+'</span>'"
             "        +'<button class=\"radio-rm\" onclick=\"radioRemove('+nj+','+uj+')\">x</button>'"
             "        +'</div>';"
