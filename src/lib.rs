@@ -356,16 +356,15 @@ pub(crate) mod wasm {
                         .is_some()
                 };
                 if present("scan.group_paths.")
+                    && present("scan.indexed.")
                     && !present("scan.unverified.")
                     && !present("scan.index_cursor.")
                     && !present("scan.walkv2.")
-                    && !present("scan.donev2.")
-                    && crate::store::kv()
-                        .get(&format!("run.current.{library_id}"))
-                        .ok()
-                        .flatten()
-                        .is_none()
                 {
+                    // indexed + group_paths both exist from index-time until
+                    // group completion deletes them (donev2 is set at every
+                    // phase transition — it cannot mark the group phase;
+                    // run.current is a lazily-created run id, not liveness).
                     match enqueue_group_task(library_id) {
                         Ok(()) => log_info(&format!(
                             "init: resuming pipeline at group for library {library_id}"

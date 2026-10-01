@@ -1533,6 +1533,9 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     let enqueued = crate::wasm::enqueue_plan_tasks(cfg, library_id, groups)?;
     // Safe to delete indexed_key now — plan tasks are enqueued and group won't need it again.
     let _ = crate::store::kv().delete(&indexed_key);
+    // group_paths goes too: it marks "group pending" for enable-time resume,
+    // and a late/duplicate group task must no-op instead of re-grouping.
+    let _ = crate::store::kv().delete(&format!("scan.group_paths.{library_id}"));
     crate::wasm::log_info(&format!(
         "group_step: grouped {} files into {} plan tasks (enqueued)",
         total_files, enqueued
