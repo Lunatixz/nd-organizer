@@ -1018,6 +1018,8 @@ def kv_op(op, **kw):
                                          headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=5) as r:
                 out = json.load(r)
+            if isinstance(out, dict) and "result" in out:
+                out = out["result"]  # sidecar wraps every response: {"result": ...}
         except Exception as e:
             log.info("kv %s unavailable: %s", op, e)
             out = None
@@ -1478,6 +1480,20 @@ def tasks_html():
     return bar + rows
 
 
+def _entry_ts(ts):
+    """Parse a docker-log timestamp (nanoseconds + Z) to epoch seconds."""
+    try:
+        return datetime.fromisoformat(ts).timestamp()
+    except Exception:
+        pass
+    for fmt in (ts[:26] + "+00:00", ts[:19] + "+00:00"):
+        try:
+            return datetime.fromisoformat(fmt).timestamp()
+        except Exception:
+            pass
+    return None
+
+
 def _phase_eta(kind, cur, total):
     """Rate-based ETA from the oldest status entry of this phase. The payload
     omits totals during index, so the plugin cannot compute one itself."""
@@ -1487,26 +1503,13 @@ def _phase_eta(kind, cur, total):
     for ts, _, body in entries:
         if needle not in body:
             continue
-        try:
-            t0 = datetime.fromisoformat(ts).timestamp()
-        except Exception:
+        t0 = _entry_ts(ts)
+        if t0 is None:
             return None
         elapsed = time.time() - t0
         if elapsed < 5:
             return None
         return int((total - cur) / (cur / elapsed))
-    return None
-
-
-def _verify_counts(cf):
-    """'verifying... 1234/41100 files' -> (1234, 41100), else None."""
-    try:
-        for tok in cf.replace("verified", "").split():
-            if "/" in tok:
-                a, b = tok.split("/")
-                return int(a), int(b)
-    except Exception:
-        pass
     return None
 
 
@@ -1941,15 +1944,21 @@ def now_panel(j):
             now += "<br>Last file: <span class='now-file'>%s</span>" % esc(cf)
     elif phase == "verify":
         now = "Verifying track identities (MusicBrainz / ISRC / AcoustID)&hellip;"
-        vc = _verify_counts(j.get("currentFile") or "")
-        if vc:
-            cur, total = vc
-            pct = min(100, int(cur * 100 / total)) if total else 0
-            prog = (cur, total, pct)
-            now = "Verifying track identities - <b>%s</b> / <b>%s</b> files (%d%%)." % (
-                "{:,}".format(cur), "{:,}".format(total), pct)
-        if j.get("etaSeconds"):
-            now += " ETA about <b>%s</b>." % _fmt_secs(j["etaSeconds"])
+        lib = ((j.get("libraries") or [{}])[0]).get("id", 2)
+        total = kv_get_int("scan.verify_total.%s" % lib)
+        rem = kv_get_json("scan.unverified.%s" % lib)
+        if total and isinstance(rem, list):
+            done = max(0, total - len(rem))
+            pct = min(100, int(done * 100 / total))
+            prog = (done, total, pct)
+            now = "Verifying track identities - <b>%s</b> / <b>%s</b> files (%d%%), <b>%s</b> left." % (
+                "{:,}".format(done), "{:,}".format(total), pct, "{:,}".format(len(rem)))
+            eta = _phase_eta("verify", done, total)
+            if eta:
+                now += " ETA about <b>%s</b>." % _fmt_secs(eta)
+        cf = j.get("currentFile")
+        if cf and "complete" not in cf:
+            now += "<br>Currently: <span class='now-file'>%s</span>" % esc(cf)
     elif phase == "group":
         now = "Grouping files into albums by their metadata&hellip;"
         gs = _group_stats(((j.get("libraries") or [{}])[0]).get("id", 2))
