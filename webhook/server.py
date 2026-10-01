@@ -1215,33 +1215,12 @@ def played_html():
 
 
 def filters_html():
-    """Filter list panel (read-only): proxy keywords, coverage checkboxes,
-    skip mode, published set sizes and recently dropped tracks."""
+    """Recently dropped tracks: same thumb+text rows as Recently played."""
     st = _fetch_json("nd-organizer-proxy", 4534, "/status", _sidecar_status)
     if not st:
         return ("<div class='note'>Filter proxy is offline - the last published "
                 "filter state is unavailable. (Filter lists are edited in the "
                 "plugin settings; this panel is display-only.)</div>")
-    kws = st.get("keywords") or []
-    kw_on = bool(st.get("keywordFilter", True))
-    cov = st.get("coverage") or {}
-    skip = st.get("skipMode", "none")
-    # ponytail: keyword list rendered as the same thumb+text rows as Recently
-    # played — matching row rhythm instead of a wrapping chip cloud.
-    # Trimmed to 10 rows; header meta keeps the real total visible.
-    kw_rows = "".join(
-        "<div class='pl'><div class='pl-ph' style='background:linear-gradient(135deg,#2dd4bf,#0a0e1a)'></div>"
-        "<div class='t'>%s</div></div>" % esc(k) for k in kws[:10]
-    ) or "<div class='note'>(none)</div>"
-    if len(kws) > 10:
-        kw_rows += "<div class='dim' style='padding-top:6px'>+%d more in plugin settings</div>" % (len(kws) - 10)
-    cov_labels = [
-        ("suggested", "Suggested / shuffled"),
-        ("playlists", "Playlists / favorites"),
-        ("live", "Now playing / queue"),
-        ("albums", "Albums / folders"),
-        ("search", "Search results"),
-    ]
     filtered = [it for it in (st.get("filtered") or []) if isinstance(it, dict)][:12]
     drop_rows = ""
     if filtered:
@@ -1268,31 +1247,7 @@ def filters_html():
                           "<span class='dim'>%s</span></div>") % (
                 thumb, esc(it.get("song", "") or it.get("id", "?")),
                 esc(it.get("artist", "")), chip, _age(int(it.get("ts") or 0)))
-    if not drop_rows:
-        drop_rows = "<div class='note'>Nothing dropped recently.</div>"
-    pub = st.get("lastPublish") or 0
-    out = "<div class='fgrid'>"
-    out += "<div class='fl'><h2>Recently filtered <span class='meta'>by the proxy</span></h2>%s</div>" % drop_rows
-    out += "<div class='fi'>"
-    out += ("<div><h2>Filler keywords <span class='meta'>%d &middot; filter <b>%s</b></span></h2>"
-            "%s</div>") % (len(kws), "ON" if kw_on else "OFF", kw_rows)
-    out += ("<div><h2>Published to proxy</h2><div class='sc-stats'>"
-            "<span>skip-heavy <b>%s</b></span><span>weights <b>%s</b></span>"
-            "<span>requests <b>%s</b></span><span>dropped <b>%s</b></span>"
-            "<span>errors <b>%s</b></span></div>"
-            "<div class='dim'>last publish: %s (%s)</div></div>") % (
-        st.get("excluded", 0), st.get("weights", 0), st.get("requests", 0),
-        st.get("drops", 0), st.get("errors", 0),
-        _fmt_ts(pub) if pub else "never", _age(pub) if pub else "never")
-    # ponytail: coverage meta condensed to a single 11px line and parked at the
-    # bottom of the box — least-important state, lowest on the page.
-    cov_on = ", ".join(lbl.split(" / ")[0].lower() for k2, lbl in cov_labels if cov.get(k2)) or "none"
-    out += ("<div><h2>Coverage</h2><div class='sc-stats'>"
-            "<span>scope <b>%d/%d</b></span><span>on: %s</span>"
-            "<span>skip <b>%s</b></span></div></div>") % (
-        sum(1 for k2, _ in cov_labels if cov.get(k2)), len(cov_labels),
-        esc(cov_on), esc(skip))
-    return out + "</div></div>"
+    return drop_rows or "<div class='note'>Nothing dropped recently.</div>"
 
 
 # ---------------------------------------------------------------- integrations
@@ -3063,7 +3018,7 @@ __KPI__
 <details class="collapse" open id="added"><summary>Recently added</summary><div class="collapse-body">__ADDED__</div></details>
 <div class="played-filters">
 <details class="collapse" open id="played"><summary>Recently played</summary><div class="collapse-body">__PLAYED__</div></details>
-<details class="collapse" open id="filters"><summary>Filters &amp; coverage</summary><div class="collapse-body">__FILTERS__</div></details>
+<details class="collapse" open id="filters"><summary>Filtered out <span class="meta">by the proxy</span></summary><div class="collapse-body">__FILTERS__</div></details>
 </div>
 <details class="collapse" open id="artists"><summary>Top artists (plays vs skips)</summary><div class="collapse-body">__ARTISTS__</div></details>
 <details class="collapse" open id="health"><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
