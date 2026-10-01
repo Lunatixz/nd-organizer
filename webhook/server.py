@@ -11,6 +11,7 @@
 #   python server.py [port] [logfile]
 # Or as a Docker service (see Dockerfile / docker-compose.yml).
 
+import base64
 import http.server
 import json
 import logging
@@ -964,6 +965,86 @@ def db_query(sql, params=(), ttl=60):
     return rows
 
 
+# ---------------------------------------------------------------- plugin KV (read-only)
+#
+# Rollback runs, play/skip weights and phase totals live in the plugin's KV
+# store (mysql sidecar). Creds come from the plugin's own config row in
+# navidrome.db - the dashboard stores no secrets, and every failure degrades
+# to a note instead of an error.
+
+_KV_CACHE = {}
+_PLUGIN_CFG = [0, None]
+
+
+def plugin_config():
+    now = time.time()
+    if _PLUGIN_CFG[1] is not None and now - _PLUGIN_CFG[0] < 300:
+        return _PLUGIN_CFG[1]
+    cfg = None
+    rows = db_query("SELECT config FROM plugin WHERE id='nd-organizer'", ttl=300)
+    if rows and rows[0].get("config"):
+        try:
+            cfg = json.loads(rows[0]["config"])
+            if isinstance(cfg, str):
+                cfg = json.loads(cfg)
+        except Exception:
+            cfg = None
+    _PLUGIN_CFG[0], _PLUGIN_CFG[1] = now, cfg
+    return cfg
+
+
+def kv_op(op, **kw):
+    """One read against the mysql KV sidecar; returns the response dict or
+    None (plugin not on mysql / sidecar down / no config). 15s cache."""
+    ck = op + "|" + json.dumps(kw, sort_keys=True, default=str)
+    c = _KV_CACHE.get(ck)
+    if c and time.time() - c[0] < 15:
+        return c[1]
+    out = None
+    cfg = plugin_config()
+    if cfg and str(cfg.get("persistenceBackend", "")).lower() == "mysql":
+        body = {"op": op}
+        body.update(kw)
+        body["db"] = {
+            "host": cfg.get("mysqlHost", ""),
+            "port": int(cfg.get("mysqlPort") or 3306),
+            "name": cfg.get("mysqlName", ""),
+            "user": cfg.get("mysqlUser", ""),
+            "password": cfg.get("mysqlPassword", ""),
+        }
+        url = (cfg.get("persistenceUrl") or "http://nd-organizer-mysql:8098").rstrip("/") + "/kv"
+        try:
+            req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                out = json.load(r)
+        except Exception as e:
+            log.info("kv %s unavailable: %s", op, e)
+            out = None
+    _KV_CACHE[ck] = (time.time(), out)
+    return out
+
+
+def kv_get_int(key):
+    r = kv_op("get", key=key)
+    if not r or not r.get("exists") or not r.get("value"):
+        return None
+    try:
+        return int(base64.b64decode(r["value"]).decode())
+    except Exception:
+        return None
+
+
+def kv_get_json(key):
+    r = kv_op("get", key=key)
+    if not r or not r.get("exists") or not r.get("value"):
+        return None
+    try:
+        return json.loads(base64.b64decode(r["value"]))
+    except Exception:
+        return None
+
+
 def _fmt_secs(s):
     s = int(s or 0)
     if s >= 86400:
@@ -1397,6 +1478,213 @@ def tasks_html():
     return bar + rows
 
 
+def _phase_eta(kind, cur, total):
+    """Rate-based ETA from the oldest status entry of this phase. The payload
+    omits totals during index, so the plugin cannot compute one itself."""
+    if not cur or not total or cur >= total:
+        return None
+    needle = '"phase":"%s"' % kind
+    for ts, _, body in entries:
+        if needle not in body:
+            continue
+        try:
+            t0 = datetime.fromisoformat(ts).timestamp()
+        except Exception:
+            return None
+        elapsed = time.time() - t0
+        if elapsed < 5:
+            return None
+        return int((total - cur) / (cur / elapsed))
+    return None
+
+
+def _verify_counts(cf):
+    """'verifying... 1234/41100 files' -> (1234, 41100), else None."""
+    try:
+        for tok in cf.replace("verified", "").split():
+            if "/" in tok:
+                a, b = tok.split("/")
+                return int(a), int(b)
+    except Exception:
+        pass
+    return None
+
+
+def _group_stats(lib):
+    """(total files to group, still remaining) from KV, or None."""
+    paths = kv_get_json("scan.group_paths.%s" % lib)
+    remaining = kv_get_json("scan.group_remaining.%s" % lib)
+    if isinstance(paths, list) and isinstance(remaining, list):
+        return len(paths), len(remaining)
+    return None
+
+
+def processing_html():
+    """What is flowing through the pipeline right now: the newest distinct
+    files the plugin reported it is reading/verifying, newest first."""
+    rows, seen = [], set()
+    for ts, _, body in reversed(entries):
+        if len(rows) >= 15:
+            break
+        if '"currentFile"' not in body:
+            continue
+        try:
+            j = json.loads(body)
+        except Exception:
+            continue
+        if not isinstance(j, dict):
+            continue
+        cf = (j.get("currentFile") or "").strip()
+        if not cf or "complete" in cf or cf in seen:
+            continue
+        seen.add(cf)
+        rows.append((ts, j.get("phase") or "scan", cf))
+    if not rows:
+        return "<div class='note'>No files in flight - this fills in while the plugin scans or verifies.</div>"
+    out = ""
+    for ts, phase, cf in rows:
+        out += ("<div class='tk'><span class='tk-ts'>%s</span>"
+                "<span class='tag run'>%s</span>"
+                "<span class='tk-msg'>%s</span></div>") % (
+            esc(ts[11:19] if len(ts) >= 19 else ts), esc(phase), esc(cf))
+    return out
+
+
+def artists_html():
+    """Top artists by the plugin's own play/skip weights (plays - 2*skips),
+    with names resolved from Navidrome's library table."""
+    lst = kv_op("list", prefix="stat.play.") or {}
+    keys = lst.get("keys") or []
+    if not keys:
+        note = ("No playback stats collected yet - the artist table fills in "
+                "once the stats task has run against your library.")
+        return "<div class='note'>%s</div>" % note
+    keys = keys[:20000]  # safety cap; thousands of played tracks is plenty
+
+    def b64ints(vals):
+        out = {}
+        for k, v in (vals or {}).items():
+            try:
+                out[k] = int(base64.b64decode(v).decode())
+            except Exception:
+                pass
+        return out
+
+    plays = {k[len("stat.play."):]: v for k, v in
+             b64ints((kv_op("get_many", keys=keys) or {}).get("values")).items()}
+    sk_keys = ["stat.skip." + k[len("stat.play."):] for k in keys]
+    skips = {k[len("stat.skip."):]: v for k, v in
+             b64ints((kv_op("get_many", keys=sk_keys) or {}).get("values")).items()}
+    if not plays:
+        return ("<div class='note'>Playback weights unavailable (plugin KV offline) - "
+                "retry in a moment.</div>")
+
+    mfids = [k[len("stat.play."):] for k in keys]
+    names = {}
+    for i in range(0, len(mfids), 400):
+        chunk = mfids[i:i + 400]
+        q = ("SELECT id, artist FROM media_file WHERE id IN (%s)"
+             % ",".join("?" * len(chunk)))
+        for r in db_query(q, tuple(chunk), ttl=600):
+            names[r["id"]] = r.get("artist")
+
+    agg = {}
+    for mfid, pl in plays.items():
+        artist = names.get(mfid) or "Unknown artist"
+        a = agg.setdefault(artist, [0, 0, 0])
+        a[0] += 1
+        a[1] += pl
+        a[2] += skips.get(mfid, 0)
+    top = sorted(agg.items(), key=lambda kv: kv[1][1] - 2 * kv[1][2], reverse=True)[:15]
+    rows = ""
+    for artist, (tracks, pl, sk) in top:
+        rows += ("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><b>%s</b></td></tr>") % (
+            esc(artist), tracks, "{:,}".format(pl), "{:,}".format(sk),
+            "{:,}".format(pl - 2 * sk))
+    return ("<div class='dim'>Score = plays &minus; 2 &times; skips "
+            "(the plugin's shuffle weight). Top 15 of %d artists.</div>"
+            "<table><tr><th>Artist</th><th>Tracks</th><th>Plays</th><th>Skips</th><th>Score</th></tr>%s"
+            "</table>") % (len(agg), rows)
+
+
+def rollback_runs_html():
+    """Every apply run recorded in the plugin's KV: run ID, when, what it
+    changed (albums/files/dirs), whether it was already rolled back, and
+    when its retention expires."""
+    la = kv_op("list", prefix="apply:") or {}
+    keys = la.get("keys") or []
+    if not keys:
+        return ("<div class='note'>No apply runs yet - rollback data appears here "
+                "as soon as a run moves files.</div>")
+    vals = (kv_op("get_many", keys=keys) or {}).get("values") or {}
+    runs = {}
+    for k in keys:
+        run = k[len("apply:"):].rsplit(":", 1)[0]
+        try:
+            rec = json.loads(base64.b64decode(vals[k]))
+        except Exception:
+            continue
+        runs.setdefault(run, []).append(rec)
+    done = set()
+    for k in (kv_op("list", prefix="rollback:done:") or {}).get("keys") or []:
+        done.add(k[len("rollback:done:"):])
+    cfg = plugin_config() or {}
+    try:
+        ret_days = int(cfg.get("rollbackRetentionDays") or 30)
+    except Exception:
+        ret_days = 30
+
+    ordered = sorted(runs.items(), key=lambda kv: max(r.get("ts", 0) for r in kv[1]),
+                     reverse=True)[:12]
+    out = ""
+    for run, recs in ordered:
+        recs.sort(key=lambda r: r.get("seq", 0))
+        ts = recs[0].get("ts") or 0
+        n_files = sum(len(r.get("file_renames") or []) for r in recs)
+        dirs = []
+        for r in recs:
+            d = "%s &rarr; %s" % (esc(str(r.get("from_dir", ""))), esc(str(r.get("to_dir", ""))))
+            if d not in dirs:
+                dirs.append(d)
+        try:
+            when = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            when = "?"
+        tags = ""
+        if run in done:
+            tags += "<span class='tag ok'>rolled back</span>"
+        else:
+            tags += "<span class='tag run'>undoable</span>"
+        expires = ""
+        if ts:
+            left = int((ts + ret_days * 86400 - time.time()) / 86400)
+            if left > 0:
+                expires = "<span class='tag %s'>expires in %dd</span>" % (
+                    "warn" if left <= 3 else "dim", left)
+            else:
+                expires = "<span class='tag bad'>expired</span>"
+        renames = ""
+        shown = 0
+        for r in recs:
+            for fr in (r.get("file_renames") or []):
+                if shown >= 40:
+                    break
+                shown += 1
+                renames += "<div class='dim'>%s &rarr; %s</div>" % (
+                    esc(str(fr.get("from", ""))), esc(str(fr.get("to", ""))))
+        more = n_files - shown
+        if more > 0:
+            renames += "<div class='dim'>&hellip; and %d more</div>" % more
+        out += ("<details class='collapse'><summary><code>%s</code> "
+                "<span class='dim'>%s</span> &middot; %d album(s) &middot; %d file(s) &middot; "
+                "%s %s</summary><div class='collapse-body'>%s%s</div></details>") % (
+            esc(run), when, len(recs), n_files, tags, expires,
+            ("<div>" + "".join("<div class='dim'>%s</div>" % d for d in dirs[:6]) + "</div>") if dirs else "",
+            renames)
+    return ("<div class='dim'>Set <b>rollbackRunId</b> to a run ID in the plugin settings, "
+            "then run a pass to restore that run. Newest first.</div>") + out
+
+
 # ---------------------------------------------------------------- dashboard bits
 
 def latest_status():
@@ -1622,8 +1910,10 @@ def now_panel(j):
     else:
         state, sc = "Idle", "ok"
 
-    # Plain-English current action.
+    # Plain-English current action + real per-phase numbers. The payload never
+    # carries a total, so phase totals/counts come from the plugin's KV store.
     now = "Idle - waiting for the next scheduled run."
+    prog = None  # (current, total, percent) -> determinate progress bar
     if j.get("metaSkipped"):
         now = ("Run skipped - <b>%s</b> is offline, so required metadata is unavailable. "
                "Retrying later instead of organizing on missing data.") % esc(j["metaSkipped"])
@@ -1633,10 +1923,43 @@ def now_panel(j):
         cf = j.get("currentFile")
         if cf:
             now += "<br>Currently reading: <span class='now-file'>%s</span>" % esc(cf)
+    elif phase == "index":
+        lib = ((j.get("libraries") or [{}])[0]).get("id", 2)
+        cur = kv_get_int("scan.index_cursor.%s" % lib)
+        total = kv_get_int("scan.index_total.%s" % lib)
+        now = "Indexing files into the search/matching index&hellip;"
+        if cur is not None and total:
+            pct = min(100, int(cur * 100 / total))
+            prog = (cur, total, pct)
+            now = "Indexing files for search and matching - <b>%s</b> / <b>%s</b> files (%d%%)." % (
+                "{:,}".format(cur), "{:,}".format(total), pct)
+            eta = _phase_eta("index", cur, total)
+            if eta:
+                now += " ETA about <b>%s</b>." % _fmt_secs(eta)
+        cf = j.get("currentFile")
+        if cf and "complete" not in cf:
+            now += "<br>Last file: <span class='now-file'>%s</span>" % esc(cf)
     elif phase == "verify":
         now = "Verifying track identities (MusicBrainz / ISRC / AcoustID)&hellip;"
+        vc = _verify_counts(j.get("currentFile") or "")
+        if vc:
+            cur, total = vc
+            pct = min(100, int(cur * 100 / total)) if total else 0
+            prog = (cur, total, pct)
+            now = "Verifying track identities - <b>%s</b> / <b>%s</b> files (%d%%)." % (
+                "{:,}".format(cur), "{:,}".format(total), pct)
+        if j.get("etaSeconds"):
+            now += " ETA about <b>%s</b>." % _fmt_secs(j["etaSeconds"])
     elif phase == "group":
         now = "Grouping files into albums by their metadata&hellip;"
+        gs = _group_stats(((j.get("libraries") or [{}])[0]).get("id", 2))
+        if gs:
+            total, remaining = gs
+            done = max(0, total - remaining)
+            pct = min(100, int(done * 100 / total)) if total else 0
+            prog = (done, total, pct)
+            now = "Grouping files into albums - <b>%s</b> of <b>%s</b> files grouped (%d%%)." % (
+                "{:,}".format(done), "{:,}".format(total), pct)
     elif phase == "plan" or j.get("plans"):
         libs = j.get("libraries") or []
         am = sum(int(l.get("albumsToMove", 0)) for l in libs)
@@ -1645,11 +1968,19 @@ def now_panel(j):
             now = "Dry-run preview - <b>%s</b> album(s) would change with <b>%s</b> file move(s). Nothing is written." % (am, fm)
         else:
             now = "Applying changes - <b>%s</b> album(s), <b>%s</b> file move(s)." % (am, fm)
+    elif phase == "enrich":
+        now = "Enriching metadata - artwork, lyrics, genre, NFO sidecars, ratings&hellip;"
+    elif phase == "cleanup":
+        now = "Removing empty folders left behind by moves&hellip;"
     elif phase == "stats":
         now = ("Playback stats - <b>%s</b> plays, <b>%s</b> skips, <b>%s</b> top picks, "
                "<b>%s</b> skip-heavy limited, <b>%s</b> rating(s) published.") % (
             int(j.get("plays", 0)), int(j.get("skips", 0)), int(j.get("topPicks", 0)),
             int(j.get("filtered", 0)), int(j.get("ratings", 0)))
+    if prog is None and isinstance(j.get("batch"), dict) and j["batch"].get("total"):
+        cur = int(j["batch"].get("index", 0)) + 1
+        total = int(j["batch"]["total"])
+        prog = (cur, total, min(100, int(cur * 100 / total)))
     if j.get("deferredUntilIdle"):
         now = "Run deferred because playback is active - retrying automatically."
     if j.get("rollbackOfRun"):
@@ -1671,12 +2002,13 @@ def now_panel(j):
         sc, state, now, batch, run)
     html += last_action_html()
     html += pipeline_html(phase, dry)
-    if phase == "scan":
-        html += "<div class='bar'><i></i></div>"
+    if prog:
+        html += "<div class='bar f'><i style='width:%d%%;background:linear-gradient(90deg,#0f3d24,#8ff0b5)'></i></div>" % prog[2]
     if j.get("runId") and not j.get("rollbackOfRun"):
         html += ("<div class='rollback'>Undo this run? Set <b>rollbackRunId</b> = "
                  "<code>%s</code> in the plugin settings, then run a pass. Files, folders and "
-                 "album.nfo are restored from backup.</div>") % esc(j["runId"])
+                 "album.nfo are restored from backup. Every run and its contents is listed "
+                 "under <a href='#rollback'>Rollback history</a> below.</div>") % esc(j["runId"])
     warns = j.get("warnings")
     if isinstance(warns, list) and warns:
         html += ("<div class='warn'><b>Configuration &amp; connectivity warnings:</b><ul>%s</ul></div>"
@@ -2410,6 +2742,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 .replace("__PLAYLISTS__", playlist_html())
                 .replace("__ALBUMS__", albums_html)
                 .replace("__TASKS__", tasks_html())
+                .replace("__ARTISTS__", artists_html())
+                .replace("__ROLLBACK__", rollback_runs_html())
+                .replace("__TRAILOPEN__", "open" if (status_j or {}).get("inProgress") else "")
+                .replace("__TRAIL__", processing_html())
                 .replace("__SIDECARS__", sidecars_html)
                 .replace("__RECENT__", recent_actions_html())
                 .replace("__ROWS__", rows))
@@ -2668,7 +3004,7 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
 <h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px"><span class="grad-text">nd-organizer</span></h1>
 <span id="clock">&ndash;&ndash;:&ndash;&ndash;:&ndash;&ndash;</span>
 <button class="btn-grad" onclick="forceRescan()" style="padding:5px 14px;font-size:.85rem">Force Rescan</button>
-<nav class="hnav"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#actions">Actions</a><a href="#sidecars">Sidecars</a></nav>
+<nav class="hnav"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#artists">Artists</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#actions">Actions</a><a href="#rollback">Rollback</a><a href="#sidecars">Sidecars</a></nav>
 </div>
 <div class="sub">__COUNT__ events &middot; plugin: __PLUGIN__ &middot; checked __UPDATED__ &middot; auto-refresh 30s &middot; log: __LOG__</div>
 </header>
@@ -2685,8 +3021,11 @@ __KPI__
 <details class="collapse" open id="played"><summary>Recently played</summary><div class="collapse-body">__PLAYED__</div></details>
 <details class="collapse" open id="filters"><summary>Filters &amp; coverage</summary><div class="collapse-body">__FILTERS__</div></details>
 </div>
+<details class="collapse" open id="artists"><summary>Top artists (plays vs skips)</summary><div class="collapse-body">__ARTISTS__</div></details>
 <details class="collapse" open id="health"><summary>Health &amp; integrations</summary><div class="collapse-body">__INTEGRATIONS__</div></details>
 <details class="collapse" open id="actions"><summary>Planned actions</summary><div class="collapse-body">__ALBUMS__</div></details>
+<details class="collapse" open id="rollback"><summary>Rollback history &amp; run IDs</summary><div class="collapse-body">__ROLLBACK__</div></details>
+<details class="collapse" __TRAILOPEN__ id="trail"><summary>Processing trail</summary><div class="collapse-body">__TRAIL__</div></details>
 <details class="collapse" id="recent"><summary>Recently processed</summary><div class="collapse-body">__RECENT__</div></details>
 <details class="collapse" id="tasks"><summary>Task queue</summary><div class="collapse-body">__TASKS__</div></details>
 <details class="collapse" id="sidecars"><summary>Sidecars</summary><div class="collapse-body">__SIDECARS__</div></details>
