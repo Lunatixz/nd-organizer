@@ -90,8 +90,8 @@
           "type": "integer",
           "title": "Files scanned per task",
           "minimum": 10,
-          "default": 200,
-          "description": "The full-library scan reads a small chunk of files' tags per background task. Lower values are slower but lighter on resources; scanning is thorough by design."
+          "default": 30,
+          "description": "The full-library scan reads a small chunk of files' tags per background task. Values above 30 clamp to 30 - a task must finish inside Navidrome's ~30s execution limit. Lower values are slower but lighter on resources."
         },
         "runOnlyWhenIdle": {
           "type": "boolean",

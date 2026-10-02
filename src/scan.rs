@@ -695,7 +695,9 @@ pub fn index_step(
     // (kv get + lofty tag read + kv set, each a WASM→sidecar HTTP hop) and
     // elapsed() does NOT accrue host-call time, so the time budget never
     // fires. 30 iters ≈ 11s typical / ~21s worst, under the 30s kill.
-    let iters_per_task: usize = 30;
+    // filesPerScanTask drives the count; 30 is the deadline-safe ceiling —
+    // a cold 200-file chunk would run ~72s and get killed mid-task.
+    let iters_per_task: usize = files_per_task.min(30);
     let mut processed = 0usize;
     let mut skipped = 0usize;
     let mut last_rel = String::new();
