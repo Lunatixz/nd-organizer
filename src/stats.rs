@@ -653,7 +653,7 @@ pub mod host_stats {
         let mut published = 0usize;
         let mut loved_ops = 0usize;
         let stats_start = std::time::Instant::now();
-        let stats_budget = std::time::Duration::from_secs(12);
+        let stats_budget = std::time::Duration::from_secs(6);
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
                 if published >= 10 || stats_start.elapsed() >= stats_budget {
@@ -719,7 +719,7 @@ pub mod host_stats {
             let mut lidarr_album_ops = 0usize;
             let mut lidarr_track_ops = 0usize;
             let lidarr_start = std::time::Instant::now();
-            let lidarr_budget = std::time::Duration::from_secs(12);
+            let lidarr_budget = std::time::Duration::from_secs(5);
             if let Ok(keys) = crate::store::kv().list("star.tally.") {
                 for k in keys {
                     if lidarr_track_ops >= 50 || lidarr_start.elapsed() >= lidarr_budget {
@@ -801,7 +801,7 @@ pub mod host_stats {
             let mut lb_ops = 0usize;
             let mut artist_ratings: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
             let lb_start = std::time::Instant::now();
-            let lb_budget = std::time::Duration::from_secs(10);
+            let lb_budget = std::time::Duration::from_secs(5);
             if let Ok(keys) = crate::store::kv().list("star.tally.") {
                 for k in keys {
                     if lb_ops >= 50 || lb_start.elapsed() >= lb_budget {
@@ -1025,7 +1025,7 @@ pub mod host_stats {
         }
         let mut written = 0usize;
         let start = std::time::Instant::now();
-        let budget = std::time::Duration::from_secs(8);
+        let budget = std::time::Duration::from_secs(4);
         let max_per_pass = 20;
         if let Ok(keys) = crate::store::kv().list("star.tally.") {
             for k in keys {
@@ -1213,7 +1213,6 @@ pub mod host_stats {
     /// Needs apply mode + filterUrl; runs when keyword filtering or skip-content
     /// limiting is enabled.
     pub fn publish_filters(cfg: &Config) -> Result<usize, String> {
-        use crate::config::Mode;
         use std::collections::HashMap;
         // Always push filters — dry-run only affects organizer, not proxy.
         let base = cfg.filter_url.trim().trim_end_matches('/');

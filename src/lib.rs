@@ -52,7 +52,6 @@ mod nfo;
 mod organizer;
 #[cfg(target_arch = "wasm32")]
 mod scan;
-mod metadata;
 mod state;
 #[cfg(target_arch = "wasm32")]
 mod trim;
@@ -94,8 +93,11 @@ pub(crate) mod wasm {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TaskPayload {
-        /// "scan" = scan a chunk of the library; "group" = build album groups;
-        /// "plan" = plan/apply a batch of album groups.
+        /// "scan"/"walk"/"index" = library chunks; "group" = build album
+        /// groups; "plan"/"plan_enrich"/"plan_singles" = move/identify groups;
+        /// "verify" = AcoustID identity checks; "stats"/"stats_heavy" =
+        /// playback stats + ratings publishing; "cleanup"/"meta_refresh"/
+        /// "migrate" = maintenance.
         kind: String,
         library_id: i32,
         dir: String,
@@ -260,8 +262,9 @@ pub(crate) mod wasm {
                 .to_string();
                 post_webhook(&cfg, &status);
                 // Pass Subsonic credentials to webhook for background starred pull.
-                // The webhook pulls starred every 5 min and caches to a JSON file
-                // that stats_heavy reads (instant, no WASM deadline issues).
+                // The webhook pulls starred periodically and caches to a JSON
+                // file that the stats arm reads (instant, no WASM deadline
+                // issues).
                 let user = crate::wasm::scan_user(&cfg);
                 if !user.is_empty() && !cfg.navidrome_admin_password.is_empty() {
                     let creds = serde_json::json!({
@@ -688,8 +691,14 @@ pub(crate) mod wasm {
                         ));
                         // Pull starred ratings from webhook cache file (runs here
                         // because stats task already has a warm WASM module).
+                        // Gated: ratingSyncPullFromNavidrome imports Navidrome
+                        // stars into the plugin DB; off = no pull.
                         let t2 = std::time::Instant::now();
-                        let _starred = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
+                        let _starred = if cfg.rating_sync_pull_from_navidrome {
+                            crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0)
+                        } else {
+                            0usize
+                        };
                         crate::wasm::log_info(&format!(
                             "stats timing: ratings {}ms",
                             t2.elapsed().as_millis()
@@ -734,6 +743,15 @@ pub(crate) mod wasm {
                             "stats timing: total {}ms",
                             t0.elapsed().as_millis()
                         ));
+                        // Ratings/LOVED/playcount publishing needs its own task
+                        // budget: spawn the heavy arm (capped per pass,
+                        // self-re-enqueues while it makes progress; re-armed
+                        // here every stats pass as the safety net).
+                        if cfg.mode == crate::config::Mode::Apply
+                            && (cfg.star_tally_enabled || cfg.write_playcount)
+                        {
+                            let _ = enqueue("stats_heavy", 0, "", "");
+                        }
                         Ok(crate::stats::describe(&report, picks, filtered, 0, 0))
                     }
                     Err(e) => {
@@ -746,24 +764,32 @@ pub(crate) mod wasm {
                     }
                 },
                 "stats_heavy" => {
-                    // Heavy stats operations: pull ratings, publish, meta tags.
-                    // WASM module has a 30s hard deadline with ~20s startup overhead.
-                    // Only do pull_navidrome_ratings per pass - other operations
-                    // are skipped to stay under deadline. Self-re-enqueues.
-                    // Gated: ratingSyncPullFromNavidrome imports Navidrome stars
-                    // into the plugin DB; off = no pull, no re-enqueue.
-                    let pulled = if cfg.rating_sync_pull_from_navidrome {
-                        crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0)
-                    } else {
-                        0usize
+                    // Heavy stats ops that don't fit the light stats arm's
+                    // budget: publish star ratings/LOVED outward (Navidrome
+                    // setRating/star, Lidarr, ListenBrainz) and write
+                    // playcount/RATING/LOVED back to files (writePlaycount).
+                    // Each op caps itself per pass; self-re-enqueues while it
+                    // made progress, and the stats pass re-arms us.
+                    let published = match crate::stats::host_stats::publish_star_ratings(&cfg) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            crate::wasm::log_warn(&format!("publish_star_ratings: {e}"));
+                            0usize
+                        }
                     };
-
-                    // Re-enqueue if we seeded songs — next pass picks up remaining.
-                    // Skip if 0 seeded (all done or no starred songs).
-                    if pulled > 0 {
+                    let written = match crate::stats::host_stats::write_playback_meta_tags(&cfg) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            crate::wasm::log_warn(&format!("write_playback_meta_tags: {e}"));
+                            0usize
+                        }
+                    };
+                    if published > 0 || written > 0 {
                         let _ = enqueue("stats_heavy", 0, "", "");
                     }
-                    Ok(format!("stats_heavy: pulled={pulled}"))
+                    Ok(format!(
+                        "stats_heavy: ratings published={published}, playback meta written={written}"
+                    ))
                 }
                 "meta_refresh" => {
                     // Background metadata refresh: enrich files in all libraries

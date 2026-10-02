@@ -2,7 +2,6 @@
 // then groups files into albums by their TAGS (not folders) and plans/applies
 // the result. Only available on the wasm target (uses host services).
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use nd_pdk::host;
@@ -951,6 +950,7 @@ pub fn verify_step(
         };
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
+                crate::net::circuit_clear("acoustid");
                 let status: serde_json::Value = serde_json::from_slice(&resp.body)
                     .map_err(|e| format!("bad status response: {e}"))?;
                 let processing = status.get("processing").and_then(|p| p.as_bool()).unwrap_or(false);
@@ -984,10 +984,12 @@ pub fn verify_step(
                     Ok(Some(resp)) if resp.status_code == 200 => {
                         let result: serde_json::Value = serde_json::from_slice(&resp.body)
                             .map_err(|e| format!("bad results response: {e}"))?;
+                        crate::net::circuit_clear("acoustid");
                         return _complete_verify_job(cfg, &root, library_id, acoustid_url, existing_id, &result, &unverified, &unverified_key, &job_id_key);
                     }
                     _ => {
                         crate::wasm::log_warn("verify_step: failed to read job results, retrying");
+                        crate::net::circuit_mark_failed("acoustid");
                         let _ = crate::store::kv().delete(&job_id_key);
                         crate::wasm::enqueue_verify_task(library_id)?;
                         return Ok((ScanOutcome::More, 0));
@@ -995,8 +997,9 @@ pub fn verify_step(
                 }
             }
             _ => {
-                // Status check failed — job may have expired. Start fresh.
+                // Status check failed - job may have expired. Start fresh.
                 crate::wasm::log_warn("verify_step: job status check failed, starting new job");
+                crate::net::circuit_mark_failed("acoustid");
                 let _ = crate::store::kv().delete(&job_id_key);
                 // Re-enqueue without loading the 40K unverified list.
                 // Next call will find no job and take the send-batches path.
@@ -1070,11 +1073,13 @@ pub fn verify_step(
 
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
+                crate::net::circuit_clear("acoustid");
                 crate::wasm::log_info(&format!(
                     "verify_step: sent batch {}/{}", batch_idx + 1, total_batches
                 ));
             }
             _ => {
+                crate::net::circuit_mark_failed("acoustid");
                 crate::wasm::log_warn(&format!(
                     "verify_step: failed to send batch {}/{}", batch_idx + 1, total_batches
                 ));
@@ -1104,7 +1109,6 @@ pub fn verify_step(
 
 
 fn _process_verify_results(
-    cfg: &Config,
     root: &std::path::Path,
     library_id: i32,
     result: &serde_json::Value,
@@ -1162,7 +1166,7 @@ fn _complete_verify_job(
     unverified_key: &str,
     job_id_key: &str,
 ) -> Result<(ScanOutcome, usize), String> {
-    let processed = _process_verify_results(cfg, root, library_id, result)?;
+    let processed = _process_verify_results(root, library_id, result)?;
     // Cleanup job
     let _ = crate::store::kv().delete(job_id_key);
     let _ = host::http::send(host::http::HTTPRequest {
@@ -1272,7 +1276,7 @@ fn get_media_count(cfg: &Config) -> i64 {
 /// Clear keys that are bound to Navidrome media file IDs from the old DB.
 fn clear_stale_state() {
     let mut cleared = 0usize;
-    for prefix in ["scan.filev2.", "scan.stackv2.", "star.tally.", "star.pub.", "stat.play.", "stat.skip.", "submit.done."] {
+    for prefix in ["scan.filev2.", "scan.stackv2.", "star.tally.", "star.pub.", "stat.play.", "stat.skip.", "submit.done.", "write.mbid."] {
         if let Ok(keys) = crate::store::kv().list(prefix) {
             for k in keys {
                 if crate::store::kv().delete(&k).is_ok() {
@@ -2706,6 +2710,40 @@ pub fn plan_enrich_step(
                     }));
                 }
             }
+            // Write verified MBIDs from the scan index into the audio files
+            // (verify only stores them in KV), so later runs read identities
+            // straight from tags. Once-per-path dedup; cleared on DB change.
+            if remain_ms(enrich_start, task_budget) >= 9_000 {
+                for (rel, t) in &files {
+                    if past(enrich_start, task_budget)
+                        || remain_ms(enrich_start, task_budget) < 9_000
+                    {
+                        break;
+                    }
+                    if t.mbid_album.trim().is_empty() {
+                        continue;
+                    }
+                    let abs = abs_of(rel);
+                    let dk = format!(
+                        "write.mbid.{:016x}",
+                        crate::state::fnv1a64(&abs.to_string_lossy())
+                    );
+                    if crate::store::kv().get(&dk).ok().flatten().is_some() {
+                        continue;
+                    }
+                    match crate::tags::write_mbids(
+                        &abs,
+                        &t.mbid_album,
+                        Some(t.mbid_recording.trim()),
+                        cfg.overwrite_existing_tags,
+                    ) {
+                        Ok(()) => {
+                            let _ = crate::store::kv().set(&dk, b"1".to_vec());
+                        }
+                        Err(e) => crate::wasm::log_warn(&format!("write mbids {}: {e}", rel)),
+                    }
+                }
+            }
             if (cfg.lyrics_source == "lrclib" || cfg.lyrics_source == "genius")
                 && remain_ms(enrich_start, task_budget) >= 11_000
             {
@@ -2821,9 +2859,6 @@ pub fn plan_enrich_step(
                             _ => None,
                         }
                     };
-
-                    let lower_title = title.to_lowercase();
-                    let has_instrumental_label = lower_title.contains("instrumental");
 
                     // Re-read title from file tag to avoid stale KV cache
                     // causing double-suffix on subsequent runs.

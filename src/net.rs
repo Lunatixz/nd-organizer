@@ -107,46 +107,6 @@ pub fn circuit_probe(
     up
 }
 
-/// Live reachability check that ALSO records the outcome on the circuit (same
-/// semantics as the fetchers: transport failure / no response / 5xx = down, a
-/// 4xx means the service is up but misconfigured). Used by the run gate so a
-/// freshly-unreachable provider is caught on the very first run - not just after
-/// a lookup happens to fail - without relying on cached probe results.
-pub fn circuit_check(
-    provider: &str,
-    url: &str,
-    headers: &HashMap<String, String>,
-    timeout_ms: i32,
-) -> bool {
-    let req = host::http::HTTPRequest {
-        method: "GET".into(),
-        url: url.to_string(),
-        headers: headers.clone(),
-        no_follow_redirects: false,
-        body: vec![],
-        timeout_ms,
-    };
-    match host::http::send(req) {
-        Ok(Some(resp)) if resp.status_code < 400 => {
-            circuit_clear(provider);
-            true
-        }
-        Ok(Some(resp)) if resp.status_code >= 500 => {
-            circuit_mark_failed(provider);
-            false
-        }
-        Ok(Some(_)) => true, // 4xx = reachable (e.g. bad credentials) - not an outage
-        Ok(None) => {
-            circuit_mark_failed(provider);
-            false
-        }
-        Err(_) => {
-            circuit_mark_failed(provider);
-            false
-        }
-    }
-}
-
 /// TTL cache in the KVStore. On a hit it returns the stored value without
 /// calling `compute`; on a miss it runs `compute`, stores the result for
 /// `ttl_secs`, and returns it. `None` results are NOT cached (so a transient
