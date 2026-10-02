@@ -476,13 +476,14 @@ pub fn strip_acoustic(title: &str) -> String {
     result.trim().to_string()
 }
 
-/// Check if an artist string is a placeholder (empty or "Unknown Artist", etc.).
-/// Used by forceRefingerprintUnknownArtist to identify tracks that need AcoustID lookup.
+/// Check if an artist tag is a placeholder: no meta at all, or the string
+/// contains "Unknown" (case-insensitive). "Various Artists"/"Various" also
+/// count. Used by forceRefingerprintUnknownArtist to identify tracks that
+/// need AcoustID lookup.
 pub fn is_unknown_artist(artist: &str) -> bool {
     let a = artist.trim().to_ascii_lowercase();
     a.is_empty()
-        || a == "unknown artist"
-        || a == "unknown"
+        || a.contains("unknown")
         || a == "various artists"
         || a == "various"
 }
@@ -499,4 +500,23 @@ pub fn write_title(path: &Path, new_title: &str) -> Result<bool, String> {
     let _ = tagged.insert_tag(tag);
     save_tagged_atomic(&tagged, path)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod unknown_artist_tests {
+    use super::is_unknown_artist;
+
+    #[test]
+    fn placeholder_and_substring_matching() {
+        assert!(is_unknown_artist(""));
+        assert!(is_unknown_artist("   "));
+        assert!(is_unknown_artist("Unknown"));
+        assert!(is_unknown_artist("Unknown Artist"));
+        assert!(is_unknown_artist("unknown artist (live)"));
+        assert!(is_unknown_artist("The Unknown Dubs"));
+        assert!(is_unknown_artist("Various Artists"));
+        assert!(is_unknown_artist("Various"));
+        assert!(!is_unknown_artist("Radiohead"));
+        assert!(!is_unknown_artist("Unknowingly"));
+    }
 }

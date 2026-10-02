@@ -875,11 +875,12 @@ fn load_unverified(
                         if let Ok(val) = serde_json::from_slice::<Value>(&v) {
                             if let Some(tags) = val.get("tags") {
                                 if !tags.is_null() {
-                                    // Check if this file should be re-fingerprinted
-                                    // due to unknown artist (both artist and album_artist).
+                                    // Re-fingerprint when either artist or
+                                    // album_artist has no meta or contains
+                                    // "Unknown" (missing tag counts as no meta).
                                     let force_unknown = cfg.force_refingerprint_unknown_artist
-                                        && tags.get("artist").and_then(|a| a.as_str()).map(crate::tags::is_unknown_artist).unwrap_or(true)
-                                        && tags.get("album_artist").and_then(|a| a.as_str()).map(crate::tags::is_unknown_artist).unwrap_or(true);
+                                        && (tags.get("artist").and_then(|a| a.as_str()).map(crate::tags::is_unknown_artist).unwrap_or(true)
+                                            || tags.get("album_artist").and_then(|a| a.as_str()).map(crate::tags::is_unknown_artist).unwrap_or(true));
 
                                     if !force_unknown && !cfg.force_fingerprint {
                                         if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {

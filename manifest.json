@@ -1029,7 +1029,7 @@
           "type": "boolean",
           "title": "Force re-fingerprint tracks with unknown artist",
           "default": false,
-          "description": "Re-fingerprint tracks where both artist AND album_artist are unknown placeholders (e.g. 'Unknown Artist', 'Unknown', 'Various Artists', 'Various'). After AcoustID identifies the track, the artist is filled in and the file joins the normal organize pipeline. Requires verifyIdentity and acoustidUrl."
+          "description": "Re-fingerprint tracks where either artist or album_artist is missing meta or contains 'Unknown' (e.g. 'Unknown Artist', 'Unknown Artist (Live)', 'Various Artists'). After AcoustID identifies the track, the artist is filled in and the file joins the normal organize pipeline. Requires verifyIdentity and acoustidUrl."
         },
         "verifyInstrumental": {
           "type": "boolean",
