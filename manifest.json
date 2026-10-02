@@ -328,7 +328,7 @@
           "type": "boolean",
           "title": "Enable star rating + playcount tracking",
           "default": true,
-          "description": "Observes each listen's playback percentage and derives a 0-5 star rating (half-star steps). Rating is kept in the plugin's own storage (use persistenceBackend=mysql for durable external storage) and published to Navidrome's native rating via setRating. Never writes to the audio file."
+          "description": "Observes each listen's playback percentage and derives a 0-5 star rating (half-star steps). Rating is kept in the plugin's own storage (use persistenceBackend=mysql for durable external storage) and published to Navidrome's native rating via setRating (and to the file's FMPS/RATING/LOVED tags when writePlaycount is on)."
         },
         "starHalfPlayPercent": {
           "type": "integer",
@@ -1957,7 +1957,7 @@
           "elements": [
             {
               "type": "Label",
-              "text": "Derives a 0-5 star rating (half-star steps) from each listen's playback percentage. Rating + playcount live in the plugin's own storage (use persistenceBackend=mysql for durable external storage) and the rating is published to Navidrome via setRating - never written to the audio file. Full listens (>= full %) earn a star and +1 playcount; half listens (>= half %) earn 0.5; skips before the half mark are a -0.5 penalty; a full listen forgives one prior skip."
+              "text": "Derives a 0-5 star rating (half-star steps) from each listen's playback percentage. Rating + playcount live in the plugin's own storage (use persistenceBackend=mysql for durable external storage) and the rating is published to Navidrome via setRating (written to the file's tags too when writePlaycount is on). Full listens (>= full %) earn a star and +1 playcount; half listens (>= half %) earn 0.5; skips before the half mark are a -0.5 penalty; a full listen forgives one prior skip."
             },
             {
               "type": "Control",

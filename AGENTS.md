@@ -53,13 +53,12 @@ nd-organizer.ndp  (Rust -> wasm32-wasip1, packaged manifest.json + plugin.wasm)
     discogs.rs     Discogs: credits, community ratings, genre/style tags
     lyrics.rs      LRCLIB lyrics
     audiomuse.rs   AudioMuse-AI acoustic tags (BPM/key/mood), URL resolve (host fallback)
-    net.rs         generic circuit breaker + throttled cached HTTP + circuit_check
+    net.rs         generic circuit breaker + throttled cached HTTP
     nfo.rs         Kodi-style album/artist NFO read/write
     template.rs    {placeholder:format} path templates
     state.rs       KV keys, backups, fnv1a64 hash, rollback
     store.rs       Host (Navidrome KVStore) / Mysql backends + migration
     identity.rs    verification confidence scoring
-    report.rs      plain-language run reports
     trim.rs        purge Navidrome's missing-files list (DELETE /api/missing)
 
 sidecars/  (Python, each its own dir + Dockerfile + docker-compose.yml)
@@ -128,7 +127,7 @@ Two tracks: **stable releases** and **nightly builds**.
   `#[cfg(target_arch = "wasm32")]` — they are NOT compiled on the host, so
   `cargo test` doesn't exercise them. Host-tested logic lives in `config.rs`,
   `organizer.rs`, `tags.rs`, `stats.rs`, `favorites.rs`, `lidarr.rs`, `nfo.rs`,
-  `template.rs`, `identity.rs`, `report.rs`, `state.rs`. Beware: a wasm-only
+  `template.rs`, `identity.rs`, `state.rs`. Beware: a wasm-only
   change can compile on host tests yet break the wasm build — always run the
   wasm check.
 - **Config model**: Navidrome stores plugin config as a flat `map<String,String>`
@@ -207,7 +206,7 @@ Two tracks: **stable releases** and **nightly builds**.
   via manifest descriptions.
 - `docker-compose.yml` is the single-source-of-truth compose (Navidrome + all
   six sidecars); the README's compose block must stay byte-identical to it.
-- `.env.example` documents the compose `${VAR}` values (octo-fiesta).
+- `.env.example` documents the compose `${VAR}` values.
 
 ## Secrets
 

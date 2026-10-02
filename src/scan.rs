@@ -3801,6 +3801,17 @@ fn write_group_nfo(
                 None
             }
             .unwrap_or_default();
+            // Fetch Apple Music artist image (gated by appleMusicArtistImages).
+            let artist_image = if cfg.apple_music_artist_images {
+                crate::apple_music::host_apple_music::fetch_artist_image(
+                    cfg,
+                    &info.album_artist,
+                    &countries,
+                )
+            } else {
+                None
+            }
+            .unwrap_or_default();
             // Read existing artist.nfo if present to preserve other fields.
             let a_path = artist_dir.join("artist.nfo");
             let existing_nfo = if let Ok(xml) = std::fs::read_to_string(&a_path) {
@@ -3813,6 +3824,7 @@ fn write_group_nfo(
                 genres: genre.clone(),
                 similar_artists,
                 biography: artist_bio,
+                thumb: artist_image,
                 ..existing_nfo.unwrap_or_default()
             };
             if let Some(p) = a_path.parent() {

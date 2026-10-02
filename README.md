@@ -148,8 +148,9 @@ Before enabling features, configure the required API keys and sidecar URLs:
 
 **Safety model:** `mode: dryRun` is the default — it plans and reports but writes
 nothing. Review the report/status, then switch to `apply`. If a required
-metadata source (AcoustID / MusicBrainz / Lidarr) is unreachable, the run skips
+metadata source (AcoustID / Lidarr) is unreachable, the run skips
 and retries later instead of acting on degraded data (`metaGateEnabled`).
+MusicBrainz enrichment is best-effort and never blocks a run.
 
 ![nd-organizer showcase](https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/fanart1.png)
 
@@ -189,8 +190,10 @@ granularity:
   **Last.fm** (`track.scrobble`); `listenbrainzScrobble` scrobbles to
   **ListenBrainz** (`submit-listens`). Keep each OFF if Navidrome's own
   scrobbler already covers that service (double-counts otherwise).
-- **Never writes to the audio file** — the rating/playcount live in the plugin
-  DB and Navidrome only.
+- **Writes only when asked**: ratings/playcount live in the plugin DB and
+  Navidrome; `writePlaycount` additionally writes `FMPS_PLAYCOUNT`/`RATING`/
+  `LOVED` into the audio file's tags, and `starTally` publishes stars to
+  Navidrome (`setRating`), Lidarr and ListenBrainz.
 - The **dry-run report** previews each tracked file's current stars + playcount,
   so you see exactly what an apply run would publish.
 
@@ -235,7 +238,6 @@ sync and scrobble will retry automatically via the circuit breaker.
 
 - **Navidrome** starred tracks → seed as 3-star loved (only if no local data yet)
 - **Last.fm / Libre.fm** playcount + loved → seed baseline on first sight
-- **ListenBrainz** loved/hated feedback → seed as loved on first sight
 - **Lidarr** track/album rating → seed initial rating (highest concrete wins)
 - **Discogs** community ratings → seed initial rating (if `useCommunityRatings` enabled)
 - **MusicBrainz** release type + tracklist → classification + auto-tagging
@@ -292,8 +294,8 @@ sync and scrobble will retry automatically via the circuit breaker.
 
 MusicBrainz has no favorites/ratings API. ListenBrainz is its companion service
 for ratings (same account, same token). Ratings pushed to ListenBrainz appear on
-your MusicBrainz profile. The plugin pulls loved/hated feedback from ListenBrainz
-to seed initial ratings.
+your MusicBrainz profile. Ratings are pushed to ListenBrainz; pulling its
+loved/hated feedback back in as a seed source is not wired yet.
 
 ## Metadata sources
 
@@ -744,7 +746,7 @@ The `webhook` sidecar renders a self-refreshing dashboard at
 
 - **Integrations** — the plugin's own health checks (AcoustID, Lidarr,
   AudioMuse-AI, MusicBrainz, Last.fm) with an alert banner when any need
-  attention; the plugin re-checks at most once per 5 min (rate-limited).
+  attention; the plugin re-checks at most once per minute (rate-limited).
 - **Services** — independent liveness of every Docker sidecar (acoustid,
   proxy, mysql, webhook) via **heartbeats**. Each sidecar POSTs to the webhook
   every 60s when `WEBHOOK_URL` is set:

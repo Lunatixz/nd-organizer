@@ -10,7 +10,7 @@
 //
 // Album NFO fields: title, artists, album_artists, year, genres, styles, moods,
 // mbid, releasedate, description, bpm, key, chords, structure.
-// Artist NFO fields: name, genres, styles, moods, mbid, biography, similar_artists.
+// Artist NFO fields: name, genres, styles, moods, mbid, biography, similar_artists, thumb.
 
 use std::path::Path;
 
@@ -51,6 +51,7 @@ pub struct NfoArtist {
     pub mbid: String,
     pub biography: String,
     pub similar_artists: Vec<String>,
+    pub thumb: String,
 }
 
 pub fn read_album_nfo(dir: &Path) -> Option<NfoAlbum> {
@@ -172,6 +173,7 @@ pub fn parse_artist_nfo(xml: &str) -> Option<NfoArtist> {
                         "moods" if !value.is_empty() => nfo.moods.push(value),
                         "mbid" if !value.is_empty() => nfo.mbid = value,
                         "biography" | "biog" => nfo.biography = value,
+                        "thumb" if !value.is_empty() => nfo.thumb = value,
                         "similarartist" if !value.is_empty() => nfo.similar_artists.push(value),
                         _ => {}
                     }
@@ -285,6 +287,9 @@ pub fn serialize_artist(nfo: &NfoArtist) -> String {
             esc(&nfo.biography)
         ));
     }
+    if !nfo.thumb.is_empty() {
+        out.push_str(&format!("  <thumb>{}</thumb>\n", esc(&nfo.thumb)));
+    }
     for sa in &nfo.similar_artists {
         out.push_str(&format!("  <similarartist>{}</similarartist>\n", esc(sa)));
     }
@@ -330,10 +335,12 @@ mod tests {
   <moods>Melancholy</moods>
   <mbid>83d91898-7763-47d7-b03b-b92132375c47</mbid>
   <biography>English rock band.</biography>
+  <thumb>https://example.com/pf.jpg</thumb>
 </artist>"#;
         let artist = parse_artist_nfo(xml).unwrap();
         assert_eq!(artist.name, "Pink Floyd");
         assert_eq!(artist.biography, "English rock band.");
+        assert_eq!(artist.thumb, "https://example.com/pf.jpg");
         assert_eq!(artist.moods, vec!["Melancholy"]);
     }
 
@@ -356,5 +363,17 @@ mod tests {
         assert_eq!(reparsed.title, "A & B <C>");
         assert_eq!(reparsed.artists, vec!["Artist \"X\""]);
         assert_eq!(reparsed.year, Some(1999));
+    }
+
+    #[test]
+    fn round_trips_artist_thumb() {
+        let nfo = NfoArtist {
+            name: "Pink Floyd".into(),
+            thumb: "https://example.com/a.jpg".into(),
+            ..Default::default()
+        };
+        let reparsed = parse_artist_nfo(&serialize_artist(&nfo)).unwrap();
+        assert_eq!(reparsed.thumb, nfo.thumb);
+        assert_eq!(reparsed.name, "Pink Floyd");
     }
 }
