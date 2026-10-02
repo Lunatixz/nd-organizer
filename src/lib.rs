@@ -148,6 +148,10 @@ pub(crate) mod wasm {
         enqueue("group", library_id, "", "")
     }
 
+    pub(crate) fn enqueue_singles_task(library_id: i32) -> Result<(), String> {
+        enqueue("plan_singles", library_id, "", "")
+    }
+
     pub(crate) fn enqueue_cleanup_task(library_id: i32) -> Result<(), String> {
         enqueue("cleanup", library_id, "", "")
     }
@@ -627,6 +631,8 @@ pub(crate) mod wasm {
                         payload.batch_total.max(1)
                     )
                 }),
+                "plan_singles" => super::scan::plan_singles_step(&cfg, payload.library_id)
+                    .map(|(moved, left)| format!("singles: moved {moved} file(s), {left} queued")),
                 "favsync" => crate::favorites::host_favorites::sync(&cfg).map(|s| {
                     let pname = if cfg.scrobble_provider == "librefm" { "Libre.fm" } else { "Last.fm" };
                     format!(
@@ -742,12 +748,15 @@ pub(crate) mod wasm {
                 "stats_heavy" => {
                     // Heavy stats operations: pull ratings, publish, meta tags.
                     // WASM module has a 30s hard deadline with ~20s startup overhead.
-                    // Only do pull_navidrome_ratings per pass — other operations
+                    // Only do pull_navidrome_ratings per pass - other operations
                     // are skipped to stay under deadline. Self-re-enqueues.
-                    let stats_start = std::time::Instant::now();
-                    let mut pulled = 0usize;
-
-                    pulled = crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0);
+                    // Gated: ratingSyncPullFromNavidrome imports Navidrome stars
+                    // into the plugin DB; off = no pull, no re-enqueue.
+                    let pulled = if cfg.rating_sync_pull_from_navidrome {
+                        crate::stats::host_stats::pull_navidrome_ratings(&cfg).unwrap_or(0)
+                    } else {
+                        0usize
+                    };
 
                     // Re-enqueue if we seeded songs — next pass picks up remaining.
                     // Skip if 0 seeded (all done or no starred songs).
@@ -1477,6 +1486,7 @@ pub(crate) mod wasm {
                             "scan.indexed.", "scan.group_paths.", "scan.index_cursor.",
                             "scan.unverified.", "scan.group_cursor.", "scan.group_entries.",
                             "scan.group_remaining.", "scan.verify_job.", "scan.donev2.",
+                            "scan.singles.",
                         ] {
                             if let Ok(keys) = crate::store::kv().list(prefix) {
                                 for k in keys {

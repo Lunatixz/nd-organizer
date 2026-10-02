@@ -565,7 +565,9 @@ const CONFIG_KEYS: &[&str] = &[
     "runOnlyWhenIdle", "favoritesSyncLastfm", "favoritesSyncMax",
     "playbackStatsEnabled", "statsPollMinutes", "topPicksCount",
     "skipThresholdPercent", "keywordFilterEnabled", "skipContentMode",
-    "skipHeavyRatio", "filterUrl", "starTallyEnabled", "starHalfPlayPercent",
+        "skipHeavyRatio", "filterUrl", "filterSuggested", "filterPlaylists",
+        "filterLive", "filterAlbums", "filterSearch",
+        "keywordFilterEnabled", "starTallyEnabled", "starHalfPlayPercent",
     "starFullPlayPercent", "starIgnorePercent", "starMinSamples",
     "lovedThresholdStars", "lastfmScrobble", "listenbrainzScrobble",
     "scrobbleProvider", "lastfmImportPlaycount", "rollbackRunId",
@@ -1262,6 +1264,19 @@ mod tests {
         let d = Config::from_map(&HashMap::new());
         assert_eq!(d.persistence_backend, "host");
         assert_eq!(d.rollback_retention_days, 30);
+    }
+
+    #[test]
+    fn every_manifest_setting_is_loaded() {
+        // A key in the UI schema but not in CONFIG_KEYS is never fetched from
+        // the host config service - the toggle silently does nothing.
+        let m: serde_json::Value = serde_json::from_str(include_str!("../manifest.json")).unwrap();
+        for key in m["config"]["schema"]["properties"].as_object().unwrap().keys() {
+            assert!(
+                CONFIG_KEYS.contains(&key.as_str()),
+                "manifest setting `{key}` missing from CONFIG_KEYS - the UI toggle would do nothing"
+            );
+        }
     }
 }
 

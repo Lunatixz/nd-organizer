@@ -243,6 +243,30 @@ fn is_sidecar(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Sidecar files (nfo/lrc/txt/...) in the same directory as `from` that share
+/// its file stem - moved alongside the file they belong to.
+pub(crate) fn collect_sidecars(root: &Path, from: &str) -> Vec<String> {
+    let mut sidecars = Vec::new();
+    if let Some(dir) = root.join(from).parent() {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let stem = from
+                .rsplit('/')
+                .next()
+                .unwrap_or(from)
+                .rsplit_once('.')
+                .map(|(s, _)| s)
+                .unwrap_or(from);
+            for e in entries.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if is_sidecar(&n) && n.starts_with(stem) {
+                    sidecars.push(n);
+                }
+            }
+        }
+    }
+    sidecars
+}
+
 /// Aggregate album-level fields from embedded tags only (no fallbacks).
 fn album_info_raw(album: &AlbumDir) -> AlbumInfo {
     let mut title = String::new();
@@ -855,8 +879,6 @@ pub struct GroupPlan {
     /// Filler tracks (intro/outro/...) detected within the album. Reported only,
     /// never moved - the Subsonic filter proxy drops them from playback.
     pub fillers: Vec<String>,
-    /// Files skipped because their identity could not be verified.
-    pub unverified: Vec<String>,
     pub kept: usize,
     pub skipped: Vec<(String, String)>,
 }
@@ -904,7 +926,7 @@ pub fn filler_keyword_list(cfg: &Config) -> Vec<String> {
 /// Where a confirmed duplicate is moved: the artist's Singles folder, with the
 /// filename disambiguated (source album appended, then a counter) so it never
 /// overwrites existing singles.
-fn singles_target(
+pub(crate) fn singles_target(
     root: &Path,
     cfg: &Config,
     album_artist: &str,
@@ -1101,26 +1123,11 @@ pub fn build_group_plan(
             ));
             continue;
         }
-        let mut sidecars = Vec::new();
-        if cfg.rename_sidecars {
-            if let Some(dir) = root.join(&from).parent() {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    let stem = from
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&from)
-                        .rsplit_once('.')
-                        .map(|(s, _)| s)
-                        .unwrap_or(&from);
-                    for e in entries.flatten() {
-                        let n = e.file_name().to_string_lossy().to_string();
-                        if is_sidecar(&n) && n.starts_with(stem) {
-                            sidecars.push(n);
-                        }
-                    }
-                }
-            }
-        }
+        let sidecars = if cfg.rename_sidecars {
+            collect_sidecars(root, &from)
+        } else {
+            Vec::new()
+        };
         let _ = t;
         plan.moves.push(FileMove { from, to, sidecars });
     }

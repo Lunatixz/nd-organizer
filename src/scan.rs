@@ -1272,7 +1272,7 @@ fn get_media_count(cfg: &Config) -> i64 {
 /// Clear keys that are bound to Navidrome media file IDs from the old DB.
 fn clear_stale_state() {
     let mut cleared = 0usize;
-    for prefix in ["scan.filev2.", "scan.stackv2.", "star.tally.", "star.pub.", "stat.play.", "stat.skip."] {
+    for prefix in ["scan.filev2.", "scan.stackv2.", "star.tally.", "star.pub.", "stat.play.", "stat.skip.", "submit.done."] {
         if let Ok(keys) = crate::store::kv().list(prefix) {
             for k in keys {
                 if crate::store::kv().delete(&k).is_ok() {
@@ -1501,7 +1501,16 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     // group_step needs it to resume. Delete after plan tasks are enqueued.
 
     let total_files = all_entries.len();
-    let verified: Vec<(String, TrackTags)> = all_entries;
+    // Identity gate: files below minConfidence are split off. With
+    // skipUnverified on they go to the artist's Singles folder via the
+    // plan_singles task; with it off they're grouped by tags like the rest.
+    let (mut verified, mut failed): (Vec<(String, TrackTags)>, Vec<(String, TrackTags)>) =
+        all_entries
+            .into_iter()
+            .partition(|(_, t)| crate::identity::is_verified(t, cfg.min_confidence, None));
+    if !cfg.skip_unverified {
+        verified.append(&mut failed);
+    }
 
     crate::wasm::log_info(&format!(
         "group_step: {total_files} files loaded for grouping"
@@ -1559,7 +1568,115 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     if cfg.cleanup_no_audio_folders {
         crate::wasm::enqueue_cleanup_task(library_id)?;
     }
+    // Identity gate queue: files below minConfidence for Singles routing.
+    if !failed.is_empty() {
+        let rels: Vec<&String> = failed.iter().map(|(r, _)| r).collect();
+        crate::store::kv()
+            .set(
+                &format!("scan.singles.{library_id}"),
+                serde_json::to_vec(&rels).unwrap_or_default(),
+            )
+            .map_err(|e| format!("group_step: singles queue: {e}"))?;
+        crate::wasm::enqueue_singles_task(library_id)?;
+        crate::wasm::log_info(&format!(
+            "group_step: {} file(s) below minConfidence -> Singles queue",
+            failed.len()
+        ));
+    }
     Ok((enqueued, total_files))
+}
+
+/// Route files below the identity threshold (minConfidence) to the artist's
+/// Singles folder - the skipUnverified toggle. Drains the queue written by
+/// group_step in budgeted chunks; consumed entries never stick even when
+/// skipped, so the queue always converges.
+pub fn plan_singles_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), String> {
+    let root = lib_root(library_id)?;
+    let key = format!("scan.singles.{library_id}");
+    let Some(raw) = crate::store::kv().get(&key).ok().flatten() else {
+        return Ok((0, 0));
+    };
+    let rels: Vec<String> =
+        serde_json::from_slice(&raw).map_err(|e| format!("plan_singles queue: {e}"))?;
+    let start = std::time::SystemTime::now();
+    // 18s, not 24: tag reads above must leave room for the apply below.
+    let budget = std::time::Duration::from_secs(18);
+    let mut plan = crate::organizer::GroupPlan {
+        bucket: crate::organizer::Bucket::Singles,
+        target_dir: cfg.singles_folder.clone(),
+        ..Default::default()
+    };
+    let mut i = 0usize;
+    while i < rels.len() {
+        if past(start, budget) {
+            break;
+        }
+        let rel = &rels[i];
+        i += 1;
+        // Gone (already moved by a killed predecessor, or deleted) - consume.
+        if !root.join(rel).exists() {
+            continue;
+        }
+        let Some(t) = crate::store::kv()
+            .get(&file_key(library_id, rel))
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice::<TrackTags>(&v).ok())
+        else {
+            continue;
+        };
+        // Already sitting in a Singles folder - consume without moving.
+        let artist = if t.album_artist.trim().is_empty() {
+            cfg.various_folder.clone()
+        } else {
+            t.album_artist.trim().to_string()
+        };
+        if rel.starts_with(&format!("{artist}/{}/", cfg.singles_folder))
+            || rel.starts_with(&format!("{}/{}", cfg.various_folder, cfg.singles_folder))
+        {
+            continue;
+        }
+        let to = crate::organizer::singles_target(&root, cfg, &t.album_artist, &t.album, rel);
+        if to.eq_ignore_ascii_case(rel) {
+            continue;
+        }
+        let sidecars = if cfg.rename_sidecars {
+            crate::organizer::collect_sidecars(&root, rel)
+        } else {
+            Vec::new()
+        };
+        plan.moves.push(crate::organizer::FileMove {
+            from: rel.clone(),
+            to,
+            sidecars,
+        });
+    }
+    let moved = if cfg.mode == crate::config::Mode::Apply {
+        if let Err(e) = crate::organizer::apply_group_plan(&root, &plan, cfg.prune_empty_dirs) {
+            crate::wasm::log_warn(&format!("plan_singles: {e}"));
+        }
+        plan.moves.len()
+    } else {
+        crate::wasm::log_info(&format!(
+            "plan_singles: would move {} file(s) to Singles (dry-run)",
+            plan.moves.len()
+        ));
+        0
+    };
+    let remaining = rels[i..].to_vec();
+    if remaining.is_empty() {
+        let _ = crate::store::kv().delete(&key);
+    } else {
+        crate::store::kv()
+            .set(&key, serde_json::to_vec(&remaining).unwrap_or_default())
+            .map_err(|e| format!("plan_singles queue save: {e}"))?;
+        crate::wasm::enqueue_singles_task(library_id)?;
+    }
+    crate::wasm::log_info(&format!(
+        "plan_singles: {moved} file(s) routed to Singles, {} queued",
+        remaining.len()
+    ));
+    Ok((moved, remaining.len()))
 }
 
 /// Report files that share an audio fingerprint across the whole library
@@ -2414,6 +2531,7 @@ pub fn plan_enrich_step(
                 }
             }
             if (cfg.embed_artwork || cfg.write_cover_jpg)
+                && cfg.artwork_front
                 && remain_ms(enrich_start, task_budget) >= 16_000
             {
                 let mbid = files.iter().find_map(|(_, t)| {
@@ -2458,6 +2576,134 @@ pub fn plan_enrich_step(
                                 if sidecar { " + cover.jpg" } else { "" }),
                         }));
                     }
+                }
+            }
+            // Extra artwork kinds (Cover Art Archive only): back cover, CD
+            // medium art, booklet - embedded when their toggles are on.
+            if cfg.embed_artwork
+                && (cfg.artwork_back || cfg.artwork_cd || cfg.artwork_booklet)
+                && remain_ms(enrich_start, task_budget) >= 9_000
+            {
+                let mbid = files.iter().find_map(|(_, t)| {
+                    if !t.mbid_album.trim().is_empty() {
+                        Some(t.mbid_album.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(mbid) = mbid {
+                    let first = files.first().map(|(r, _)| abs_of(r)).unwrap_or_default();
+                    // Same overwrite policy as front: one embedded picture
+                    // (any kind) counts as "already has art".
+                    if cfg.overwrite_art || !crate::artwork::has_embedded(&first) {
+                        let mut kinds: Vec<&str> = Vec::new();
+                        for (on, kind, label) in [
+                            (cfg.artwork_back, crate::artwork::ArtKind::Back, "back"),
+                            (cfg.artwork_cd, crate::artwork::ArtKind::Cd, "cd"),
+                            (cfg.artwork_booklet, crate::artwork::ArtKind::Booklet, "booklet"),
+                        ] {
+                            if past(enrich_start, task_budget) {
+                                break;
+                            }
+                            if !on {
+                                continue;
+                            }
+                            if let Some(bytes) = crate::artwork::fetch(&mbid, kind) {
+                                let mut n = 0usize;
+                                for (rel, _) in files.iter() {
+                                    if past(enrich_start, task_budget) {
+                                        break;
+                                    }
+                                    if crate::artwork::embed(&abs_of(rel), bytes.clone(), kind)
+                                        .is_ok()
+                                    {
+                                        n += 1;
+                                    }
+                                }
+                                if n > 0 {
+                                    kinds.push(label);
+                                }
+                            }
+                        }
+                        if !kinds.is_empty() {
+                            actions.push(serde_json::json!({
+                                "ts": crate::state::now_ts(),
+                                "text": format!("artwork: embedded {} ({})", kinds.join(", "), "coverartarchive"),
+                            }));
+                        }
+                    }
+                }
+            }
+            // AcoustID submit: one POST per file, once ever (submit.done.*
+            // dedup key in KV). Own circuit so a dead acoustid.org backs off
+            // without touching verify. 12s headroom + 9s HTTP timeout keeps
+            // the task under the 30s host kill.
+            if cfg.acoustid_submit
+                && !cfg.acoustid_api_key.trim().is_empty()
+                && !cfg.acoustid_url.trim().is_empty()
+                && remain_ms(enrich_start, task_budget) >= 12_000
+                && !crate::net::circuit_open("acoustid-submit")
+            {
+                let url = format!("{}/submit", cfg.acoustid_url.trim().trim_end_matches('/'));
+                let mut submitted = 0usize;
+                let mut dead = false;
+                for (rel, t) in &files {
+                    if dead || past(enrich_start, task_budget) {
+                        break;
+                    }
+                    if remain_ms(enrich_start, task_budget) < 12_000 {
+                        break;
+                    }
+                    if t.mbid_recording.trim().is_empty() {
+                        continue;
+                    }
+                    let dk = format!("submit.done.{}", abs_of(rel).display());
+                    if crate::store::kv().get(&dk).ok().flatten().is_some() {
+                        continue;
+                    }
+                    if !crate::net::throttle("acoustid-submit", 1000) {
+                        break;
+                    }
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "path": abs_of(rel).to_string_lossy().to_string(),
+                        "acoustidApiKey": cfg.acoustid_api_key,
+                        "recordingId": t.mbid_recording,
+                    }))
+                    .unwrap_or_default();
+                    let req = host::http::HTTPRequest {
+                        method: "POST".into(),
+                        url: url.clone(),
+                        headers: std::collections::HashMap::from([(
+                            "Content-Type".into(),
+                            "application/json".into(),
+                        )]),
+                        no_follow_redirects: false,
+                        body,
+                        timeout_ms: 9_000,
+                    };
+                    let ok = match host::http::send(req) {
+                        Ok(Some(resp)) if resp.status_code == 200 => {
+                            serde_json::from_slice::<serde_json::Value>(&resp.body)
+                                .ok()
+                                .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
+                                .unwrap_or(false)
+                        }
+                        _ => false,
+                    };
+                    if ok {
+                        let _ = crate::store::kv().set(&dk, b"1".to_vec());
+                        crate::net::circuit_clear("acoustid-submit");
+                        submitted += 1;
+                    } else {
+                        crate::net::circuit_mark_failed("acoustid-submit");
+                        dead = true;
+                    }
+                }
+                if submitted > 0 {
+                    actions.push(serde_json::json!({
+                        "ts": crate::state::now_ts(),
+                        "text": format!("acoustid: submitted {submitted} fingerprint(s)"),
+                    }));
                 }
             }
             if (cfg.lyrics_source == "lrclib" || cfg.lyrics_source == "genius")
@@ -3310,9 +3556,6 @@ fn group_report(plan: &crate::organizer::GroupPlan, dry: bool) -> String {
         for f in &plan.fillers {
             s.push_str(&format!("    - {f}\n"));
         }
-    }
-    for p in &plan.unverified {
-        s.push_str(&format!("    - {p}  --  unverified (no MBID/ISRC); routed to Singles folder.\n"));
     }
     for (path, reason) in &plan.skipped {
         s.push_str(&format!("    - {path}  --  {reason}\n"));
