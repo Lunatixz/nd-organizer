@@ -2787,7 +2787,6 @@ header{position:sticky;top:0;z-index:30;background:rgba(10,14,26,.94);backdrop-f
 .hnav{display:flex;gap:14px;margin-left:auto;font-size:12px;flex-wrap:wrap}
 .hnav a{color:var(--text2)}
 .hnav a:hover{color:var(--accent);text-decoration:none}
-#clock{font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;color:var(--text2)}
 .grad-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 .bannerimg{margin-bottom:16px}
 .btn-grad{background:var(--grad);border:0;border-radius:var(--radius);padding:7px 16px;color:#071018;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:.2px}
@@ -3001,7 +3000,6 @@ footer{color:var(--text2);font-size:11px;text-align:center;margin-top:12px;lette
 <header>
 <div class="hrow">
 <h1><img src="https://raw.githubusercontent.com/Lunatixz/nd-organizer/main/images/icon.png" alt="nd-organizer" style="height:24px;width:24px;border-radius:4px"><span class="grad-text">nd-organizer</span></h1>
-<span id="clock">&ndash;&ndash;:&ndash;&ndash;:&ndash;&ndash;</span>
 <button class="btn-grad" onclick="forceRescan()" style="padding:5px 14px;font-size:.85rem">Force Rescan</button>
 <nav class="hnav"><a href="#added">Added</a><a href="#played">Played</a><a href="#filters">Filters</a><a href="#artists">Artists</a><a href="#activity">Activity</a><a href="#health">Health</a><a href="#actions">Actions</a><a href="#rollback">Rollback</a><a href="#sidecars">Sidecars</a></nav>
 </div>
@@ -3112,11 +3110,6 @@ function forceRescan(){
     }
     setInterval(refresh, 30000);
 })();
-// Header clock: local time, keeps ticking across silent refreshes.
-setInterval(function () {
-    var c = document.getElementById("clock");
-    if (c) c.textContent = new Date().toLocaleTimeString();
-}, 1000);
 </script>
 </body></html>"""
 
