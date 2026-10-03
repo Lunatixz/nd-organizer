@@ -68,6 +68,22 @@ pub fn acoustid_stage(since: i64, now: i64) -> AcoustidStage {
     }
 }
 
+/// Mysql sidecar health window: an op that errors or takes longer than
+/// SIDECAR_SLOW_MS arms a session cooldown that bypasses the sidecar.
+pub const SIDECAR_SLOW_MS: u128 = 3_000;
+pub const SIDECAR_COOLDOWN_SECS: i64 = 60;
+
+/// New sidecar cooldown deadline (`now + window`) for an op outcome, or None
+/// when the sidecar stays usable. Pure so it can be host-tested; the KVStore
+/// glue (statics, logging, host fallback) lives in store.rs.
+pub fn sidecar_cooldown_until(is_err: bool, elapsed_ms: u128, now: i64) -> Option<i64> {
+    if is_err || elapsed_ms > SIDECAR_SLOW_MS {
+        Some(now + SIDECAR_COOLDOWN_SECS)
+    } else {
+        None
+    }
+}
+
 /// Stable FNV-1a 64-bit hash for cache keys (deterministic across restarts).
 pub fn fnv1a64(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -320,6 +336,15 @@ mod tests {
         assert!(remain_ms(tight, budget) < 100);
         assert!(!past(start, budget));
         assert!(past(tight, budget));
+    }
+
+    #[test]
+    fn sidecar_cooldown_decision() {
+        // error or slow arms the cooldown; fast success keeps it clear
+        assert_eq!(sidecar_cooldown_until(true, 10, 1_000), Some(1_060));
+        assert_eq!(sidecar_cooldown_until(false, SIDECAR_SLOW_MS + 1, 1_000), Some(1_060));
+        assert_eq!(sidecar_cooldown_until(false, SIDECAR_SLOW_MS, 1_000), None);
+        assert_eq!(sidecar_cooldown_until(false, 12, 1_000), None);
     }
 
     fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {

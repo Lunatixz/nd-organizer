@@ -46,6 +46,17 @@ pub enum Kv {
 /// When MySQL comes back, re-migrate Host data to MySQL.
 static MYSQL_FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Session-side circuit for the mysql sidecar: after an error or a slow
+/// response, bypass the sidecar (host KV fallback) for
+/// `state::SIDECAR_COOLDOWN_SECS` instead of letting every op burn seconds
+/// against a dead/hung sidecar. One slow call used to blow the 30s task
+/// deadline and Navidrome's init deadline, killing the whole organize queue.
+/// ponytail: session-scoped, no probe; re-arm = let the window expire and try
+/// one op again. Decision logic is the pure `state::sidecar_cooldown_until`.
+static SIDE_COOLDOWN_UNTIL: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static SIDE_TRIPPED_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const SIDE_COOLDOWN: &str = "sidecar cooldown";
+
 #[derive(Clone)]
 pub struct MysqlDb {
     pub host: String,
@@ -91,8 +102,61 @@ fn mysql_backend(cfg: &crate::config::Config) -> Option<Kv> {
 }
 
 impl Kv {
-    /// POST an op to the mysql sidecar and return its `result` object.
-    fn mysql_op(&self, op: &str, mut payload: serde_json::Value) -> Result<serde_json::Value, String> {
+    /// Bypassed-sidecar gate: Err while the sidecar is in cooldown. Callers
+    /// that log every failure suppress this marker (see get/set/delete).
+    fn sidecar_gate(now: i64) -> Result<(), String> {
+        if now < SIDE_COOLDOWN_UNTIL.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(SIDE_COOLDOWN.into());
+        }
+        Ok(())
+    }
+
+    /// Open the cooldown. Logs once per outage episode, not per op.
+    fn trip_sidecar(why: &str) {
+        SIDE_COOLDOWN_UNTIL.store(
+            crate::state::now_ts() + crate::state::SIDECAR_COOLDOWN_SECS,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        MYSQL_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
+        if !SIDE_TRIPPED_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::wasm::log_warn(&format!(
+                "mysql sidecar degraded ({why}); bypassing sidecar for {}s",
+                crate::state::SIDECAR_COOLDOWN_SECS
+            ));
+        }
+    }
+
+    fn clear_sidecar() {
+        SIDE_COOLDOWN_UNTIL.store(0, std::sync::atomic::Ordering::Relaxed);
+        if SIDE_TRIPPED_LOG.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            crate::wasm::log_info("mysql sidecar healthy again; resuming sidecar backend");
+        }
+    }
+
+    /// POST an op to the mysql sidecar and return its `result` object. Failures
+    /// and slow responses arm the session cooldown so the remaining ops in this
+    /// task/init hit host KV instantly.
+    fn mysql_op(&self, op: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
+        Self::sidecar_gate(crate::state::now_ts())?;
+        let t0 = std::time::Instant::now();
+        let res = self.mysql_op_once(op, payload);
+        let until = crate::state::sidecar_cooldown_until(
+            res.is_err(),
+            t0.elapsed().as_millis(),
+            crate::state::now_ts(),
+        );
+        if until.is_some() {
+            match &res {
+                Err(e) => Self::trip_sidecar(e),
+                Ok(_) => Self::trip_sidecar("slow response"),
+            }
+        } else {
+            Self::clear_sidecar();
+        }
+        res
+    }
+
+    fn mysql_op_once(&self, op: &str, mut payload: serde_json::Value) -> Result<serde_json::Value, String> {
         let (url, db) = match self {
             Kv::Host => return Err("host backend has no mysql op".into()),
             Kv::Mysql { url, db } => (url.clone(), db),
@@ -113,7 +177,10 @@ impl Kv {
             headers,
             no_follow_redirects: false,
             body: payload.to_string().into_bytes(),
-            timeout_ms: 15_000,
+            // ponytail: 5s, not 15s — one hung sidecar call inside a walk chunk
+            // (30s task budget) used to be a death sentence; local sidecar ops
+            // are ms when healthy.
+            timeout_ms: 5_000,
         };
         let resp = host::http::send(req).map_err(|e| e.to_string())?;
         let resp = resp.ok_or_else(|| "mysql sidecar: no response".to_string())?;
@@ -148,7 +215,9 @@ impl Kv {
                         }
                     }
                     Err(e) => {
-                        crate::wasm::log_warn(&format!("mysql get failed ({e}), falling back to host"));
+                        if e != SIDE_COOLDOWN {
+                            crate::wasm::log_warn(&format!("mysql get failed ({e}), falling back to host"));
+                        }
                         MYSQL_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
                         // ponytail: a miss in the fallback store is NOT proof the key
                         // is absent — mysql may hold it while the sidecar is down.
@@ -181,7 +250,9 @@ impl Kv {
                 match self.mysql_op("set", json!({ "key": key, "value": BASE64.encode(&value), "ttlSeconds": 0 })) {
                     Ok(_) => Ok(()),
                     Err(e) => {
-                        crate::wasm::log_warn(&format!("mysql set failed ({e}), falling back to host"));
+                        if e != SIDE_COOLDOWN {
+                            crate::wasm::log_warn(&format!("mysql set failed ({e}), falling back to host"));
+                        }
                         host::kvstore::set(key, value).map_err(|e| e.to_string())
                     }
                 }
@@ -208,7 +279,9 @@ impl Kv {
                 match self.mysql_op("delete", json!({ "key": key })) {
                     Ok(_) => Ok(()),
                     Err(e) => {
-                        crate::wasm::log_warn(&format!("mysql delete failed ({e}), falling back to host"));
+                        if e != SIDE_COOLDOWN {
+                            crate::wasm::log_warn(&format!("mysql delete failed ({e}), falling back to host"));
+                        }
                         host::kvstore::delete(key).map_err(|e| e.to_string())
                     }
                 }
