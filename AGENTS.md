@@ -30,8 +30,9 @@ into albums, plans+applies folder/file renames and tag writes (with rollback),
 and tracks playback stats + 0–5 star ratings with loved-status and album ratings.
 It ships with **sidecar Docker services** (Python) for capabilities the WASM
 sandbox can't do: audio fingerprinting + ReplayGain (acoustid), a web dashboard
-(webhook), a Subsonic filter proxy, MySQL KV persistence, and a
-missing-track proxy.
+(webhook), a Subsonic filter proxy, MySQL KV persistence, and Essentia
+genre/mood ML analysis (essentia). Octo-Fiesta's missing-track proxy is an
+optional third-party add-on.
 
 ## Architecture at a glance
 
@@ -44,7 +45,7 @@ nd-organizer.ndp  (Rust -> wasm32-wasip1, packaged manifest.json + plugin.wasm)
     organizer.rs   grouping/duplicate detection/nfo apply (pure, host-tested)
     tags.rs        lofty tag read/write (atomic temp+rename), MBID/playback/replaygain
     stats.rs       playback stats, star tallies (0-5), loved status, album ratings, Top Picks, filters publish
-    favorites.rs   Last.fm loved/playcount/scrobble + ListenBrainz scrobble, two-way sync
+    favorites.rs   Last.fm loved/playcount/scrobble + ListenBrainz scrobble/feedback, two-way sync
     lidarr.rs      Lidarr API: album lookup, ratings, incomplete search, rescan
     musicbrainz.rs MusicBrainz release lookup + release tracklist (auto-tag) + genre fetch
     artwork.rs     Cover Art Archive, Apple Music, TheAudioDB artwork fetch + fallback chain
@@ -52,6 +53,9 @@ nd-organizer.ndp  (Rust -> wasm32-wasip1, packaged manifest.json + plugin.wasm)
     theaudiodb.rs  TheAudioDB: fanart, bios, album artwork, genre tags
     discogs.rs     Discogs: credits, community ratings, genre/style tags
     lyrics.rs      LRCLIB lyrics
+    genius.rs      Genius lyrics/annotations (host API)
+    genius.rs      Genius lyrics/annotations (host API)
+    genius.rs      Genius lyrics/annotations (host API)
     audiomuse.rs   AudioMuse-AI acoustic tags (BPM/key/mood), URL resolve (host fallback)
     net.rs         generic circuit breaker + throttled cached HTTP
     nfo.rs         Kodi-style album/artist NFO read/write
@@ -61,9 +65,10 @@ nd-organizer.ndp  (Rust -> wasm32-wasip1, packaged manifest.json + plugin.wasm)
     identity.rs    verification confidence scoring
     trim.rs        purge Navidrome's missing-files list (DELETE /api/missing)
 
-sidecars/  (Python, each its own dir + Dockerfile + docker-compose.yml)
+(repo root) Python sidecars - each own dir + Dockerfile + docker-compose.yml
   acoustid/   fpcalc (chromaprint) + ffmpeg ReplayGain; POST /lookup, /replaygain
-  webhook/    dashboard + sidecar logs + radio management; /radio-search, /radio-add
+  essentia/   Essentia ML analysis (genre/mood/BPM/key/chroma/structure); POST /analyze
+  webhook/    dashboard + sidecar logs + radio management; /radio-list, /radio-lookup, /radio-add
   proxy/      Subsonic filter (keyword/skip-content), /filters, /status
   mysql/      KVStore -> MySQL bridge (executes kv ops)
 ```
@@ -123,7 +128,7 @@ Two tracks: **stable releases** and **nightly builds**.
   library, users, scheduler, task, cache, etc.). Anything needing raw SQLite or
   audio decode lives in a **sidecar**.
 - **wasm-gated modules**: `scan.rs`, `net.rs`, `artwork.rs`, `audiomuse.rs`,
-  `lyrics.rs`, `musicbrainz.rs`, `store.rs`, `trim.rs` are
+  `apple_music.rs`, `lyrics.rs`, `musicbrainz.rs`, `store.rs`, `trim.rs` are
   `#[cfg(target_arch = "wasm32")]` — they are NOT compiled on the host, so
   `cargo test` doesn't exercise them. Host-tested logic lives in `config.rs`,
   `organizer.rs`, `tags.rs`, `stats.rs`, `favorites.rs`, `lidarr.rs`, `nfo.rs`,
@@ -142,7 +147,8 @@ Two tracks: **stable releases** and **nightly builds**.
   uiSchema groups semantic (a setting in the groups it relates to). Validate
   after edits: `node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8'))"`.
 - **Circuit breaker** (`src/net.rs`): external HTTP providers (musicbrainz,
-  lidarr, lastfm, listenbrainz, lrclib, coverartarchive, audiomuse, acoustid) are
+  lidarr, lastfm, listenbrainz, lrclib, coverartarchive, audiomuse, acoustid,
+  applemusic, theaudiodb, discogs, genius) are
   protected by a generic circuit (retry 5m → cooldown 30m → degraded). **Trip
   ONLY on transport failure / no response / 5xx. 404 / 4xx / no-data must NOT
   trip** — those mean the service is up but had nothing for us.
@@ -154,29 +160,31 @@ Two tracks: **stable releases** and **nightly builds**.
   Capped 0–5. Loved = rating ≥ `lovedThresholdStars`. Initial rating seeds from
   Navidrome playCount + Last.fm playcount/loved + Lidarr track/album rating.
   Album ratings average track stars. Loved status published to Navidrome
-  (star/unstar) and file tags.
-- **Rating sync**: ratings propagate bidirectionally between the plugin DB,
-  Navidrome, Last.fm, and Lidarr. The plugin DB is the canonical source.
+  (star/unstar); written to file tags only when `writePlaycount` + apply mode.
+- **Rating sync**: ratings propagate between the plugin DB, Navidrome, Lidarr,
+  and ListenBrainz; Last.fm has no ratings API (loved/playcount only). The
+  plugin DB is the canonical source.
   `ratingSyncWriteToLidarr` pushes track + album ratings to Lidarr on every
   stats pass. `ratingSyncPullFromNavidrome` imports Navidrome's setRating
   values into the plugin DB (useful when ratings are set in the UI).
-  Favorites sync (`favoritesSyncLastfm`) handles Navidrome ↔ Last.fm loved
+  Favorites sync (`favoritesSyncLastfm`, additive-only unless `favoritesSyncBidirectional`) handles Navidrome ↔ Last.fm loved
   bidirectionally. New rating sources should follow the pattern: seed on
   first observation in `record_star_listen`, publish outward in
   `publish_star_ratings`, add config toggle + manifest prop.
 - **Scrobble**: fires to **both** Last.fm (`track.scrobble`) and ListenBrainz
-  (`submit-listens`) on full plays, gated by `lastfmScrobble` and
-  `listenbrainzScrobble` respectively. Never scrobbles silently — both flags
-  default off to avoid double-counting.
+  (`submit-listens`) on full plays. Gated by `scrobbleProvider` (lastfm/librefm)
+  for Last.fm/Libre.fm and by `listenbrainzScrobble` for ListenBrainz; the
+  `lastfmScrobble` toggle forces Last.fm scrobbling regardless of provider.
+  `scrobbleProvider` defaults to `none`, so nothing scrobbles until opted in.
 - **The webhook must never iterate all accumulated events**: `entries` is
   capped at `MAX_ENTRIES` (2000), `load_log` reads only the tail and self-cleans,
   render loops are bounded (`reversed(entries[:N])` / `entries[-5000:]`), and
   sidecar fetches respect a per-render deadline (`_render_deadline`). A 500k-line
   backlog must still render in seconds — do not reintroduce unbounded full-list
   scans.
-- **Python sidecars**: `webhook/`, `proxy/`, `mysql/`, `acoustid/`
+- **Python sidecars**: `webhook/`, `proxy/`, `mysql/`, `acoustid/`, `essentia/`
   each have `server.py` + `Dockerfile` + `docker-compose.yml`. They must be
-  Python 3.12-compatible (the base image), and response writes swallow
+  Python 3.12-compatible (base image; essentia runs 3.11-slim), and response writes swallow
   `BrokenPipeError`/`ConnectionResetError` (a `_wfile_write` helper). Validate
   with `python -c "import ast; ast.parse(open('.../server.py').read())"`.
 
@@ -186,7 +194,7 @@ Two tracks: **stable releases** and **nightly builds**.
   plugins share (`\\192.168.0.21\opt\navidrome\data\plugins\`), rescan plugins.
   Also built/published by GitHub Actions `release.yml` to a GitHub Release.
 - **Sidecar images**: built + pushed to GHCR by `.github/workflows/docker.yml`
-  (matrix: acoustid, webhook, proxy, mysql). The NAS deploys via
+  (matrix: acoustid, webhook, proxy, mysql, essentia). The NAS deploys via
   `docker-compose.yml` pulling `ghcr.io/.../sidecar:latest`. **If you change a
   sidecar's `server.py`, the container on the NAS must be redeployed** (pull +
   recreate) — a stale image is the usual cause of "the dashboard is old."
@@ -205,7 +213,7 @@ Two tracks: **stable releases** and **nightly builds**.
   change. The "Config reference" section was removed — settings are documented
   via manifest descriptions.
 - `docker-compose.yml` is the single-source-of-truth compose (Navidrome + all
-  six sidecars); the README's compose block must stay byte-identical to it.
+  five sidecars: acoustid, webhook, proxy, mysql, essentia).
 - `.env.example` documents the compose `${VAR}` values.
 
 ## Secrets

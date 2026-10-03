@@ -67,7 +67,7 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
    plays can optionally be **scrobbled to Last.fm** (`lastfmScrobble`) and/or
    **ListenBrainz** (`listenbrainzScrobble`); the baseline can be
    **imported from Last.fm** (`lastfmImportPlaycount`).
-   **No audio-file tags are written.**
+   **The playcount itself never reaches file tags unless `writePlaycount` is on.**
 - **Refreshes metadata + artwork** from MusicBrainz, Cover Art Archive, iTunes,
   Last.fm, Discogs (credits), TheAudioDB (fanart/bios), and Genius (lyrics);
   reads/writes Kodi-style `album.nfo`/`artist.nfo` sidecars.
@@ -115,7 +115,7 @@ Before enabling features, configure the required API keys and sidecar URLs:
 | **Filter proxy** | nd-organizer-proxy sidecar | `filterUrl` |
 | **Webhook dashboard** | nd-organizer-webhook sidecar | `logWebhookUrl` |
 | **ML analysis** | nd-organizer-essentia sidecar | `essentiaUrl` |
-| **Acoustic tags** | AudioMuse-AI sidecar | `audiomuseUrl` + `audiomuseToken` |
+| **Acoustic tags** | AudioMuse-AI sidecar | `audiomuseUrl` (+ `audiomuseToken` if required) |
 | **Credits** | Discogs account | `discogsToken` |
 | **Fanart/bios** | TheAudioDB account | `theAudioDbKey` |
 | **Lyrics** | Genius account | `geniusToken` |
@@ -172,7 +172,7 @@ granularity:
   rating recovers.
 - Rating is **capped at 0–5.0** and rounded to the nearest **0.5**.
 - **Loved** = rating ≥ `lovedThresholdStars` (default 3). Loved tracks are
-  starred in Navidrome and tagged with `LOVED` status; beloved tracks ≥ 3 stars
+  starred in Navidrome and, with `writePlaycount` on, tagged with `LOVED` status; beloved tracks ≥ 3 stars
   start at that baseline when first observed.
 - **Album ratings** average the album's track star ratings. External ratings
   (NFO / MusicBrainz / Lidarr) take priority over the calculated average.
@@ -192,8 +192,9 @@ granularity:
   scrobbler already covers that service (double-counts otherwise).
 - **Writes only when asked**: ratings/playcount live in the plugin DB and
   Navidrome; `writePlaycount` additionally writes `FMPS_PLAYCOUNT`/`RATING`/
-  `LOVED` into the audio file's tags, and `starTally` publishes stars to
-  Navidrome (`setRating`), Lidarr and ListenBrainz.
+  `LOVED` into the audio file's tags, and `starTallyEnabled` publishes stars to
+  Navidrome (`setRating`). Lidarr push additionally needs `ratingSyncWriteToLidarr`
+  plus credentials; ListenBrainz push additionally needs `listenbrainzScrobble`.
 - The **dry-run report** previews each tracked file's current stars + playcount,
   so you see exactly what an apply run would publish.
 
@@ -236,7 +237,7 @@ sync and scrobble will retry automatically via the circuit breaker.
 
 ### Inbound (pull into plugin DB)
 
-- **Navidrome** starred tracks → seed as 3-star loved (only if no local data yet)
+- **Navidrome** starred tracks → seed as 3-star loved (requires `ratingSyncPullFromNavidrome` + apply mode; only if no local data yet)
 - **Last.fm / Libre.fm** playcount + loved → seed baseline on first sight
 - **Lidarr** track/album rating → seed initial rating (highest concrete wins)
 - **Discogs** community ratings → seed initial rating (if `useCommunityRatings` enabled)
@@ -247,8 +248,8 @@ sync and scrobble will retry automatically via the circuit breaker.
 - **Navidrome** `setRating` + `star`/`unstar` (every stats pass)
 - **Lidarr** track + album ratings (if `ratingSyncWriteToLidarr`)
 - **ListenBrainz** track/album/artist ratings (if `listenbrainzScrobble`)
-- **Last.fm** love/unlove + scrobble (if `scrobbleProvider = lastfm`)
-- **Libre.fm** love/unlove + scrobble (if `scrobbleProvider = librefm`)
+- **Last.fm** love/unlove (if `favoritesSyncLastfm`) + scrobble (if `scrobbleProvider = lastfm` or `lastfmScrobble`)
+- **Libre.fm** love/unlove (if `favoritesSyncLastfm`) + scrobble (if `scrobbleProvider = librefm`)
 
 ### Favorites sync (Navidrome ↔ Last.fm/Libre.fm)
 
@@ -264,7 +265,7 @@ sync and scrobble will retry automatically via the circuit breaker.
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `starTallyEnabled` | true | Master switch for the rating system |
-| `scrobbleProvider` | lastfm | Scrobble backend: none/lastfm/librefm |
+| `scrobbleProvider` | none | Scrobble backend: none/lastfm/librefm |
 | `ratingSyncWriteToLidarr` | false | Push ratings to Lidarr (track + album) |
 | `ratingSyncPullFromNavidrome` | false | Import manual ratings from Navidrome UI |
 | `favoritesSyncLastfm` | false | Bidirectional loved sync with Last.fm/Libre.fm (uses scrobbleProvider) |
@@ -278,7 +279,6 @@ sync and scrobble will retry automatically via the circuit breaker.
 | `forceFingerprint` | false | Re-fingerprint ALL files via AcoustID (ignores existing MBIDs) |
 | `verifyInstrumental` | false | Verify instrumental tracks via Essentia + librosa |
 | `verifyAcoustic` | false | Verify acoustic performance via Essentia mood_acoustic model |
-| `instrumentalBatchSize` | 100 | Tracks per batch for Pass 2 (gradual analysis) |
 | `metaRefreshEnabled` | false | Enable background metadata refresh when pipeline is idle |
 | `metaRefreshCron` | `*/30 * * * *` | Cron schedule for metadata refresh checks |
 
@@ -294,8 +294,9 @@ sync and scrobble will retry automatically via the circuit breaker.
 
 MusicBrainz has no favorites/ratings API. ListenBrainz is its companion service
 for ratings (same account, same token). Ratings pushed to ListenBrainz appear on
-your MusicBrainz profile. Ratings are pushed to ListenBrainz; pulling its
-loved/hated feedback back in as a seed source is not wired yet.
+your MusicBrainz profile. ListenBrainz feedback is also pulled back in
+(gated by `listenbrainzScrobble`): loved tracks seed a first-sight rating
+and sync as Navidrome stars.
 
 ## Metadata sources
 
@@ -364,7 +365,8 @@ The plugin processes your library in sequential phases. Each phase is visible on
 |-------|-------------|----------|
 | **Walk** | Discovers all audio files in the library tree. Collects file paths + mtimes. Deduplicates across chunks. | ~15-60 min (library size dependent) |
 | **Index** | Reads tags (MP3/FLAC metadata) for new/changed files. Skips unchanged files via mtime. Saves complete file list for group phase. | ~15-30 min |
-| **Group** | Loads indexed files, reads tags from KV, verifies identities via AcoustID, groups files into albums by MBID/artist/album/year. Enqueues plan tasks. | ~15-30 min (AcoustID calls) |
+| **Verify** | Fingerprints unverified files through the AcoustID sidecar in batches; writes MBID/ISRC identity results back to the scan index. | ~15-30 min (AcoustID calls) |
+| **Group** | Loads indexed files, reads tags from KV, groups files into albums by MBID/artist/album/year, reports duplicates, enqueues plan tasks. | ~5-15 min |
 | **Plan Move** | For each album batch: moves files to organized folders, writes NFO, records rollback. Dry-run generates report; apply executes moves. | Per batch |
 | **Plan Enrich** | Per-album metadata enrichment: auto-tag, ReplayGain, artwork, lyrics, genre, acoustic tags, Lidarr refresh. Network-heavy. | Per album |
 | **Cleanup** | Removes empty-of-audio folders (optional). | Fast |
@@ -382,7 +384,7 @@ All external metadata providers cache results in the plugin's KV store:
 | Discogs | 7 days | Release search, credits |
 | Genius | — | Song search, lyrics |
 | LRCLIB | 7 days | Lyrics |
-| AcoustID | 7 days | File identity |
+| AcoustID | Until re-verified | File identity (`_acoustid_checked` tag; redo with `forceFingerprint`) |
 | Essentia | 7 days | Fingerprint |
 | AudioMuse | 7 days | Acoustic tags |
 | ReplayGain | 7 days | Loudness analysis |
@@ -452,7 +454,7 @@ docker compose up -d                                # deploy everything
 ```
 
 To deploy just one service, `docker compose up -d <name>` (the per-service files
-in `acoustid/`, `webhook/`, `proxy/`, `mysql/` still work independently).
+in `acoustid/`, `webhook/`, `proxy/`, `mysql/`, `essentia/` still work independently).
 The `.env` file next to this compose supplies the `${VAR}` values — start from
 the bundled **`.env.example`** (`copy .env.example .env`), which documents every
 option and pre-fills `FOLDER_TEMPLATE` (it must live in `.env`, not
@@ -644,10 +646,9 @@ table — the same way the web UI does — so they appear without a restart.
 The webhook dashboard includes a **Smart Playlists** panel for managing
 Navidrome playlists (`.nsp` files stored in `PLAYLIST_DIR`):
 
-- **15 preset templates** — Top Rated, Recently Played, Skip-Heavy, High Energy,
-  Chill Vibes, Deep Cuts, New Discoveries, Artist Essentials, Decade Explorer,
-  Genre Journey, Mood Board, Length Filter, Playcount extremes, Star Rating
-  ranges, and more.
+- **15 preset templates** — Recently Played, Most Played, Loved Tracks, Top
+  Rated, Never Played, Recently Added, FLAC Only, High Energy, Chill, Favourite
+  Albums, Short and Sweet, Epic Tracks, Classics, Recent Favourites, Deep Cuts.
 - **Rule builder** — create custom playlists by combining field/operator/value
   rules (e.g. rating >= 4, playcount > 10, artist contains "Pink Floyd").
 - **CRUD** — save, delete, and list playlists via AJAX (no page reload).
@@ -748,13 +749,13 @@ The `webhook` sidecar renders a self-refreshing dashboard at
   AudioMuse-AI, MusicBrainz, Last.fm) with an alert banner when any need
   attention; the plugin re-checks at most once per minute (rate-limited).
 - **Services** — independent liveness of every Docker sidecar (acoustid,
-  proxy, mysql, webhook) via **heartbeats**. Each sidecar POSTs to the webhook
+  essentia, proxy, mysql) via **heartbeats**. Each sidecar POSTs to the webhook
   every 60s when `WEBHOOK_URL` is set:
   ```yaml
   environment:
     - WEBHOOK_URL=http://nd-organizer-webhook:8099
   ```
-  Green `UP` < 2 min, amber `WEAK` < 10 min, red `STALE` after that.
+  Green `UP` < 2 min; older signals are hidden until they refresh. Integration cards show red `STALE` after 15 min.
 - **Status** — running/scanning/idle, per-library counts, **album plans**
   (kind badge, target folder, every `old → new` file move, dupes/fillers), and
   the **rollback callout** with the run ID.
@@ -813,7 +814,7 @@ touched. (`FILTER_KEYWORDS` on the proxy container is only a startup fallback.)
 
 ### Skip-content limiter (`skipContentMode`)
 Every `statsPollMinutes` the plugin publishes each track's **weight** plus the
-**skip-heavy ID set** to the proxy via `POST /filters` (apply mode). A track is
+**skip-heavy ID set** to the proxy via `POST /filters` (always pushed, even in dry-run). A track is
 **skip-heavy** when it's a **net negative** — skipped strictly more times than
 ever played in full (`plays < skips`, full plays forgive skips), 3+ interactions,
 skip fraction at/above `skipHeavyRatio` (default 0.6). The proxy then limits how
@@ -832,7 +833,7 @@ flagged — they just sink in priority and resurface when you play them again.
 
 ### Playback stats (opt-in)
 Enable **Playback stats** (`playbackStatsEnabled`). Every `statsPollMinutes`
-(minutes, default 5) the plugin:
+(minutes, default 30) the plugin:
 
 1. **Watches `getNowPlaying`** between polls (no scrobbleretriever host needed —
    works on older Navidrome). A track that leaves playback having played less

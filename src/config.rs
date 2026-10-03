@@ -446,7 +446,7 @@ impl Default for Config {
             rating_sync_pull_from_navidrome: false,
             lastfm_scrobble: false,
             listenbrainz_scrobble: false,
-            scrobble_provider: "lastfm".into(),
+            scrobble_provider: "none".into(),
             lastfm_import_playcount: false,
     rollback_run_id: String::new(),
             log_webhook_url: "http://nd-organizer-webhook:8099".into(),
@@ -488,7 +488,7 @@ impl Default for Config {
             preserve_recording_type: true,
             singles_under_artist: true,
             singles_enabled: true,
-            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,interview,comedy".into(),
+            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke,comedy".into(),
             exclude_paths: Vec::new(),
             move_destination_library: String::new(), // empty = disabled
             backup_before_write: true,

@@ -252,7 +252,7 @@
           "minimum": 1,
           "maximum": 100,
           "default": 30,
-          "description": "A track that stops playing before this percentage of its duration counts as a skip - this feeds both the skip-heavy limiter and the star-rating system."
+          "description": "A track that stops playing before this percentage of its duration counts as a skip - feeds the skip-heavy limiter (star ratings use their own starHalfPlayPercent/starFullPlayPercent/starIgnorePercent)."
         },
         "topPicksCount": {
           "type": "integer",
@@ -914,7 +914,7 @@
           "type": "boolean",
           "title": "Skip runs when a metadata source is offline",
           "default": true,
-          "description": "When a required external metadata source (AcoustID / MusicBrainz / Lidarr) is unreachable, skip the run and retry later instead of organizing on degraded metadata. Off = run best-effort anyway."
+          "description": "When a required external metadata source (AcoustID / Lidarr - MusicBrainz is best-effort) is unreachable, skip the run and retry later instead of organizing on degraded metadata. Off = run best-effort anyway."
         },
         "trimMissingDays": {
           "type": "integer",
@@ -988,18 +988,19 @@
         "scrobbleProvider": {
           "type": "string",
           "title": "Scrobble provider",
-          "default": "lastfm",
+          "default": "none",
           "oneOf": [
+            { "const": "none", "title": "Off" },
             { "const": "lastfm", "title": "Last.fm" },
             { "const": "librefm", "title": "Libre.fm (open-source)" }
           ],
-          "description": "Which scrobble service to use. Last.fm is the most popular; Libre.fm is a free open-source alternative with the same API. Both use the same credentials (lastfmApiKey/lastfmUser/lastfmApiSecret). Selecting Libre.fm just changes the API backend."
+          "description": "Which scrobble service to use. Off = no provider-based scrobbling (recommended when Navidrome's own scrobbler already runs). lastfmScrobble can still force Last.fm scrobbles, and listenbrainzScrobble gates ListenBrainz independently. Last.fm is the most popular; Libre.fm is a free open-source alternative with the same API. Both use the same credentials (lastfmApiKey/lastfmUser/lastfmApiSecret). Selecting Libre.fm just changes the API backend."
         },
         "essentiaUrl": {
           "type": "string",
           "title": "Essentia analysis URL",
           "default": "http://nd-organizer-essentia:8101",
-          "description": "Essentia genre/mood ML sidecar URL. Default is http://nd-organizer-essentia:8101 (Docker container name). Acts as fallback when AudioMuse is unreachable, or primary source when genreFrom=essentia."
+          "description": "Essentia genre/mood ML sidecar URL. Default is http://nd-organizer-essentia:8101 (Docker container name). Acts as fallback when AudioMuse is unreachable, or primary source when genreSource=essentia."
         },
         "essentiaStructure": {
           "type": "boolean",
