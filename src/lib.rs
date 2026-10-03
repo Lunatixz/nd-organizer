@@ -316,7 +316,7 @@ pub(crate) mod wasm {
                         .flatten()
                         .is_some();
                     for prefix in [
-                        "scan.walkstack.", "scan.walkfiles.", "scan.walkdelta.",
+                        "scan.walkv2.", "scan.walkfiles.", "scan.walkdelta.",
                         "scan.walkdirs.", "scan.walkcount.", "scan.indexed.",
                         "scan.index_cursor.", "scan.unverified.", "scan.group_cursor.",
                         "scan.group_entries.", "scan.group_remaining.",

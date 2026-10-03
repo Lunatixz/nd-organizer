@@ -237,9 +237,15 @@ impl Kv {
     pub fn has(&self, key: &str) -> Result<bool, String> {
         match self {
             Kv::Host => host::kvstore::has(key).map_err(|e| e.to_string()),
-            Kv::Mysql { .. } => self
-                .mysql_op("has", json!({ "key": key }))
-                .map(|r| r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false)),
+            Kv::Mysql { .. } => match self.mysql_op("has", json!({ "key": key })) {
+                Ok(r) => Ok(r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false)),
+                Err(e) => {
+                    if e != SIDE_COOLDOWN {
+                        crate::wasm::log_warn(&format!("mysql has failed ({e}), falling back to host"));
+                    }
+                    host::kvstore::has(key).map_err(|e| e.to_string())
+                }
+            },
         }
     }
 
@@ -263,12 +269,20 @@ impl Kv {
     pub fn set_with_ttl(&self, key: &str, value: Vec<u8>, ttl_seconds: i64) -> Result<(), String> {
         match self {
             Kv::Host => host::kvstore::set_with_ttl(key, value, ttl_seconds).map_err(|e| e.to_string()),
-            Kv::Mysql { .. } => self
-                .mysql_op(
+            Kv::Mysql { .. } => {
+                match self.mysql_op(
                     "set",
-                    json!({ "key": key, "value": BASE64.encode(value), "ttlSeconds": ttl_seconds }),
-                )
-                .map(|_| ()),
+                    json!({ "key": key, "value": BASE64.encode(&value), "ttlSeconds": ttl_seconds }),
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        if e != SIDE_COOLDOWN {
+                            crate::wasm::log_warn(&format!("mysql set failed ({e}), falling back to host"));
+                        }
+                        host::kvstore::set_with_ttl(key, value, ttl_seconds).map_err(|e| e.to_string())
+                    }
+                }
+            }
         }
     }
 
@@ -292,18 +306,25 @@ impl Kv {
     pub fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
         match self {
             Kv::Host => host::kvstore::list(prefix).map_err(|e| e.to_string()),
-            Kv::Mysql { .. } => self
-                .mysql_op("list", json!({ "prefix": prefix }))
-                .map(|r| {
-                    r.get("keys")
+            Kv::Mysql { .. } => {
+                match self.mysql_op("list", json!({ "prefix": prefix })) {
+                    Ok(r) => Ok(r
+                        .get("keys")
                         .and_then(|k| k.as_array())
                         .map(|a| {
                             a.iter()
                                 .filter_map(|k| k.as_str().map(|s| s.to_string()))
                                 .collect()
                         })
-                        .unwrap_or_default()
-                }),
+                        .unwrap_or_default()),
+                    Err(e) => {
+                        if e != SIDE_COOLDOWN {
+                            crate::wasm::log_warn(&format!("mysql list failed ({e}), falling back to host"));
+                        }
+                        host::kvstore::list(prefix).map_err(|e| e.to_string())
+                    }
+                }
+            }
         }
     }
 
@@ -311,7 +332,19 @@ impl Kv {
         match self {
             Kv::Host => host::kvstore::get_many(keys).map_err(|e| e.to_string()),
             Kv::Mysql { .. } => {
-                let r = self.mysql_op("get_many", json!({ "keys": keys }))?;
+                // ponytail: same host fallback as get/set/delete — a bare `?`
+                // here let SIDE_COOLDOWN escape as a fatal error and killed the
+                // group task (4 retries, pipeline stalled). Host may be stale
+                // for keys written after a reconnect; a later pass re-reads them.
+                let r = match self.mysql_op("get_many", json!({ "keys": keys.clone() })) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if e != SIDE_COOLDOWN {
+                            crate::wasm::log_warn(&format!("mysql get_many failed ({e}), falling back to host"));
+                        }
+                        return host::kvstore::get_many(keys).map_err(|e| e.to_string());
+                    }
+                };
                 let mut out = HashMap::new();
                 if let Some(map) = r.get("values").and_then(|m| m.as_object()) {
                     for (k, v) in map {
