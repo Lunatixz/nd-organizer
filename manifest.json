@@ -939,6 +939,12 @@
           },
           "description": "Password for the admin user above, sent as HTTP Basic auth to Navidrome's native API. Stored in Navidrome's config store."
         },
+        "navidromeUrl": {
+          "type": "string",
+          "title": "Navidrome URL (from the webhook)",
+          "default": "http://navidrome:4533",
+          "description": "Navidrome's Subsonic base URL exactly as reachable from the webhook container on the Docker network. Default matches the compose container_name (navidrome); change it if your container is named differently. Used for the background starred-ratings pull."
+        },
         "starIgnorePercent": {
           "type": "integer",
           "title": "Ignore listens under this %",
@@ -1309,6 +1315,10 @@
                   "type": "Control",
                   "scope": "#/properties/navidromeAdminPassword",
                   "options": { "format": "password" }
+                },
+                {
+                  "type": "Control",
+                  "scope": "#/properties/navidromeUrl"
                 }
               ]
             }

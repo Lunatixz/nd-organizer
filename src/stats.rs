@@ -372,34 +372,6 @@ pub mod host_stats {
         })
     }
 
-    /// Highest-rated tracks (by star rating, then playcount) from the tally, for
-    /// the dashboard's "playcounts & stars" view.
-    pub fn top_rated(count: usize) -> Vec<(String, String, f64, i64)> {
-        let mut rows = Vec::new();
-        if let Ok(keys) = crate::store::kv().list("star.tally.") {
-            for k in keys {
-                let Ok(Some(v)) = crate::store::kv().get(&k) else { continue };
-                let Ok(t) = serde_json::from_slice::<StarTally>(&v) else { continue };
-                if t.full + t.half + t.skips <= 0 {
-                    continue;
-                }
-                let name = if !t.title.is_empty() {
-                    format!("{} - {}", t.artist, t.title)
-                } else {
-                    t.path.clone()
-                };
-                rows.push((name, t.path.clone(), star_rating(&t), t.full));
-            }
-        }
-        rows.sort_by(|a, b| {
-            b.2.partial_cmp(&a.2)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.3.cmp(&a.3))
-        });
-        rows.truncate(count.max(0));
-        rows
-    }
-
     /// Compute an album's rating. Sources, in priority order:
     ///   1. an external source passed in (Last.fm/MusicBrainz/Navidrome), or
     ///   2. the average of the album's track star ratings (from the tally),
@@ -500,6 +472,29 @@ pub mod host_stats {
                         &prev.artist,
                         &prev.title,
                     );
+                }
+                // ListenBrainz loved feedback seeds too, when the Last.fm
+                // sources above didn't already love it. The file's MBID is
+                // read from disk, but this whole block only runs once per
+                // file ever (first sight) and only when an LB love exists.
+                if !loved && cfg.listenbrainz_scrobble && !cfg.musicbrainz_token.trim().is_empty()
+                {
+                    let fb = crate::favorites::host_favorites::lb_feedback_cached(cfg);
+                    if fb.iter().any(|f| f.score == 1) {
+                        if let Some(file_tags) =
+                            crate::tags::read_tags(std::path::Path::new(&prev.path))
+                        {
+                            let rec = file_tags.mbid_recording.trim();
+                            if !rec.is_empty() && fb.iter().any(|f| f.score == 1 && f.mbid == rec)
+                            {
+                                loved = true;
+                                crate::wasm::log_debug(&format!(
+                                    "star seed: ListenBrainz loved {}",
+                                    prev.path
+                                ));
+                            }
+                        }
+                    }
                 }
                 if !cfg.lidarr_url.trim().is_empty() {
                     // Prefer the track rating, fall back to the album rating.
@@ -941,7 +936,7 @@ pub mod host_stats {
             let body = serde_json::json!({
                 "songs": [],
                 "user": user,
-                "baseUrl": "http://audiomuse-navidrome-navidrome-1:4533",
+                "baseUrl": cfg.navidrome_url.trim().trim_end_matches('/'),
                 "password": cfg.navidrome_admin_password,
             });
             let req = host::http::HTTPRequest {

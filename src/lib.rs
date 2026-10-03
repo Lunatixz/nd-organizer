@@ -270,7 +270,7 @@ pub(crate) mod wasm {
                     let creds = serde_json::json!({
                         "songs": [],
                         "user": user,
-                        "baseUrl": "http://audiomuse-navidrome-navidrome-1:4533",
+                        "baseUrl": cfg.navidrome_url.trim().trim_end_matches('/'),
                         "password": cfg.navidrome_admin_password,
                     });
                     let req = host::http::HTTPRequest {

@@ -122,6 +122,45 @@ pub struct SyncSummary {
     pub errors: usize,
 }
 
+/// One loved/hated feedback entry from ListenBrainz.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LbFeedback {
+    pub mbid: String,
+    pub title: String,
+    pub artist: String,
+    pub score: i32,
+}
+
+/// Parse a `get-feedback` response's `feedback` array into entries.
+/// `score` is supplied by the caller because the loved and hated
+/// endpoints are separate requests. Pure - unit-tested.
+pub fn parse_lb_feedback(val: &serde_json::Value, score: i32) -> Vec<LbFeedback> {
+    let mut out = Vec::new();
+    if let Some(items) = val.get("feedback").and_then(|f| f.as_array()) {
+        for item in items {
+            let Some(mbid) = item.get("recording_mbid").and_then(|m| m.as_str()) else {
+                continue;
+            };
+            if mbid.is_empty() {
+                continue;
+            }
+            let meta = item.get("recording_metadata");
+            let title = meta
+                .and_then(|m| m.get("track_name"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            let artist = meta
+                .and_then(|m| m.get("artist_name"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            out.push(LbFeedback { mbid: mbid.to_string(), title, artist, score });
+        }
+    }
+    out
+}
+
 #[cfg(target_arch = "wasm32")]
 pub mod host_favorites {
     use std::collections::HashMap;
@@ -603,12 +642,10 @@ pub mod host_favorites {
         }
     }
 
-    /// Fetch a user's loved/hated feedback from ListenBrainz. Returns a map of
-    /// recording_mbid -> score (1 = loved, -1 = hated).
-    pub(crate) fn listenbrainz_get_feedback(
-        cfg: &Config,
-    ) -> HashMap<String, i32> {
-        let mut result = HashMap::new();
+    /// Fetch a user's loved/hated feedback from ListenBrainz (score=1 and
+    /// score=-1 requests, both with recording_metadata for title/artist).
+    pub(crate) fn listenbrainz_get_feedback(cfg: &Config) -> Vec<LbFeedback> {
+        let mut result: Vec<LbFeedback> = Vec::new();
         let token = cfg.musicbrainz_token.trim();
         if token.is_empty() {
             return result;
@@ -646,13 +683,7 @@ pub mod host_favorites {
             Ok(Some(resp)) if resp.status_code == 200 => {
                 crate::net::circuit_clear("listenbrainz");
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
-                    if let Some(fb) = val.get("feedback").and_then(|f| f.as_array()) {
-                        for item in fb {
-                            if let Some(mbid) = item.get("recording_mbid").and_then(|m| m.as_str()) {
-                                result.insert(mbid.to_string(), 1);
-                            }
-                        }
-                    }
+                    result.extend(parse_lb_feedback(&val, 1));
                 }
             }
             Ok(Some(_)) | Ok(None) | Err(_) => {
@@ -678,18 +709,34 @@ pub mod host_favorites {
         match host::http::send(req) {
             Ok(Some(resp)) if resp.status_code == 200 => {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
-                    if let Some(fb) = val.get("feedback").and_then(|f| f.as_array()) {
-                        for item in fb {
-                            if let Some(mbid) = item.get("recording_mbid").and_then(|m| m.as_str()) {
-                                result.insert(mbid.to_string(), -1);
-                            }
-                        }
-                    }
+                    result.extend(parse_lb_feedback(&val, -1));
                 }
             }
             _ => {}
         }
         result
+    }
+
+    /// ListenBrainz feedback, KV-cached: 1h on success, 5 min when empty or
+    /// unreachable (a down service costs at most one HTTP pair per window,
+    /// never one per file).
+    pub(crate) fn lb_feedback_cached(cfg: &Config) -> Vec<LbFeedback> {
+        if !cfg.listenbrainz_scrobble || cfg.musicbrainz_token.trim().is_empty() {
+            return Vec::new();
+        }
+        if let Ok(Some(v)) = crate::store::kv().get("lb.feedback") {
+            if let Ok(val) = serde_json::from_slice::<Vec<LbFeedback>>(&v) {
+                return val;
+            }
+        }
+        let fb = listenbrainz_get_feedback(cfg);
+        let ttl = if fb.is_empty() { 300 } else { 3600 };
+        let _ = crate::store::kv().set_with_ttl(
+            "lb.feedback",
+            serde_json::to_vec(&fb).unwrap_or_default(),
+            ttl,
+        );
+        fb
     }
 
     /// Scrobble a full listen so the provider's playcount grows too. Best-effort
@@ -936,6 +983,42 @@ pub mod host_favorites {
             }
         }
 
+        // ListenBrainz loved feedback (score=1) -> star in Navidrome. Inbound
+        // only: the push side is publish_star_ratings' rate_track, and LB
+        // entries deliberately stay out of the Last.fm unlove/unstar loops.
+        if cfg.listenbrainz_scrobble && !cfg.musicbrainz_token.trim().is_empty() {
+            for fb in lb_feedback_cached(cfg) {
+                if fb.score != 1 || fb.title.trim().is_empty() || fb.artist.trim().is_empty() {
+                    continue;
+                }
+                if starred.iter().any(|s| same_track(&fb.title, &fb.artist, &fb.mbid, s)) {
+                    continue;
+                }
+                let target = LovedTrack {
+                    title: fb.title.clone(),
+                    artist: fb.artist.clone(),
+                    mbid: fb.mbid.clone(),
+                };
+                match star_in_navidrome(cfg, &target) {
+                    Ok(true) => {
+                        summary.lastfm_to_nav += 1;
+                        crate::wasm::log_info(&format!(
+                            "Navidrome starred (ListenBrainz loved): {} - {}",
+                            fb.artist, fb.title
+                        ));
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        summary.errors += 1;
+                        crate::wasm::log_warn(&format!(
+                            "star failed (ListenBrainz) {} - {}: {e}",
+                            fb.artist, fb.title
+                        ));
+                    }
+                }
+            }
+        }
+
         crate::wasm::log_info(&format!(
             "favorites sync done: {}+Navidrome->Last.fm, {}+Last.fm->Navidrome, {} errors",
             summary.nav_to_lastfm, summary.lastfm_to_nav, summary.errors
@@ -947,6 +1030,27 @@ pub mod host_favorites {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_lb_feedback() {
+        let json = serde_json::json!({
+            "feedback": [
+                {"recording_mbid": "mbid-1", "recording_metadata": {"track_name": "Dream On", "artist_name": "Aerosmith"}},
+                {"recording_mbid": "mbid-2"},
+                {"recording_mbid": ""}
+            ]
+        });
+        let loved = parse_lb_feedback(&json, 1);
+        assert_eq!(loved.len(), 2);
+        assert_eq!(loved[0].mbid, "mbid-1");
+        assert_eq!(loved[0].title, "Dream On");
+        assert_eq!(loved[0].artist, "Aerosmith");
+        assert_eq!(loved[0].score, 1);
+        assert_eq!(loved[1].mbid, "mbid-2");
+        assert_eq!(loved[1].title, "");
+        let hated = parse_lb_feedback(&json, -1);
+        assert_eq!(hated[0].score, -1);
+    }
 
     #[test]
     fn parses_getstarred2() {

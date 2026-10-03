@@ -270,6 +270,9 @@ pub struct Config {
     pub navidrome_admin_user: String,
     /// Admin password for the native Navidrome API (basic auth).
     pub navidrome_admin_password: String,
+    /// Navidrome's Subsonic base URL as reachable from the webhook container
+    /// (the webhook uses it for the background starred-ratings pull).
+    pub navidrome_url: String,
     pub skip_hidden_files: bool,
     pub preserve_recording_type: bool,
     pub singles_under_artist: bool,
@@ -480,6 +483,7 @@ impl Default for Config {
             trim_missing_days: 0, // 0 = disabled (opt-in)
             navidrome_admin_user: String::new(),
             navidrome_admin_password: String::new(),
+            navidrome_url: "http://navidrome:4533".to_string(),
             skip_hidden_files: true,
             preserve_recording_type: true,
             singles_under_artist: true,
@@ -580,7 +584,7 @@ const CONFIG_KEYS: &[&str] = &[
     "cleanupNoAudioFolders", "metaGateEnabled", "parseFilenames",
     "autoTagFromMB", "detectDuplicates", "writeReplayGain", "replayGainMode",
     "replayGainReference", "trimMissingDays", "navidromeAdminUser",
-    "navidromeAdminPassword", "skipHiddenFiles", "preserveRecordingType",
+    "navidromeAdminPassword", "navidromeUrl", "skipHiddenFiles", "preserveRecordingType",
     "singlesUnderArtist", "singlesEnabled", "fillerKeywords", "excludePaths",
     "moveDestinationLibrary", "backupBeforeWrite", "backupRetentionDays",
     "rollbackRetentionDays",     "verifyIdentity", "forceFingerprint", "forceRefingerprintUnknownArtist", "minConfidence",
@@ -825,6 +829,12 @@ impl Config {
         }
         if let Some(v) = map.get("navidromeAdminPassword") {
             c.navidrome_admin_password = v.to_string();
+        }
+        if let Some(v) = map.get("navidromeUrl") {
+            let v = v.trim().trim_end_matches('/').to_string();
+            if !v.is_empty() {
+                c.navidrome_url = v;
+            }
         }
         c.skip_hidden_files = bool(map, "skipHiddenFiles", c.skip_hidden_files);
         c.preserve_recording_type = bool(map, "preserveRecordingType", c.preserve_recording_type);
