@@ -25,7 +25,6 @@
 # Providers (octo-fiesta supports all of these; fill credentials in a .env
 # file next to this compose and pick one via MUSIC_SERVICE):
 #   SquidWTF - no credentials (free, proxies Qobuz/Tidal/Amazon/Deemix)
-#   Deezer   - DEEZER_ARL (see octo-fiesta wiki "Getting-Deezer-Credentials")
 #   Qobuz    - QOBUZ_USER_AUTH_TOKEN + QOBUZ_USER_ID (paid account)
 #   Yandex   - YANDEX_OAUTH_TOKEN (see wiki "Getting-Yandex-Credentials")
 #
@@ -171,7 +170,7 @@ services:
 
   # ===== Octo-Fiesta (OPTIONAL - missing-track proxy) =====
   # Third-party Subsonic proxy that streams songs your library doesn't have.
-  # Supports SquidWTF (free), Deezer, Qobuz, Yandex.
+  # Supports SquidWTF (free), Qobuz, Yandex.
   # Uncomment below to deploy. The webhook auto-detects it on the Docker network.
   # octo-fiesta:
   #   image: ghcr.io/v1ck3s/octo-fiesta

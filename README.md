@@ -479,7 +479,7 @@ inline in the compose — braces inside `${VAR:-default}` break interpolation).
 
 [Octo-Fiesta](https://github.com/V1ck3s/octo-fiesta) (GPL-3.0) is a third-party
 Subsonic proxy that serves **songs your library doesn't have** from a streaming
-provider. It supports **SquidWTF (free, no credentials)**, Deezer, Qobuz and
+provider. It supports **SquidWTF (free, no credentials)**, Qobuz and
 Yandex:
 
 - **Streaming chain** (all on `stack_network`):
@@ -487,9 +487,8 @@ Yandex:
   Songs Navidrome already has pass through transparently; only missing tracks
   are fetched on demand.
 - **Provider** = `MUSIC_SERVICE` (default `SquidWTF` — zero credentials). For
-  Deezer/Qobuz/Yandex, put the tokens in `.env` (copy the bundled
+  Qobuz/Yandex, put the tokens in `.env` (copy the bundled
   `.env.example`) and set `MUSIC_SERVICE`:
-  - `DEEZER_ARL` — [getting Deezer credentials](https://github.com/V1ck3s/octo-fiesta/wiki/Getting-Deezer-Credentials-(ARL-Token))
   - `QOBUZ_USER_AUTH_TOKEN` + `QOBUZ_USER_ID` — paid Qobuz account
   - `YANDEX_OAUTH_TOKEN` — [Yandex OAuth](https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d)
   - SquidWTF extras: `SQUIDWTF_SOURCE` (Qobuz/Tidal/AmazonMusic/Deemix),
