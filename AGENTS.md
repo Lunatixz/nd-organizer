@@ -22,6 +22,31 @@ Guide for AI coding agents working in this repo. Read this first.
 >    UPDATE plugin SET config = '<saved_json>' WHERE id='nd-organizer';
 >    ```
 
+## SCOPE — hard limits on what you may touch (user policy, 2026-10-03)
+
+> These limits come from me, the owner. They override any task, curiosity, or
+> "while I'm here" impulse. When in doubt — ask. Never assume consent.
+
+1. **In scope: nd-organizer and its sidecars only.** That means this repo
+   (`src/`, `manifest.json`, `README.md`, `AGENTS.md`, `docker-compose.yml`,
+   `scripts/`, `.github/`, tests) and the five sidecar dirs we own
+   (`acoustid/ webhook/ proxy/ mysql/ essentia/`).
+2. **Other projects are off-limits.** octo-fiesta, music-grabber,
+   multi-scrobbler, immich, the *arr stack, homarr, and anything else on the
+   NAS: do not edit their files, change their config/env, read their logs or
+   env vars, or follow their code paths — not even to "diagnose" something
+   they seem to be causing. Report the suspicion to me and stop.
+3. **Containers: hands off.** No Portainer/Docker API calls (no `containers/json`,
+   logs, inspect, env, restart) — **except** the two sequences I have explicitly
+   approved for this project:
+   a. the nd-organizer plugin deploy (build → install .ndp → restart Navidrome
+      via Portainer → re-enable plugin → PUT config), and
+   b. pass monitoring via **our** stack's logs (Navidrome plugin logs +
+      `nd-organizer-webhook`).
+   Anything else, on any container, needs my explicit consent first.
+4. **Development happens in the repo, not the runtime.** If an answer seems to
+   live outside our scope, bring me the question instead of reaching for it.
+
 ## What this is
 
 A **Navidrome plugin** (Rust → WASM, packaged as a `.ndp`) that organizes a music
