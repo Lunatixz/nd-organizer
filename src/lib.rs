@@ -338,6 +338,16 @@ pub(crate) mod wasm {
                 // often exceeds the callback deadline on large libraries.
                 let target_libs = target_libraries(&cfg);
                 if !target_libs.is_empty() {
+                    // A walk start is a pass start: reset the per-run album
+                    // budget like run_pass does. Init enqueues walk directly
+                    // (bypassing run_pass), so without this a stale 0 left by
+                    // a finished pass defers every album (0 plan tasks).
+                    if cfg.max_albums_per_run > 0 {
+                        let _ = crate::store::kv().set(
+                            "run.albums.remaining",
+                            cfg.max_albums_per_run.to_string().into_bytes(),
+                        );
+                    }
                     for &library_id in &target_libs {
                         let _ = crate::store::kv().delete(&format!("scan.pass.{library_id}"));
                         let _ = crate::store::kv().delete(&format!("scan.count.{library_id}"));

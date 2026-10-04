@@ -42,6 +42,18 @@ fn file_key(library_id: i32, rel: &str) -> String {
     crate::state::file_index_key(library_id, rel)
 }
 
+/// Unwrap the index value format `{"tags": {...}}` written by index_step.
+/// plan_singles used to parse the wrapper as TrackTags directly — every
+/// parse failed and the whole Singles queue was consumed with 0 moves.
+fn parse_file_tags(v: &[u8]) -> Option<TrackTags> {
+    let val: serde_json::Value = serde_json::from_slice(v).ok()?;
+    let tags = val.get("tags")?.clone();
+    if tags.is_null() {
+        return None;
+    }
+    serde_json::from_value::<TrackTags>(tags).ok()
+}
+
 fn load_stack(key: &str) -> Vec<String> {
     match crate::store::kv().get(key) {
         Ok(Some(v)) => serde_json::from_slice(&v).unwrap_or_else(|_| vec![String::new()]),
@@ -1421,14 +1433,8 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
                 for (rel, _mtime) in chunk {
                     let key = file_key(library_id, rel);
                     if let Some(v) = values.get(&key) {
-                        if let Ok(val) = serde_json::from_slice::<Value>(v) {
-                            if let Some(tags) = val.get("tags") {
-                                if !tags.is_null() {
-                                    if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-                                        entries.push((rel.clone(), t));
-                                    }
-                                }
-                            }
+                        if let Some(t) = parse_file_tags(v) {
+                            entries.push((rel.clone(), t));
                         }
                     }
                 }
@@ -1625,7 +1631,7 @@ pub fn plan_singles_step(cfg: &Config, library_id: i32) -> Result<(usize, usize)
             .get(&file_key(library_id, rel))
             .ok()
             .flatten()
-            .and_then(|v| serde_json::from_slice::<TrackTags>(&v).ok())
+            .and_then(|v| parse_file_tags(&v))
         else {
             continue;
         };
