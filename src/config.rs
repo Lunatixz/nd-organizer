@@ -459,7 +459,7 @@ impl Default for Config {
             mysql_user: "navidrome".into(),
             mysql_password: "navidrome".into(),
             soundtrack_folder: "Sound Tracks".into(),
-            various_folder: "Various Artist".into(),
+            various_folder: "Various Artists".into(),
             singles_folder: "Singles".into(),
             nest_buckets_under_various: true,
             incomplete_album_min_tracks: 3,

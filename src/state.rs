@@ -101,6 +101,12 @@ pub fn file_index_key(library_id: i32, rel: &str) -> String {
     format!("scan.filev2.{library_id}:{:016x}", fnv1a64(rel))
 }
 
+/// Which library is meta-only (everything except moves): the move
+/// destination, unless it is also an organize target.
+pub fn meta_only_id(dest: Option<i32>, targets: &[i32]) -> Option<i32> {
+    dest.filter(|d| !targets.contains(d))
+}
+
 /// Reverse one applied album: restore file names, restore the nfo content from
 /// its backup, then move the folder back to its original location.
 pub fn rollback_record(
@@ -415,6 +421,16 @@ mod tests {
         assert_eq!(file_index_key(2, &deep), file_index_key(2, &deep));
         assert_ne!(file_index_key(2, &deep), file_index_key(2, "other.flac"));
         assert_ne!(file_index_key(1, &deep), file_index_key(2, &deep));
+    }
+
+    #[test]
+    fn meta_only_id_excludes_organize_targets_and_empty_dest() {
+        // Dest not an organize target -> meta-only there.
+        assert_eq!(meta_only_id(Some(1), &[2]), Some(1));
+        // Dest also an organize target -> organized normally, not meta-only.
+        assert_eq!(meta_only_id(Some(2), &[2]), None);
+        // No destination configured -> nothing is meta-only.
+        assert_eq!(meta_only_id(None, &[2]), None);
     }
 
     #[test]

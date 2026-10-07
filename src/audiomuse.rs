@@ -288,37 +288,38 @@ pub fn write_tags(path: &Path, ac: &Acoustic, overwrite: bool) -> Result<(), Str
     let mut changed = false;
     if let Some(bpm) = ac.bpm {
         let val = format!("{bpm:.0}");
-        let existing = tag.get_string(&ItemKey::Bpm).unwrap_or("");
+        // Bpm maps on Vorbis/MP4; ID3 only maps IntegerBpm (TBPM) — try both.
+        let existing = crate::tags::get_str_any(&tag, &[ItemKey::Bpm, ItemKey::IntegerBpm]);
         if crate::tags::should_write(existing, &val, overwrite) {
-            tag.insert_text(ItemKey::Bpm, val);
-            changed = true;
+            changed |= crate::tags::insert_text_any(&mut tag, &[ItemKey::Bpm, ItemKey::IntegerBpm], &val);
         }
     }
     if let Some(key) = &ac.key {
-        let existing = tag.get_string(&ItemKey::InitialKey).unwrap_or("");
+        let existing = crate::tags::get_str_any(&tag, &[ItemKey::InitialKey]);
         if crate::tags::should_write(existing, key, overwrite) {
-            tag.insert_text(ItemKey::InitialKey, key.clone());
-            changed = true;
+            changed |= crate::tags::insert_text_any(&mut tag, &[ItemKey::InitialKey], key);
         }
     }
     if let Some(mood) = &ac.mood {
-        let existing = tag.get_string(&ItemKey::Unknown("MOOD".into())).unwrap_or("");
+        // ItemKey::Mood (TMOO / MOOD / freeform); Unknown("MOOD") has no
+        // mapping and the checked insert silently rejected it.
+        let existing = crate::tags::get_str_any(&tag, &[ItemKey::Mood]);
         if crate::tags::should_write(existing, mood, overwrite) {
-            tag.insert_text(ItemKey::Unknown("MOOD".into()), mood.clone());
-            changed = true;
+            changed |= crate::tags::insert_text_any(&mut tag, &[ItemKey::Mood], mood);
         }
     }
     if let Some(energy) = ac.energy {
         let val = format!("{energy:.2}");
-        let existing = tag.get_string(&ItemKey::Unknown("ENERGY".into())).unwrap_or("");
+        // No lofty variant for energy: Unknown key via insert_unchecked →
+        // TXXX/freeform field.
+        let existing = crate::tags::get_str_any(&tag, &[ItemKey::Unknown("ENERGY".into())]);
         if crate::tags::should_write(existing, &val, overwrite) {
-            tag.insert_text(ItemKey::Unknown("ENERGY".into()), val);
-            changed = true;
+            changed |= crate::tags::insert_text_any(&mut tag, &[ItemKey::Unknown("ENERGY".into())], &val);
         }
     }
     if !changed {
         return Ok(());
     }
     let _ = tagged.insert_tag(tag);
-crate::tags::save_tagged_atomic(&tagged, path)
+    crate::tags::save_tagged_atomic(&tagged, path)
 }

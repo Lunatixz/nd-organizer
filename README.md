@@ -27,10 +27,10 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   (MBID/ISRC) are fingerprinted via an **AcoustID sidecar** (Docker) so a song
   is only paired to an album when it's actually identified. Unverified files
   are routed to the artist's Singles folder.
-- **Classifies albums** (Soundtrack > Various Artist > Singles > Normal) and
+- **Classifies albums** (Soundtrack > Various Artists > Singles > Normal) and
   renames folders/files to your schemas:
-  - Soundtracks → `Various Artist/Sound Tracks/{album} ({year})`
-  - Compilations → `Various Artist/{album} ({year})`
+  - Soundtracks → `Various Artists/Sound Tracks/{album} ({year})`
+  - Compilations → `Various Artists/{album} ({year})`
   - Singles / incomplete albums → `{albumArtist}/Singles/{title}`
   - Everything else → `{albumArtist}/{album} ({year})`
 - **Preserves recording source**: live/bootleg tracks get `(Live)`/`(Bootleg)`
@@ -96,9 +96,11 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
 - **Verify acoustic**: Same trust-but-verify pattern for acoustic performance
   via Essentia mood_acoustic model. Strips false labels, appends when missing.
 - **Background metadata refresh**: When the organize pipeline is idle,
-  periodically updates tags, NFOs, ratings for files across ALL libraries
-  without organizing. User-gated (`metaRefreshEnabled`), respects existing
-  enrichment settings.
+  periodically fills MISSING metadata for files across ALL libraries without
+  organizing — verify-first: each file's current tags are read from disk, and
+  only gaps are processed (ReplayGain, genre, acoustic tags, MBIDs, album.nfo,
+  artwork). Never assumes a file was enriched by an organize pass before.
+  User-gated (`metaRefreshEnabled`), respects existing enrichment settings.
 - **Unified metadata writing**: All metadata sources are queried first, gaps are
   filled with priority logic, then written once (tags + NFO) at the end.
 

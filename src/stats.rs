@@ -1310,6 +1310,7 @@ pub mod host_stats {
         cfg: &crate::config::Config,
         files: &[(String, crate::tags::TrackTags)],
         fin: &std::collections::HashMap<String, std::path::PathBuf>,
+        timeout_ms: i32,
     ) -> usize {
         let base = cfg.essentia_url.trim().trim_end_matches('/');
         if base.is_empty() {
@@ -1347,7 +1348,7 @@ pub mod host_stats {
                 headers,
                 no_follow_redirects: false,
                 body: body.to_string().into_bytes(),
-                timeout_ms: 20_000,
+                timeout_ms,
             };
             match host::http::send(req) {
                 Ok(Some(resp)) if resp.status_code == 200 => {
@@ -1402,8 +1403,7 @@ fn write_essentia_tags(path: &std::path::Path, data: &serde_json::Value, overwri
         if !genre_str.is_empty() {
             let existing = tag.get_string(&ItemKey::Genre).unwrap_or("");
             if crate::tags::should_write(existing, &genre_str, overwrite) {
-                tag.insert_text(ItemKey::Genre, genre_str);
-                changed = true;
+                changed |= crate::tags::insert_text_any(&mut tag, &[ItemKey::Genre], &genre_str);
             }
         }
     }
@@ -1416,10 +1416,11 @@ fn write_essentia_tags(path: &std::path::Path, data: &serde_json::Value, overwri
             .collect::<Vec<_>>()
             .join("; ");
         if !mood_str.is_empty() {
-            let existing = tag.get_string(&ItemKey::Unknown("MOOD".into())).unwrap_or("");
+            // ItemKey::Mood (TMOO/MOOD); Unknown("MOOD") never mapped and the
+            // checked insert silently rejected it.
+            let existing = crate::tags::get_str_any(&tag, &[ItemKey::Mood]);
             if existing.is_empty() {
-                tag.insert_text(ItemKey::Unknown("MOOD".into()), mood_str);
-                changed = true;
+                changed |= crate::tags::insert_text_any(&mut tag, &[ItemKey::Mood], &mood_str);
             }
         }
     }
@@ -1427,10 +1428,10 @@ fn write_essentia_tags(path: &std::path::Path, data: &serde_json::Value, overwri
     if let Some(bpm_val) = data.get("bpm").and_then(|b| b.as_f64()) {
         if bpm_val > 0.0 {
             let bpm_str = format!("{:.1}", bpm_val);
-            let existing = tag.get_string(&ItemKey::Unknown("BPM".into())).unwrap_or("");
+            let existing = crate::tags::get_str_any(&tag, &[ItemKey::Bpm, ItemKey::IntegerBpm]);
             if crate::tags::should_write(existing, &bpm_str, overwrite) {
-                tag.insert_text(ItemKey::Unknown("BPM".into()), bpm_str);
-                changed = true;
+                changed |=
+                    crate::tags::insert_text_any(&mut tag, &[ItemKey::Bpm, ItemKey::IntegerBpm], &bpm_str);
             }
         }
     }
@@ -1443,10 +1444,9 @@ fn write_essentia_tags(path: &std::path::Path, data: &serde_json::Value, overwri
             } else {
                 format!("{} {}", key, mode)
             };
-            let existing = tag.get_string(&ItemKey::Unknown("KEY".into())).unwrap_or("");
+            let existing = crate::tags::get_str_any(&tag, &[ItemKey::InitialKey]);
             if crate::tags::should_write(existing, &key_str, overwrite) {
-                tag.insert_text(ItemKey::Unknown("KEY".into()), key_str);
-                changed = true;
+                changed |= crate::tags::insert_text_any(&mut tag, &[ItemKey::InitialKey], &key_str);
             }
         }
     }
@@ -1454,10 +1454,10 @@ fn write_essentia_tags(path: &std::path::Path, data: &serde_json::Value, overwri
     if let Some(chords) = data.get("chords") {
         if let Some(chord) = chords.get("chord").and_then(|c| c.as_str()) {
             if !chord.is_empty() {
-                let existing = tag.get_string(&ItemKey::Unknown("CHORD".into())).unwrap_or("");
+                let existing = crate::tags::get_str_any(&tag, &[ItemKey::Unknown("CHORD".into())]);
                 if crate::tags::should_write(existing, chord, overwrite) {
-                    tag.insert_text(ItemKey::Unknown("CHORD".into()), chord.to_string());
-                    changed = true;
+                    changed |=
+                        crate::tags::insert_text_any(&mut tag, &[ItemKey::Unknown("CHORD".into())], chord);
                 }
             }
         }
@@ -1475,10 +1475,14 @@ fn write_essentia_tags(path: &std::path::Path, data: &serde_json::Value, overwri
                 .collect();
             if !sections.is_empty() {
                 let structure_str = sections.join(", ");
-                let existing = tag.get_string(&ItemKey::Unknown("STRUCTURE".into())).unwrap_or("");
+                let existing =
+                    crate::tags::get_str_any(&tag, &[ItemKey::Unknown("STRUCTURE".into())]);
                 if crate::tags::should_write(existing, &structure_str, overwrite) {
-                    tag.insert_text(ItemKey::Unknown("STRUCTURE".into()), structure_str);
-                    changed = true;
+                    changed |= crate::tags::insert_text_any(
+                        &mut tag,
+                        &[ItemKey::Unknown("STRUCTURE".into())],
+                        &structure_str,
+                    );
                 }
             }
         }

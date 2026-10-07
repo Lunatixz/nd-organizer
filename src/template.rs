@@ -178,7 +178,8 @@ pub fn render_folder_path(schema: &str, fields: &TemplateFields, opts: &Sanitize
 
 /// Render a file name (without extension) and sanitize it.
 pub fn render_file_name(schema: &str, fields: &TemplateFields, opts: &SanitizeOptions) -> String {
-    let name = sanitize_with(&render(schema, fields), opts);
+    // " ({year})" with an unknown year leaves an empty " ()"; drop it.
+    let name = sanitize_with(&render(schema, fields), opts).replace(" ()", "");
     if name.is_empty() {
         "_untitled".into()
     } else {

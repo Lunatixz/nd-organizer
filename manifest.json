@@ -2,8 +2,8 @@
   "id": "nd-organizer",
   "name": "Music Organizer",
   "author": "nd-organizer",
-  "version": "0.2.0",
-  "description": "Organizes your Navidrome library: classifies albums (Soundtrack > Various Artist > Singles > Normal) and renames folders/files to your schemas, preserving live/bootleg recordings. Refreshes tags + artwork from MusicBrainz, Cover Art Archive, iTunes and Last.fm; reads/writes Kodi NFO sidecars; verifies identity (AcoustID fingerprint + tags + names) before writing. Integrates with Lidarr (metadata, naming schema, force-search incomplete albums) and AudioMuse-AI (acoustic tags, re-sync). Dry-run default, change history with rollback, metadata backups, reports + status feed (log webhook). Runs in idle-only batches and rescans Navidrome after moves so playback never hits stale files.",
+  "version": "3.1.0",
+  "description": "Organizes your Navidrome library: classifies albums (Soundtrack > Various Artists > Singles > Normal) and renames folders/files to your schemas, preserving live/bootleg recordings. Refreshes tags + artwork from MusicBrainz, Cover Art Archive, iTunes and Last.fm; reads/writes Kodi NFO sidecars; verifies identity (AcoustID fingerprint + tags + names) before writing. Integrates with Lidarr (metadata, naming schema, force-search incomplete albums) and AudioMuse-AI (acoustic tags, re-sync). Dry-run default, change history with rollback, metadata backups, reports + status feed (log webhook). Runs in idle-only batches and rescans Navidrome after moves so playback never hits stale files.",
   "website": "https://github.com/Lunatixz/nd-organizer",
   "permissions": {
     "library": {
@@ -188,12 +188,12 @@
           "type": "string",
           "title": "Soundtrack folder",
           "default": "Sound Tracks",
-          "description": "Folder name for soundtrack albums when 'Nest soundtracks under Various Artist' is off."
+          "description": "Folder name for soundtrack albums when 'Nest soundtracks under Various Artists' is off."
         },
         "variousFolder": {
           "type": "string",
           "title": "Various artist folder",
-          "default": "Various Artist",
+          "default": "Various Artists",
           "description": "Folder name used for various-artist / compilation albums."
         },
         "singlesFolder": {
@@ -204,15 +204,15 @@
         },
         "nestBucketsUnderVarious": {
           "type": "boolean",
-          "title": "Nest soundtracks under Various Artist",
+          "title": "Nest soundtracks under Various Artists",
           "default": true,
-          "description": "Soundtracks go under Various Artist/Sound Tracks/... when on, or as a top-level Sound Tracks/ folder when off. (Singles are not affected - they always go under the single's artist per the 'Put singles under the artist' option.)"
+          "description": "Soundtracks go under Various Artists/Sound Tracks/... when on, or as a top-level Sound Tracks/ folder when off. (Singles are not affected - they always go under the single's artist per the 'Put singles under the artist' option.)"
         },
         "singlesUnderArtist": {
           "type": "boolean",
           "title": "Put singles under the artist's folder",
           "default": true,
-          "description": "Artist/Singles/{title} instead of the Various Artist singles area. Falls back to Various Artist/Singles when the artist is unknown."
+          "description": "Artist/Singles/{title} instead of the Various Artists singles area. Falls back to Various Artists/Singles when the artist is unknown."
         },
         "singlesEnabled": {
           "type": "boolean",
@@ -779,7 +779,7 @@
           "type": "boolean",
           "title": "Use Lidarr's naming schema for folders/files",
           "default": false,
-          "description": "Use Lidarr's naming config (artistFolderFormat/albumFolderFormat/standardTrackFormat) instead of the organizer's folderSchema/fileSchema. Requires lidarrUrl + lidarrApiKey."
+          "description": "Use Lidarr's naming config (artistFolderFormat + standardTrackFormat; Lidarr's API has no albumFolderFormat, so the album folder falls back to '{Album Title} ({Release Year})') instead of the organizer's folderSchema/fileSchema. Requires lidarrUrl + lidarrApiKey."
         },
         "audiomuseUrl": {
           "type": "string",
@@ -841,7 +841,7 @@
           "type": ["string", "integer"],
           "title": "Move to library",
           "default": "",
-          "description": "Path or name of the library to move processed albums into. Leave empty to keep albums in their current library. Match must be exact (e.g. '/music' or 'Music'). Check the warnings panel for available libraries."
+          "description": "Path or name of the library to move processed albums into. Leave empty to keep albums in their current library. Match must be exact (e.g. '/music' or 'Music'). Check the warnings panel for available libraries. If this library is not also listed under 'Organize specific libraries only', it is treated as read-only for moves: it still gets full metadata enrichment, duplicate reports, and empty-folder cleanup, but its files are never moved or renamed. Exception: with a 'Force re-fingerprint' option enabled, confirmed AcoustID matches that correct an artist name also re-file the affected folders and files in this library to match — run a dry pass first to review the moves."
         },
         "libraries": {
           "type": "string",
@@ -860,7 +860,7 @@
           "type": "boolean",
           "title": "Delete folders with no audio files",
           "default": false,
-          "description": "After organizing, delete any library folder whose entire contents contain no audio files (only images, nfo, lyrics or other misc files). Handles empty folders AND folders left behind after moves. Apply mode only; dry-run reports what would be deleted. Never touches the library root or excluded paths."
+          "description": "After organizing, sidecar-only leftover folders (nfo/images/cue left behind by a rename) are merged into the matching album folder automatically. Additionally, with this toggle on, any folder still holding no audio files is deleted. Handles empty folders AND folders left behind after moves. Apply mode only; dry-run reports what would happen. Never touches the library root or excluded paths."
         },
         "parseFilenames": {
           "type": "boolean",
@@ -1030,13 +1030,13 @@
           "type": "boolean",
           "title": "Force re-fingerprint all files",
           "default": false,
-          "description": "Re-fingerprint ALL files via AcoustID even if they already have a MusicBrainz ID. Use this to refresh identity verification across the entire library. Requires verifyIdentity and acoustidUrl."
+          "description": "Re-fingerprint ALL files via AcoustID even if they already have a MusicBrainz ID. Use this to refresh identity verification across the entire library. A confirmed match (score at or above minConfidence) also fills placeholder track artists (missing / 'Unknown...' / 'Various Artists'), and when every track of an album resolves to one artist the album artist, folder and file names are corrected to match — including inside the 'Move to library' destination, which is otherwise never moved or renamed. Requires verifyIdentity and acoustidUrl."
         },
         "forceRefingerprintUnknownArtist": {
           "type": "boolean",
           "title": "Force re-fingerprint tracks with unknown artist",
           "default": false,
-          "description": "Re-fingerprint tracks where either artist or album_artist is missing meta or contains 'Unknown' (e.g. 'Unknown Artist', 'Unknown Artist (Live)', 'Various Artists'). After AcoustID identifies the track, the artist is filled in and the file joins the normal organize pipeline. Requires verifyIdentity and acoustidUrl."
+          "description": "Re-fingerprint tracks where either artist or album_artist is missing meta or contains 'Unknown' (e.g. 'Unknown Artist', 'Unknown Artist (Live)', 'Various Artists'). After AcoustID identifies the track, the artist is filled in and the file joins the normal organize pipeline; when every track of an album resolves to one artist, the album artist, folder and file names are corrected to match — including inside the 'Move to library' destination, which is otherwise never moved or renamed. Requires verifyIdentity and acoustidUrl."
         },
         "verifyInstrumental": {
           "type": "boolean",

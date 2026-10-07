@@ -1121,12 +1121,18 @@ pub fn verify_step(
 
 
 fn _process_verify_results(
+    cfg: &Config,
     root: &std::path::Path,
     library_id: i32,
     result: &serde_json::Value,
 ) -> Result<usize, String> {
     let results = result.get("results").and_then(|r| r.as_object()).cloned().unwrap_or_default();
+    let mode_apply = cfg.mode == Mode::Apply;
+    let write_budget = std::time::Duration::from_secs(10);
+    let write_start = std::time::SystemTime::now();
     let mut processed = 0usize;
+    let mut filled = 0usize;
+    let mut written = 0usize;
     for (path, entry) in &results {
         let rel = path.trim_start_matches(&root.to_string_lossy().to_string())
             .trim_start_matches('/');
@@ -1144,12 +1150,43 @@ fn _process_verify_results(
                                     .and_then(|id| id.as_str())
                                     .map(String::from)
                                     .unwrap_or_default();
-                                let recording_mbid = top.get("id")
+                                // Sidecar sends `recordingId`; keep `id` as a
+                                // fallback for old sidecar builds.
+                                let recording_mbid = top.get("recordingId")
+                                    .or_else(|| top.get("id"))
                                     .and_then(|id| id.as_str())
                                     .map(String::from)
                                     .unwrap_or_default();
                                 t.insert("mbid_album".into(), serde_json::Value::String(album_mbid));
                                 t.insert("mbid_recording".into(), serde_json::Value::String(recording_mbid));
+                            }
+                            // Force-fingerprint reparse: the match's artist
+                            // resolves placeholder tracks (missing / Unknown /
+                            // Various Artists). Fill KV, then the file tag
+                            // (apply mode, budgeted — remaining file writes
+                            // are lost only if the 10s budget breaks mid-batch;
+                            // KV stays correct either way). ponytail: ≤100
+                            // entries per job, each write is a few ms.
+                            let current = t.get("artist").and_then(|a| a.as_str()).unwrap_or("");
+                            let candidate = crate::tags::artist_fill_candidate(
+                                current,
+                                cfg.min_confidence,
+                                matches.iter().filter_map(|m| {
+                                    Some((m.get("score")?.as_f64()?, m.get("artist")?.as_str()?))
+                                }),
+                            );
+                            if let Some(artist) = candidate {
+                                t.insert("artist".into(), serde_json::Value::String(artist.clone()));
+                                filled += 1;
+                                if mode_apply && !past(write_start, write_budget) {
+                                    match crate::tags::fill_placeholder_artist(&root.join(rel), &artist) {
+                                        Ok(true) => written += 1,
+                                        Ok(false) => {}
+                                        Err(e) => crate::wasm::log_warn(&format!(
+                                            "verify: fill artist {rel}: {e}"
+                                        )),
+                                    }
+                                }
                             }
                         }
                         t.insert("_acoustid_checked".into(), serde_json::Value::Bool(true));
@@ -1160,8 +1197,14 @@ fn _process_verify_results(
         }
         processed += 1;
     }
+    let fill_note = if filled > 0 {
+        format!(", filled artist on {filled} placeholder track(s) ({written} file tag(s) written)")
+    } else {
+        String::new()
+    };
     crate::wasm::log_info(&format!(
-        "verify_step: processed {} results from sidecar", processed
+        "verify_step: processed {} results from sidecar{}",
+        processed, fill_note
     ));
     Ok(processed)
 }
@@ -1178,7 +1221,7 @@ fn _complete_verify_job(
     unverified_key: &str,
     job_id_key: &str,
 ) -> Result<(ScanOutcome, usize), String> {
-    let processed = _process_verify_results(root, library_id, result)?;
+    let processed = _process_verify_results(cfg, root, library_id, result)?;
     // Cleanup job
     let _ = crate::store::kv().delete(job_id_key);
     let _ = host::http::send(host::http::HTTPRequest {
@@ -1551,11 +1594,102 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
         crate::wasm::log_info("group_step: cross-dup report done");
     }
 
+    let meta_only = crate::wasm::meta_only_library(cfg).is_some_and(|id| id == library_id);
     let groups = crate::organizer::group_entries(&verified);
-    let groups = apply_album_budget(cfg, groups);
+    let groups = if meta_only {
+        // Read-only enrichment library: every group gets enriched, the
+        // maxAlbumsPerRun move budget does not apply.
+        groups
+    } else {
+        apply_album_budget(cfg, groups)
+    };
+    // Force-fingerprint folder fixup: when the album artist is a placeholder
+    // (missing / Unknown / Various Artists) but every track in the group
+    // resolves to one real artist, correct the album artist — file tags first,
+    // then KV so every downstream reader (plan, NFO, meta_refresh, next pass)
+    // sees it. plan_move then re-files folder + file names. Real album artists
+    // and true (mixed) compilations are untouched.
+    if cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist {
+        let by_rel: std::collections::HashMap<&str, &TrackTags> =
+            verified.iter().map(|(r, t)| (r.as_str(), t)).collect();
+        let apply_writes = cfg.mode == Mode::Apply;
+        let fixup_start = std::time::SystemTime::now();
+        // ponytail: ≤8s of the 24s group-task budget — file tag rewrites
+        // (lofty) dominate. Checked BETWEEN groups only: file tags are written
+        // before the KV patch, so a mid-group kill re-runs the whole group
+        // next pass and the placeholder gate makes every write idempotent.
+        let fixup_budget = std::time::Duration::from_secs(8);
+        let mut collapsed = 0usize;
+        let mut truncated = 0usize;
+        for (gi, g) in groups.iter().enumerate() {
+            if past(fixup_start, fixup_budget) {
+                truncated = groups.len() - gi;
+                break;
+            }
+            let Some(cur_aa) = g
+                .iter()
+                .find_map(|r| by_rel.get(r.as_str()).map(|t| t.album_artist.clone()))
+            else {
+                continue;
+            };
+            let tracks: Vec<String> = g
+                .iter()
+                .filter_map(|r| by_rel.get(r.as_str()).map(|t| t.artist.clone()))
+                .collect();
+            let Some(new_aa) = crate::organizer::collapse_album_artist(&cur_aa, &tracks) else {
+                continue;
+            };
+            if apply_writes {
+                let rr = std::path::Path::new(&real_root);
+                for r in g {
+                    if let Err(e) =
+                        crate::tags::fill_placeholder_album_artist(&rr.join(r), &new_aa)
+                    {
+                        crate::wasm::log_warn(&format!("group: album_artist {r}: {e}"));
+                    }
+                }
+            }
+            for r in g {
+                let k = file_key(library_id, r);
+                if let Ok(Some(v)) = crate::store::kv().get(&k) {
+                    if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
+                        if let Some(obj) = val.get_mut("tags").and_then(|t| t.as_object_mut()) {
+                            let same = obj
+                                .get("album_artist")
+                                .and_then(|a| a.as_str())
+                                .map(|a| a == new_aa)
+                                .unwrap_or(false);
+                            if !same {
+                                obj.insert(
+                                    "album_artist".into(),
+                                    serde_json::Value::String(new_aa.clone()),
+                                );
+                                let _ = crate::store::kv().set(&k, val.to_string().into_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+            collapsed += 1;
+            crate::wasm::log_info(&format!(
+                "group_step: force-fingerprint fixup: '{cur_aa}' -> '{new_aa}' ({g:?})"
+            ));
+        }
+        if collapsed > 0 {
+            crate::wasm::log_info(&format!(
+                "group_step: force-fingerprint fixup re-filed {collapsed} album(s) to their resolved artist"
+            ));
+        }
+        if truncated > 0 {
+            crate::wasm::log_info(&format!(
+                "group_step: force-fingerprint fixup budget hit — {truncated} group(s) re-checked next pass"
+            ));
+        }
+    }
     crate::wasm::log_info(&format!(
-        "group_step: {} album groups after budget, enqueueing plans...",
-        groups.len()
+        "group_step: {} album groups{}, enqueueing...",
+        groups.len(),
+        if meta_only { " (meta-only, unbudgeted)" } else { " after budget" }
     ));
     if cfg.star_tally_enabled {
         let pruned = crate::stats::host_stats::prune_star_tallies();
@@ -1563,23 +1697,48 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             crate::wasm::log_info(&format!("star: pruned {pruned} orphaned tallie(s)"));
         }
     }
-    let enqueued = crate::wasm::enqueue_plan_tasks(cfg, library_id, groups)?;
-    // Safe to delete indexed_key now — plan tasks are enqueued and group won't need it again.
+    // meta_refresh reads the indexed list after plan tasks delete
+    // scan.indexed — keep an owned copy for it.
+    if let Ok(Some(v)) = crate::store::kv().get(&indexed_key) {
+        let _ = crate::store::kv().set(&format!("scan.meta_files.{library_id}"), v);
+    }
+    // Sweep for folders left with no audio: sidecar leftovers merge into the
+    // matching album folder (always on); deleting audio-less folders stays
+    // behind cleanupNoAudioFolders. Applies to every library the pass
+    // processed, meta-only included. Enqueued BEFORE the enrich/plan queue
+    // so merges happen ahead of the per-album work, not hours behind it.
+    crate::wasm::enqueue_cleanup_task(library_id)?;
+    let enqueued = if meta_only {
+        // No plan/apply for the destination library. Enrichment is STASHED
+        // rather than queued: cleanup (enqueued above) chunks over a 15s
+        // budget and its continuation would land behind a ~1-task-per-album
+        // burst and starve for hours. cleanup's done branch releases the
+        // stash, so the burst can never outrun the sweep that feeds it.
+        let _ = crate::store::kv().set(
+            &format!("enrich.stash.{library_id}"),
+            serde_json::to_vec(&groups).unwrap_or_default(),
+        );
+        crate::wasm::log_info(&format!(
+            "group_step: meta-only library, {} group(s) stashed for enrichment after cleanup",
+            groups.len()
+        ));
+        0
+    } else {
+        let n = crate::wasm::enqueue_plan_tasks(cfg, library_id, groups)?;
+        crate::wasm::log_info(&format!(
+            "group_step: grouped {} files into {} plan tasks (enqueued)",
+            total_files, n
+        ));
+        n
+    };
+    // Safe to delete indexed_key now — plan/enrich tasks are enqueued and group won't need it again.
     let _ = crate::store::kv().delete(&indexed_key);
     // group_paths goes too: it marks "group pending" for enable-time resume,
     // and a late/duplicate group task must no-op instead of re-grouping.
     let _ = crate::store::kv().delete(&format!("scan.group_paths.{library_id}"));
-    crate::wasm::log_info(&format!(
-        "group_step: grouped {} files into {} plan tasks (enqueued)",
-        total_files, enqueued
-    ));
-    // After the plan/apply work runs, sweep for folders left with no audio
-    // (images/nfo/lyrics/misc only) - gated by cleanupNoAudioFolders.
-    if cfg.cleanup_no_audio_folders {
-        crate::wasm::enqueue_cleanup_task(library_id)?;
-    }
     // Identity gate queue: files below minConfidence for Singles routing.
-    if !failed.is_empty() {
+    // Meta-only libraries never move, so nothing is queued there.
+    if !meta_only && !failed.is_empty() {
         let rels: Vec<&String> = failed.iter().map(|(r, _)| r).collect();
         crate::store::kv()
             .set(
@@ -1601,7 +1760,20 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 /// group_step in budgeted chunks; consumed entries never stick even when
 /// skipped, so the queue always converges.
 pub fn plan_singles_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), String> {
+    // The destination library never moves: drop any queue left over from
+    // before it became meta-only instead of routing it.
+    if crate::wasm::meta_only_library(cfg).is_some_and(|id| id == library_id) {
+        let _ = crate::store::kv().delete(&format!("scan.singles.{library_id}"));
+        return Ok((0, 0));
+    }
     let root = lib_root(library_id)?;
+    // moveDestinationLibrary: singles land in the destination library, same
+    // contract as plan_move_step's cross-library relocation.
+    let dest_root = (!cfg.move_destination_library.trim().is_empty())
+        .then(|| crate::wasm::resolve_library_id(&cfg.move_destination_library))
+        .flatten()
+        .and_then(|id| lib_root(id).ok())
+        .unwrap_or_else(|| root.clone());
     let key = format!("scan.singles.{library_id}");
     let Some(raw) = crate::store::kv().get(&key).ok().flatten() else {
         return Ok((0, 0));
@@ -1635,19 +1807,21 @@ pub fn plan_singles_step(cfg: &Config, library_id: i32) -> Result<(usize, usize)
         else {
             continue;
         };
-        // Already sitting in a Singles folder - consume without moving.
+        // Already sitting in a Singles folder - consume without moving
+        // (same-library only; cross-library still owes the move to dest).
         let artist = if t.album_artist.trim().is_empty() {
             cfg.various_folder.clone()
         } else {
             t.album_artist.trim().to_string()
         };
-        if rel.starts_with(&format!("{artist}/{}/", cfg.singles_folder))
-            || rel.starts_with(&format!("{}/{}", cfg.various_folder, cfg.singles_folder))
+        if dest_root == root
+            && (rel.starts_with(&format!("{artist}/{}/", cfg.singles_folder))
+                || rel.starts_with(&format!("{}/{}", cfg.various_folder, cfg.singles_folder)))
         {
             continue;
         }
-        let to = crate::organizer::singles_target(&root, cfg, &t.album_artist, &t.album, rel);
-        if to.eq_ignore_ascii_case(rel) {
+        let to = crate::organizer::singles_target(&dest_root, cfg, &t.album_artist, &t.album, rel);
+        if dest_root == root && to.eq_ignore_ascii_case(rel) {
             continue;
         }
         let sidecars = if cfg.rename_sidecars {
@@ -1662,7 +1836,9 @@ pub fn plan_singles_step(cfg: &Config, library_id: i32) -> Result<(usize, usize)
         });
     }
     let moved = if cfg.mode == crate::config::Mode::Apply {
-        if let Err(e) = crate::organizer::apply_group_plan(&root, &plan, cfg.prune_empty_dirs) {
+        if let Err(e) =
+            crate::organizer::apply_group_plan_to(&root, &dest_root, &plan, cfg.prune_empty_dirs)
+        {
             crate::wasm::log_warn(&format!("plan_singles: {e}"));
         }
         plan.moves.len()
@@ -1861,38 +2037,21 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
     let root = lib_root(library_id)?;
     post_phase_status(cfg, library_id, "cleanup");
     let dry = cfg.mode != crate::config::Mode::Apply;
-    let dirs_key = format!("cleanup.dirs.{library_id}");
+    let stack_key = format!("cleanup.stack.{library_id}");
     let deleted_key = format!("cleanup.deleted.{library_id}");
+    let merged_key = format!("cleanup.merged.{library_id}");
 
-    // Load or initialize directory list.
-    // First-chunk collect_dirs can be slow on large libraries, so we pass
-    // a time budget to avoid exceeding the WASM deadline.
-    let dirs: Vec<String> = crate::store::kv()
-        .get(&dirs_key)
+    // Resumable walk cursor (see organizer::cleanup_walk). Starts at the
+    // root; persists between chunks so a slow library is fully covered —
+    // the old up-front 12s collect silently truncated mid-alphabet and
+    // reported the partial walk as a complete pass.
+    let mut stack: Vec<(String, bool)> = crate::store::kv()
+        .get(&stack_key)
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or_else(|| {
-            // First chunk — collect directories with a time budget.
-            let start = std::time::SystemTime::now();
-            let budget = std::time::Duration::from_secs(12);
-            let mut all_dirs = Vec::new();
-            collect_dirs_bounded(&root, &root, cfg, &mut all_dirs, &start, &budget);
-            // Reverse: process children before parents so parent dirs
-            // still contain their (non-empty) children when we check them.
-            all_dirs.reverse();
-            all_dirs
-        });
+        .unwrap_or_else(|| vec![(String::new(), false)]);
 
-    if dirs.is_empty() {
-        let _ = crate::store::kv().delete(&dirs_key);
-        let _ = crate::store::kv().delete(&deleted_key);
-        crate::wasm::log_info("cleanup: no directories to check");
-        return Ok(0);
-    }
-
-    // Process a batch of directories.
-    let batch_size = 100;
     let mut deleted: usize = crate::store::kv()
         .get(&deleted_key)
         .ok()
@@ -1900,107 +2059,82 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
         .and_then(|v| String::from_utf8(v).ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let mut merged: usize = crate::store::kv()
+        .get(&merged_key)
+        .ok()
+        .flatten()
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
-    let scan_start = std::time::SystemTime::now();
-    let time_budget = std::time::Duration::from_secs(15);
-    let mut processed = 0;
-
-    for dir_rel in dirs.iter().take(batch_size) {
-        if past(scan_start, time_budget) {
-            break;
-        }
-        let dir_path = root.join(dir_rel);
-        if !dir_path.exists() {
-            processed += 1;
-            continue;
-        }
-        // Check if this directory has audio files.
-        let mut has_audio = false;
-        if let Ok(entries) = std::fs::read_dir(&dir_path) {
-            for e in entries.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if let Ok(ft) = e.file_type() {
-                    if ft.is_file() && crate::organizer::is_audio(&name) {
-                        has_audio = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if !has_audio {
-            if dry {
-                crate::wasm::log_info(&format!("cleanup: would delete {} (no audio)", dir_rel));
-                deleted += 1;
-            } else if std::fs::remove_dir(&dir_path).is_ok() {
-                crate::wasm::log_info(&format!("cleanup: deleted {} (no audio)", dir_rel));
-                deleted += 1;
-            }
-        }
-        processed += 1;
+    let budget = std::time::Duration::from_secs(15);
+    let (lines, m, d, done) = crate::organizer::cleanup_walk(
+        &root,
+        &mut stack,
+        dry,
+        cfg.cleanup_no_audio_folders,
+        cfg.skip_hidden_files,
+        &cfg.exclude_paths,
+        budget,
+    );
+    merged += m;
+    deleted += d;
+    for l in lines {
+        crate::wasm::log_info(&l);
     }
 
-    // Save remaining directories and deleted count.
-    let remaining: Vec<String> = dirs[processed..].to_vec();
-    if remaining.is_empty() {
-        let _ = crate::store::kv().delete(&dirs_key);
+    if done {
+        let _ = crate::store::kv().delete(&stack_key);
         let _ = crate::store::kv().delete(&deleted_key);
+        let _ = crate::store::kv().delete(&merged_key);
         crate::wasm::log_info(&format!(
-            "cleanup: {} no-audio folder(s) {}",
+            "cleanup: {} sidecar folder(s) merged, {} no-audio folder(s) {}",
+            merged,
             deleted,
             if dry { "would be deleted (dry-run)" } else { "deleted" }
         ));
+        // Sweep complete: release the per-album stash group_step stashed.
+        // Enqueued here (not at group time) so the burst cannot fill the queue
+        // ahead of cleanup's chunked continuation.
+        // Force-fingerprint reparse: the destination library's moves are part
+        // of the correction (folders re-filed under the resolved artist), so
+        // release as plan tasks in BOTH modes — dry produces the would-move
+        // report, apply moves then enriches. Otherwise the old enrich-only
+        // release (apply mode only; the stash survives a dry pass for later).
+        let stash_key = format!("enrich.stash.{library_id}");
+        if let Ok(Some(raw)) = crate::store::kv().get(&stash_key) {
+            if let Ok(groups) = serde_json::from_slice::<Vec<Vec<String>>>(&raw) {
+                let force_moves =
+                    cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist;
+                if force_moves {
+                    let n = crate::wasm::enqueue_plan_tasks(cfg, library_id, groups)?;
+                    crate::wasm::log_info(&format!(
+                        "cleanup: released {n} stashed plan task(s) (force-fingerprint reparse)"
+                    ));
+                    let _ = crate::store::kv().delete(&stash_key);
+                } else if !dry {
+                    let n = crate::wasm::enqueue_enrich_tasks(library_id, &groups, 0, 1)?;
+                    crate::wasm::log_info(&format!(
+                        "cleanup: released {n} stashed enrich task(s)"
+                    ));
+                    let _ = crate::store::kv().delete(&stash_key);
+                }
+            }
+        }
     } else {
-        let _ = crate::store::kv().set(&dirs_key, serde_json::to_vec(&remaining).unwrap_or_default());
+        let _ =
+            crate::store::kv().set(&stack_key, serde_json::to_vec(&stack).unwrap_or_default());
         let _ = crate::store::kv().set(&deleted_key, deleted.to_string().into_bytes());
+        let _ = crate::store::kv().set(&merged_key, merged.to_string().into_bytes());
         crate::wasm::enqueue_cleanup_task(library_id)?;
         crate::wasm::log_info(&format!(
-            "cleanup: {} deleted so far, {} dirs remaining",
-            deleted, remaining.len()
+            "cleanup: {} merged, {} deleted so far, {} dirs remaining",
+            merged,
+            deleted,
+            stack.len()
         ));
     }
     Ok(deleted)
-}
-
-/// Collect all directories recursively, with a time budget to avoid WASM timeout.
-fn collect_dirs_bounded(
-    dir: &std::path::Path,
-    root: &std::path::Path,
-    cfg: &Config,
-    dirs: &mut Vec<String>,
-    start: &std::time::SystemTime,
-    budget: &std::time::Duration,
-) {
-    if past(*start, *budget) {
-        return;
-    }
-    let rel = dir
-        .strip_prefix(root)
-        .unwrap_or(dir)
-        .to_string_lossy()
-        .replace('\\', "/");
-    if crate::organizer::is_excluded(&rel, &cfg.exclude_paths) {
-        return;
-    }
-    if dir != root {
-        dirs.push(rel);
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        if past(*start, *budget) {
-            return;
-        }
-        let name = e.file_name().to_string_lossy().to_string();
-        if cfg.skip_hidden_files && name.starts_with('.') {
-            continue;
-        }
-        if let Ok(ft) = e.file_type() {
-            if ft.is_dir() {
-                collect_dirs_bounded(&e.path(), root, cfg, dirs, start, budget);
-            }
-        }
-    }
 }
 
 /// Cap how many albums a single scheduled pass plans (`maxAlbumsPerRun`).
@@ -2028,6 +2162,49 @@ fn apply_album_budget(cfg: &Config, groups: Vec<Vec<String>>) -> Vec<Vec<String>
     let take = (remaining as usize).min(groups.len());
     let _ = crate::store::kv().set(key, (remaining - take as i64).to_string().into_bytes());
     groups.into_iter().take(take).collect()
+}
+
+/// When Lidarr knows the artist AND has a single/EP matching the group's first
+/// track, re-label a Singles plan from Lidarr's entry (canonical artist +
+/// single title) instead of the parent album's tag meta.
+fn lidarr_single_relabel(
+    cfg: &Config,
+    info: &crate::organizer::AlbumInfo,
+    files: &[(String, TrackTags)],
+    plan: &mut crate::organizer::GroupPlan,
+) {
+    if cfg.lidarr_url.trim().is_empty() || cfg.lidarr_api_key.trim().is_empty() {
+        return;
+    }
+    let artist = if info.album_artist.trim().is_empty() {
+        match info.distinct_artists.first() {
+            Some(a) => a.trim().to_string(),
+            None => return,
+        }
+    } else {
+        info.album_artist.trim().to_string()
+    };
+    let title = files
+        .first()
+        .map(|(_, t)| t.title.trim().to_string())
+        .unwrap_or_default();
+    if title.is_empty() {
+        return;
+    }
+    let Some(s) = crate::lidarr::host_lidarr::find_single(cfg, &artist, &title) else {
+        return;
+    };
+    let mut patched = info.clone();
+    patched.album = s.title;
+    patched.album_artist = s.artist;
+    let new_dir = crate::organizer::target_album_dir(plan.bucket, &patched, cfg, &title);
+    if new_dir != plan.target_dir {
+        crate::wasm::log_info(&format!(
+            "Lidarr single: relabelling '{}' -> '{}'",
+            plan.target_dir, new_dir
+        ));
+        crate::organizer::relabel_plan(plan, &new_dir);
+    }
 }
 
 /// Plan and apply file moves for a batch of album groups. Local I/O only
@@ -2094,7 +2271,12 @@ pub fn plan_move_step(
             .first()
             .and_then(|p| p.rsplit_once('/').map(|(d, _)| d.to_string()))
             .unwrap_or_default();
-        let info = crate::organizer::album_info_from_tags(&files);
+        let mut info = crate::organizer::album_info_from_tags(&files);
+        if info.album.is_empty() {
+            // Last segment of the source dir only; the full path would break
+            // the MB lookup below (empty/wrong album -> no year, no type).
+            info.album = folder_hint.rsplit('/').next().unwrap_or("").to_string();
+        }
         let mb_release = if cfg.classify_from_mb
             && cfg.primary_source == crate::config::PrimarySource::MusicBrainz
         {
@@ -2146,7 +2328,29 @@ pub fn plan_move_step(
                 }
             }
         }
-        let plan = crate::organizer::build_group_plan(&root, cfg, &files, &folder_hint, &mb_type);
+        let mut plan = crate::organizer::build_group_plan(
+            &root,
+            cfg,
+            &files,
+            &folder_hint,
+            &mb_type,
+            mb_release.as_ref().and_then(|r| r.date.as_deref()),
+        );
+        if crate::wasm::meta_only_library(cfg).is_some_and(|id| id == library_id) {
+            // Destination library: singles routing is disabled there
+            // (plan_singles never runs for it) and files only move under the
+            // force-fingerprint reparse toggles. plan_enrich applies the same
+            // rule so its post-move path mapping stays truthful.
+            let force_moves =
+                cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist;
+            if plan.bucket == crate::organizer::Bucket::Singles || !force_moves {
+                plan.moves.clear();
+            }
+        } else if plan.bucket == crate::organizer::Bucket::Singles
+            && remain_ms(move_start, task_budget) >= 9_000
+        {
+            lidarr_single_relabel(cfg, &info, &files, &mut plan);
+        }
         total_moves += plan.moves.len();
         total_dupes += plan.duplicates.len();
         total_to_move += usize::from(!plan.moves.is_empty());
@@ -2377,6 +2581,7 @@ pub fn plan_enrich_step(
     let eff = crate::wasm::effective_config(cfg);
     let cfg = &eff;
     let root = lib_root(library_id)?;
+    let meta_only = crate::wasm::meta_only_library(cfg).is_some_and(|id| id == library_id);
 
     // Log enrichment plan for this album.
     let mut enrichments: Vec<&str> = Vec::new();
@@ -2433,7 +2638,12 @@ pub fn plan_enrich_step(
             .first()
             .and_then(|p| p.rsplit_once('/').map(|(d, _)| d.to_string()))
             .unwrap_or_default();
-        let info = crate::organizer::album_info_from_tags(&files);
+        let mut info = crate::organizer::album_info_from_tags(&files);
+        if info.album.is_empty() {
+            // Last segment of the source dir only; the full path would break
+            // the MB lookup below (empty/wrong album -> no year, no type).
+            info.album = folder_hint.rsplit('/').next().unwrap_or("").to_string();
+        }
         let mb_release = if cfg.classify_from_mb
             && cfg.primary_source == crate::config::PrimarySource::MusicBrainz
         {
@@ -2445,12 +2655,42 @@ pub fn plan_enrich_step(
         } else {
             None
         };
-        let plan = crate::organizer::build_group_plan(&root, cfg, &files, &folder_hint, &mb_release.as_ref().map(|r| {
+        let mut plan = crate::organizer::build_group_plan(&root, cfg, &files, &folder_hint, &mb_release.as_ref().map(|r| {
             if r.primary_type == "Soundtrack" { "Soundtrack".to_string() }
             else if r.secondary_types.iter().any(|t| t.eq_ignore_ascii_case("compilation") || t.eq_ignore_ascii_case("live")) || r.primary_type == "Compilation" { "Compilation".to_string() }
             else if r.primary_type == "Single" || r.primary_type == "EP" { "Single".to_string() }
             else { String::new() }
-        }).unwrap_or_default());
+        }).unwrap_or_default(), mb_release.as_ref().and_then(|r| r.date.as_deref()));
+        if meta_only {
+            // Force-fingerprint reparse + apply: plan_move in this task's
+            // enqueue chain already executed the moves (dry runs never reach
+            // enrich; a stale enrich enqueued before the toggles went on runs
+            // without mode==apply and falls through to the safe branch).
+            let keep_moves = (cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist)
+                && cfg.mode == Mode::Apply;
+            if plan.bucket == crate::organizer::Bucket::Singles || !keep_moves {
+                // Read-only for this plan: files stay put (singles routing is
+                // disabled in the destination library; moves only run under
+                // force-fingerprint reparse). Clear planned moves and point
+                // the target at the group's actual directory so cover.jpg/album.nfo
+                // land in place instead of a would-be folder.
+                plan.moves.clear();
+                if let Some(dir) = files
+                    .first()
+                    .and_then(|(r, _)| root.join(r).parent().map(|p| p.to_path_buf()))
+                {
+                    plan.target_dir = dir
+                        .strip_prefix(&root)
+                        .unwrap_or(&dir)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                }
+            }
+        } else if plan.bucket == crate::organizer::Bucket::Singles
+            && remain_ms(enrich_start, task_budget) >= 9_000
+        {
+            lidarr_single_relabel(cfg, &info, &files, &mut plan);
+        }
         report_parts.push(group_report(&plan, false));
 
         // plan_move_step applied the moves before this task ran (Apply mode):
@@ -2476,6 +2716,21 @@ pub fn plan_enrich_step(
         let target_abs = dst_of(&plan.target_dir);
         let abs_of =
             |rel: &str| -> std::path::PathBuf { fin.get(rel).cloned().unwrap_or_else(|| root.join(rel)) };
+        // Sidecar output stays with the audio: when plan_move hasn't brought
+        // this group's files into the target yet, writing there would stock a
+        // sidecar-only twin folder. Fall back to where the files actually are;
+        // the move carries the sidecars over together with them.
+        let sidecar_abs = if meta_only || crate::organizer::dir_has_audio(&target_abs) {
+            target_abs.clone()
+        } else {
+            files
+                .iter()
+                .map(|(r, _)| abs_of(r))
+                .find(|p| p.exists())
+                .or_else(|| files.first().map(|(r, _)| root.join(r)))
+                .and_then(|p| p.parent().map(|x| x.to_path_buf()))
+                .unwrap_or_else(|| target_abs.clone())
+        };
 
         if !files.is_empty() {
             if cfg.auto_tag_from_mb && remain_ms(enrich_start, task_budget) >= 9_000 {
@@ -2557,7 +2812,7 @@ pub fn plan_enrich_step(
                     &info.album_artist,
                     &info.album,
                 ) {
-                    let dir = target_abs.clone();
+                    let dir = sidecar_abs.clone();
                     let mut embedded = 0usize;
                     let mut sidecar = false;
                     if cfg.embed_artwork {
@@ -2779,7 +3034,7 @@ pub fn plan_enrich_step(
                     }
                 });
                 let nfo_genres = if cfg.read_nfo {
-                    crate::nfo::read_album_nfo(&target_abs)
+                    crate::nfo::read_album_nfo(&sidecar_abs)
                         .map(|n| n.genres)
                         .unwrap_or_default()
                 } else {
@@ -2818,7 +3073,7 @@ pub fn plan_enrich_step(
                 }
             }
             if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() {
-                let n = crate::stats::host_stats::write_essentia_genres(cfg, &files, &fin);
+                let n = crate::stats::host_stats::write_essentia_genres(cfg, &files, &fin, 20_000);
                 if n > 0 {
                     actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
@@ -3088,7 +3343,7 @@ pub fn plan_enrich_step(
         // Write NFO at the end — after ALL metadata sources have been queried.
         // This ensures the NFO contains the most complete metadata possible.
         if cfg.write_nfo {
-            write_group_nfo(cfg, &plan, &files, &fin, &target_abs);
+            write_group_nfo(cfg, &plan, &files, &fin, &sidecar_abs);
             actions.push(serde_json::json!({
                 "ts": crate::state::now_ts(),
                 "text": "wrote album.nfo (unified metadata)".to_string(),
@@ -3196,15 +3451,22 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
         return Ok("meta_refresh: deferred — organize pipeline active".into());
     }
 
-    // Load indexed file list for this library.
-    let indexed_key = format!("scan.indexed.{library_id}");
+    // Load the file list for this library. group_step copies scan.indexed.*
+    // to scan.meta_files.* and deletes the original, so prefer the meta copy
+    // and fall back to indexed (mid-pipeline resume, pre-group state).
     let cursor_key = format!("scan.meta_cursor.{library_id}");
-    let file_list: Vec<(String, i64)> = crate::store::kv()
-        .get(&indexed_key)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or_default();
+    let load_list = |key: &str| -> Vec<(String, i64)> {
+        crate::store::kv()
+            .get(key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice(&v).ok())
+            .unwrap_or_default()
+    };
+    let mut file_list = load_list(&format!("scan.meta_files.{library_id}"));
+    if file_list.is_empty() {
+        file_list = load_list(&format!("scan.indexed.{library_id}"));
+    }
 
     if file_list.is_empty() {
         return Ok("meta_refresh: no indexed files for this library".into());
@@ -3226,6 +3488,11 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
     let start = std::time::SystemTime::now();
     let mut processed = 0usize;
     let mut refreshed = 0usize;
+    let mut art_written = 0usize;
+    let mut nfo_written = 0usize;
+    let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut dir_files_cache: std::collections::HashMap<String, Vec<(String, TrackTags)>> =
+        std::collections::HashMap::new();
 
     crate::wasm::log_info(&format!(
         "meta_refresh: library={} starting at {}/{}, {} files total",
@@ -3247,18 +3514,199 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
             continue;
         }
 
-        // Run enrichment operations (same as plan_enrich_step but per-file).
+        // Album-level ops (once per dir per chunk, on the dir's first file),
+        // BEFORE the per-file network ops: a failing endpoint in the per-file
+        // block can burn the whole budget, and if the dir-op ran after it the
+        // 12s entry gate would break forever on the same file (cursor stall).
+        // Here the gate always sees a fresh budget on the first file of a
+        // chunk, so at least one dir-op is attempted per chunk and the cursor
+        // keeps moving even when sidecars are down. The 12s gate still defers
+        // a mid-chunk dir (cursor not advanced → next chunk resumes there
+        // with a full budget); per-file gates below are idempotent and cheap
+        // to redo. The dir-op runs before the genre fetch too, so a freshly
+        // written genre-less album.nfo feeds nfo_genres the same iteration.
+        let dir_rel = dirname(rel).to_string();
+        if !seen_dirs.contains(&dir_rel) {
+            let dir_abs = root.join(&dir_rel);
+            // Representative file: the dir's first file in the list (same
+            // policy as plan_enrich).
+            let rep_rel = file_list
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .find(|r| dirname(r) == dir_rel);
+            let rep_abs = rep_rel.map(|r| root.join(r));
+            let had_art = rep_abs.as_deref().map(crate::artwork::has_embedded).unwrap_or(false);
+            let side_exists = dir_abs.join("cover.jpg").exists();
+            let front_on = cfg.artwork_front && (cfg.embed_artwork || cfg.write_cover_jpg);
+            let extras_on =
+                cfg.embed_artwork && (cfg.artwork_back || cfg.artwork_cd || cfg.artwork_booklet);
+            let need_embed = front_on && cfg.embed_artwork && !had_art;
+            let need_side = front_on && cfg.write_cover_jpg && !side_exists;
+            // Missing NFO, or one with empty genres (heals partial data from
+            // an interrupted pass).
+            let nfo_state = cfg.write_nfo
+                && match crate::nfo::read_album_nfo(&dir_abs) {
+                    None => true,
+                    Some(n) => n.genres.is_empty(),
+                };
+            let any = nfo_state || need_embed || need_side || (extras_on && !had_art);
+            if any && remain_ms(start, budget) < 12_000 {
+                break;
+            }
+            if any {
+                let dir_files = dir_files_cache.entry(dir_rel.clone()).or_insert_with(|| {
+                    file_list
+                        .iter()
+                        .filter(|(r, _)| dirname(r) == dir_rel)
+                        .filter_map(|(r, _)| {
+                            crate::tags::read_tags(&root.join(r)).map(|t| (r.clone(), t))
+                        })
+                        .collect()
+                });
+                if !dir_files.is_empty() {
+                    let info = crate::organizer::album_info_from_tags(dir_files);
+                    let album = if info.album.is_empty() {
+                        basename(&dir_rel).to_string()
+                    } else {
+                        info.album.clone()
+                    };
+                    let mbid = dir_files.iter().find_map(|(_, t)| {
+                        if !t.mbid_album.trim().is_empty() {
+                            Some(t.mbid_album.clone())
+                        } else {
+                            None
+                        }
+                    });
+
+                    // Front artwork + cover.jpg sidecar — only when missing.
+                    if need_embed || need_side {
+                        if let Some((bytes, source)) = crate::artwork::fetch_with_fallback(
+                            cfg,
+                            mbid.as_deref(),
+                            &info.album_artist,
+                            &album,
+                        ) {
+                            let mut embedded = 0usize;
+                            let mut sidecar = false;
+                            if need_embed {
+                                for (r, _) in dir_files.iter() {
+                                    if past(start, budget) {
+                                        break;
+                                    }
+                                    if crate::artwork::embed(
+                                        &root.join(r),
+                                        bytes.clone(),
+                                        crate::artwork::ArtKind::Front,
+                                    )
+                                    .is_ok()
+                                    {
+                                        embedded += 1;
+                                    }
+                                }
+                            }
+                            if need_side
+                                && crate::artwork::write_sidecar(&dir_abs, bytes.clone()).is_ok()
+                            {
+                                sidecar = true;
+                            }
+                            if embedded > 0 || sidecar {
+                                crate::wasm::log_info(&format!(
+                                    "meta_refresh: artwork {source} → {embedded} image(s){} — {dir_rel}",
+                                    if sidecar { " + cover.jpg" } else { "" }
+                                ));
+                                art_written += 1;
+                                refreshed += 1;
+                            }
+                        }
+                    }
+                    // Extra kinds: gated on the rep's CURRENT embedded state —
+                    // after a successful front embed this must skip, because
+                    // embedding Back replaces picture 0 (the front cover).
+                    if let (Some(mbid), Some(rep)) = (mbid.as_deref(), rep_abs.as_deref()) {
+                        if extras_on && !crate::artwork::has_embedded(rep) {
+                            let mut kinds: Vec<&str> = Vec::new();
+                            for (on, kind, label) in [
+                                (cfg.artwork_back, crate::artwork::ArtKind::Back, "back"),
+                                (cfg.artwork_cd, crate::artwork::ArtKind::Cd, "cd"),
+                                (cfg.artwork_booklet, crate::artwork::ArtKind::Booklet, "booklet"),
+                            ] {
+                                if past(start, budget) {
+                                    break;
+                                }
+                                if !on {
+                                    continue;
+                                }
+                                if let Some(bytes) = crate::artwork::fetch(mbid, kind) {
+                                    let mut n = 0usize;
+                                    for (r, _) in dir_files.iter() {
+                                        if past(start, budget) {
+                                            break;
+                                        }
+                                        if crate::artwork::embed(&root.join(r), bytes.clone(), kind)
+                                            .is_ok()
+                                        {
+                                            n += 1;
+                                        }
+                                    }
+                                    if n > 0 {
+                                        kinds.push(label);
+                                    }
+                                }
+                            }
+                            if !kinds.is_empty() {
+                                crate::wasm::log_info(&format!(
+                                    "meta_refresh: artwork embedded {} (coverartarchive) — {dir_rel}",
+                                    kinds.join(", ")
+                                ));
+                                art_written += 1;
+                                refreshed += 1;
+                            }
+                        }
+                    }
+                    // album.nfo — only when missing or genre-less; a complete
+                    // NFO is never rewritten (cheap local write otherwise).
+                    if nfo_state {
+                        let plan = crate::organizer::GroupPlan {
+                            target_dir: dir_rel.clone(),
+                            ..Default::default()
+                        };
+                        let mut fin = std::collections::HashMap::new();
+                        for (r, _) in dir_files.iter() {
+                            fin.insert(r.clone(), root.join(r));
+                        }
+                        write_group_nfo(cfg, &plan, dir_files, &fin, &dir_abs);
+                        crate::wasm::log_info(&format!(
+                            "meta_refresh: wrote album.nfo — {dir_rel}"
+                        ));
+                        nfo_written += 1;
+                        refreshed += 1;
+                    }
+                }
+            }
+            seen_dirs.insert(dir_rel);
+        }
+
+        // Verify-first: read what is actually on the file (the index KV may
+        // predate tag writes) and process only the missing pieces. Refresh
+        // never assumes an organize pass ran on this file before, and never
+        // re-processes values already present — overwrite refresh lives in
+        // organize passes, not here.
         let file_tags = crate::store::kv()
             .get(&file_key(library_id, rel))
             .ok()
             .flatten()
-            .and_then(|v| serde_json::from_slice::<crate::tags::TrackTags>(&v).ok());
+            .and_then(|v| parse_file_tags(&v));
+        let cur = crate::tags::read_tags(&abs);
 
-        if let Some(tags) = file_tags {
+        if let Some(cur) = cur.as_ref() {
             let mut changed = false;
+            let mut cur_title = cur.title.clone();
 
-            // ReplayGain
-            if cfg.write_replaygain && !past(start, budget) {
+            // ReplayGain: only when the track gain tag is missing.
+            if cfg.write_replaygain
+                && !past(start, budget)
+                && !crate::tags::replaygain_present(&abs)
+            {
                 if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
                     if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
                         .unwrap_or(false)
@@ -3268,38 +3716,114 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 }
             }
 
-            // Genre
-            if !cfg.genre_source.is_empty() && !past(start, budget) {
-                let mbid = if !tags.mbid_album.is_empty() {
-                    Some(tags.mbid_album.clone())
+            // Genre: only when the file has no genre tag. Same fallback chain
+            // as plan_enrich (musicbrainz → discogs → theaudiodb → nfo).
+            let mut genre_filled = !cur.genre.trim().is_empty();
+            if !genre_filled && !cfg.genre_source.is_empty() && !past(start, budget) {
+                let g_artist = if !cur.album_artist.trim().is_empty() {
+                    cur.album_artist.clone()
+                } else {
+                    cur.artist.clone()
+                };
+                let g_mbid = if !cur.mbid_album.trim().is_empty() {
+                    Some(cur.mbid_album.clone())
                 } else {
                     None
                 };
+                let nfo_genres = if cfg.read_nfo {
+                    crate::nfo::read_album_nfo(&root.join(dirname(rel)))
+                        .map(|n| n.genres)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 if let Some((genres, _source)) = fetch_genre_with_fallback(
-                    cfg, mbid.as_deref(), &tags.artist, &tags.album, &Vec::new(), start, budget,
+                    cfg,
+                    g_mbid.as_deref(),
+                    &g_artist,
+                    &cur.album,
+                    &nfo_genres,
+                    start,
+                    budget,
                 ) {
-                    let _ = crate::tags::write_genre(&abs, &genres);
+                    if crate::tags::write_genre(&abs, &genres).is_ok() {
+                        genre_filled = true;
+                        changed = true;
+                    }
+                }
+            }
+
+            // Acoustic tags (AudioMuse): only when BPM/key/mood/energy has a
+            // gap. The AudioMuse 7d KV cache bounds repeat requests for values
+            // the service never returns.
+            if cfg.write_acoustic_tags
+                && !cfg.audiomuse_url.trim().is_empty()
+                && !past(start, budget)
+                && remain_ms(start, budget) >= 9_000
+                && crate::wasm::should_write_tags(cfg, &cur.album_artist)
+                && crate::tags::acoustic_missing(&abs)
+            {
+                if let Some(ac) = crate::audiomuse::fetch(cfg, &cur.artist, &cur.title) {
+                    match crate::audiomuse::write_tags(&abs, &ac, cfg.overwrite_existing_tags) {
+                        Ok(()) => changed = true,
+                        Err(e) => crate::wasm::log_warn(&format!("acoustic tags for {rel}: {e}")),
+                    }
+                }
+            }
+
+            // Essentia genres: only when the genre is still missing after the
+            // fallback chain, with a bounded timeout so a dead sidecar cannot
+            // blow the 15s chunk budget. ponytail: fills genre/mood (+BPM/key
+            // when the toggles are on); mood-only gaps wait for passes.
+            if cfg.genre_source == "essentia"
+                && !cfg.essentia_url.trim().is_empty()
+                && !genre_filled
+                && !past(start, budget)
+                && remain_ms(start, budget) >= 9_000
+            {
+                let files1 = vec![(rel.clone(), cur.clone())];
+                let mut fin1 = std::collections::HashMap::new();
+                fin1.insert(rel.clone(), abs.clone());
+                if crate::stats::host_stats::write_essentia_genres(
+                    cfg,
+                    &files1,
+                    &fin1,
+                    cap_ms(start, budget, 8_000),
+                ) > 0
+                {
                     changed = true;
                 }
             }
 
-            // Acoustic tags
-            if cfg.write_acoustic_tags && !cfg.audiomuse_url.trim().is_empty() && !past(start, budget) {
-                // Per-file acoustic tag fetch would be expensive; skip in refresh mode.
-                // Acoustic tags are written during organize pass.
-            }
-
-            // Essentia genres
-            if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() && !past(start, budget) {
-                // Essentia genre write would be expensive per-file; skip in refresh mode.
+            // MBIDs verified at scan time live in the index — write them into
+            // the file when the tags still lack them.
+            if let Some(idx) = file_tags.as_ref() {
+                if !idx.mbid_album.trim().is_empty()
+                    && (cur.mbid_album.trim().is_empty() || cur.mbid_recording.trim().is_empty())
+                    && !past(start, budget)
+                {
+                    match crate::tags::write_mbids(
+                        &abs,
+                        &idx.mbid_album,
+                        Some(idx.mbid_recording.trim()),
+                        cfg.overwrite_existing_tags,
+                    ) {
+                        Ok(()) => changed = true,
+                        Err(e) => crate::wasm::log_warn(&format!("write mbids {rel}: {e}")),
+                    }
+                }
             }
 
             // Instrumental check — trust but verify.
             // If labeled "(Instrumental)", verify and strip if not instrumental.
             // If not labeled but IS instrumental, append "(Instrumental)".
-            if cfg.verify_instrumental && !cfg.essentia_url.trim().is_empty() && !past(start, budget) {
-                let title = tags.title.clone();
-                let abs = root.join(rel);
+            // cur_title tracks writes within this iteration — genre/RG/mbid/
+            // acoustic writes never touch the title, so no re-read is needed.
+            if cfg.verify_instrumental
+                && !cfg.essentia_url.trim().is_empty()
+                && !cur_title.trim().is_empty()
+                && !past(start, budget)
+            {
                 let path_str = abs.to_string_lossy().to_string();
                 let cache_key = format!("instrumental:{}", path_str);
                 // Failed/timeout call = unknown (None): skip the label check
@@ -3328,34 +3852,33 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         _ => None,
                     }
                 };
-                // Re-read title from file tag to avoid stale KV cache causing
-                // double-suffix (e.g. "Title (Instrumental) (Instrumental)").
-                let current_title = crate::tags::read_tags(&abs)
-                    .map(|t| t.title)
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| title.clone());
-                let lower_title = current_title.to_lowercase();
-                let has_instrumental_label = lower_title.contains("instrumental");
+                let has_instrumental_label = cur_title.to_lowercase().contains("instrumental");
                 if let Some(is_instrumental) = is_instrumental {
                 if has_instrumental_label && !is_instrumental {
-                    let stripped = crate::tags::strip_instrumental(&current_title);
-                    if stripped != current_title {
-                        let _ = crate::tags::write_title(&abs, &stripped);
-                        changed = true;
+                    let stripped = crate::tags::strip_instrumental(&cur_title);
+                    if stripped != cur_title {
+                        if crate::tags::write_title(&abs, &stripped).unwrap_or(false) {
+                            changed = true;
+                        }
+                        cur_title = stripped;
                     }
                 } else if is_instrumental && !has_instrumental_label {
-                    let new_title = format!("{} (Instrumental)", current_title);
-                    let _ = crate::tags::write_title(&abs, &new_title);
-                    changed = true;
+                    let new_title = format!("{} (Instrumental)", cur_title);
+                    if crate::tags::write_title(&abs, &new_title).unwrap_or(false) {
+                        changed = true;
+                    }
+                    cur_title = new_title;
                 }
                 }
             }
 
             // Acoustic check — trust but verify.
             // Uses instrumental-check endpoint: acoustic = not instrumental + low vocal ratio.
-            if cfg.verify_acoustic && !cfg.essentia_url.trim().is_empty() && !past(start, budget) {
-                let title = tags.title.clone();
-                let abs = root.join(rel);
+            if cfg.verify_acoustic
+                && !cfg.essentia_url.trim().is_empty()
+                && !cur_title.trim().is_empty()
+                && !past(start, budget)
+            {
                 let path_str = abs.to_string_lossy().to_string();
                 let cache_key = format!("acoustic:{}", path_str);
                 // Failed/timeout call = unknown (None): skip the label check
@@ -3389,25 +3912,22 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         _ => None,
                     }
                 };
-                // Re-read title from file tag to avoid stale KV cache causing
-                // double-suffix (e.g. "Title (Acoustic) (Acoustic)").
-                let current_title = crate::tags::read_tags(&abs)
-                    .map(|t| t.title)
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| title.clone());
-                let lower_title = current_title.to_lowercase();
-                let has_acoustic_label = lower_title.contains("acoustic");
+                let has_acoustic_label = cur_title.to_lowercase().contains("acoustic");
                 if let Some(is_acoustic) = is_acoustic {
                 if has_acoustic_label && !is_acoustic {
-                    let stripped = crate::tags::strip_acoustic(&current_title);
-                    if stripped != current_title {
-                        let _ = crate::tags::write_title(&abs, &stripped);
-                        changed = true;
+                    let stripped = crate::tags::strip_acoustic(&cur_title);
+                    if stripped != cur_title {
+                        if crate::tags::write_title(&abs, &stripped).unwrap_or(false) {
+                            changed = true;
+                        }
+                        cur_title = stripped;
                     }
                 } else if is_acoustic && !has_acoustic_label {
-                    let new_title = format!("{} (Acoustic)", current_title);
-                    let _ = crate::tags::write_title(&abs, &new_title);
-                    changed = true;
+                    let new_title = format!("{} (Acoustic)", cur_title);
+                    if crate::tags::write_title(&abs, &new_title).unwrap_or(false) {
+                        changed = true;
+                    }
+                    cur_title = new_title;
                 }
                 }
             }
@@ -3421,22 +3941,30 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
         processed += 1;
     }
 
+    // One rescan for the whole chunk (not per file) — same gate plan_enrich
+    // uses, only when this chunk actually wrote something.
+    if cfg.scan_after_tag_write && refreshed > 0 && remain_ms(start, budget) >= 6_000 {
+        if let Err(e) = crate::wasm::trigger_navidrome_scan(cfg) {
+            crate::wasm::log_warn(&format!("trigger_navidrome_scan: {e}"));
+        }
+    }
+
     // Save cursor for resume.
     if cursor < file_list.len() {
         let _ = crate::store::kv().set(&cursor_key, cursor.to_string().into_bytes());
         crate::wasm::enqueue_meta_refresh(library_id)?;
         crate::wasm::log_info(&format!(
-            "meta_refresh: library={} processed={}, refreshed={}, cursor={}/{}, re-enqueueing",
-            library_id, processed, refreshed, cursor, file_list.len()
+            "meta_refresh: library={} processed={}, refreshed={}, art={}, nfo={}, cursor={}/{}, re-enqueueing",
+            library_id, processed, refreshed, art_written, nfo_written, cursor, file_list.len()
         ));
-        Ok(format!("meta_refresh: {processed} files processed, {refreshed} refreshed, {}/{}/{} remaining", cursor, file_list.len(), file_list.len()))
+        Ok(format!("meta_refresh: {processed} files processed, {refreshed} refreshed ({art_written} artwork, {nfo_written} nfo), {}/{}/{} remaining", cursor, file_list.len(), file_list.len()))
     } else {
         let _ = crate::store::kv().delete(&cursor_key);
         crate::wasm::log_info(&format!(
-            "meta_refresh: library={} complete, processed={}, refreshed={}",
-            library_id, processed, refreshed
+            "meta_refresh: library={} complete, processed={}, refreshed={}, art={}, nfo={}",
+            library_id, processed, refreshed, art_written, nfo_written
         ));
-        Ok(format!("meta_refresh: complete, {processed} files processed, {refreshed} refreshed"))
+        Ok(format!("meta_refresh: complete, {processed} files processed, {refreshed} refreshed ({art_written} artwork, {nfo_written} nfo)"))
     }
 }
 
@@ -3666,8 +4194,12 @@ fn write_group_nfo(
                 }
                 let body = serde_json::json!({
                     "path": &path_str,
-                    "genres": false,
-                    "moods": false,
+                    // Request the same shape write_essentia_genres() requests:
+                    // this cache entry is shared, and a genres/moods:false
+                    // entry would poison the genre writer for 7 days when NFO
+                    // runs before it.
+                    "genres": true,
+                    "moods": true,
                     "structure": cfg.essentia_structure,
                     "chroma": cfg.essentia_chords,
                     "bpm": cfg.essentia_bpm,
@@ -3759,6 +4291,7 @@ fn write_group_nfo(
     };
     let nfo_album = crate::nfo::NfoAlbum {
         title: album_title,
+        artists: info.distinct_artists.clone(),
         album_artists: if info.album_artist.is_empty() {
             vec![]
         } else {

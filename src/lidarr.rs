@@ -71,6 +71,49 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+/// Lidarr's own single/EP entry for a track: canonical artist name, single
+/// title, release year. Used to label the Singles bucket from Lidarr instead
+/// of plucking a label from the parent album's tag meta.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LidarrSingle {
+    pub title: String,
+    pub artist: String,
+    pub year: Option<u32>,
+}
+
+/// Pure match: an album resource is THE single for (artist, title) when the
+/// title matches exactly, the artist matches, and the type is single/EP
+/// (albumType absent is accepted - some payloads omit it). An album with the
+/// same title is rejected: that is the plucked parent-album case.
+pub fn parse_single(val: &Value, artist: &str, title: &str) -> Option<LidarrSingle> {
+    let t = val.get("title")?.as_str()?;
+    if !t.eq_ignore_ascii_case(title.trim()) {
+        return None;
+    }
+    let album_type = val.get("albumType").and_then(|a| a.as_str()).unwrap_or("");
+    if !(album_type.is_empty()
+        || album_type.eq_ignore_ascii_case("single")
+        || album_type.eq_ignore_ascii_case("ep"))
+    {
+        return None;
+    }
+    let a = val.pointer("/artist/artistName")?.as_str()?;
+    if !a.eq_ignore_ascii_case(artist.trim()) {
+        return None;
+    }
+    let year = val
+        .get("releaseDate")
+        .and_then(|d| d.as_str())
+        .and_then(|d| d.get(..4))
+        .and_then(|y| y.parse::<u32>().ok())
+        .filter(|y| (1000..=2999).contains(y));
+    Some(LidarrSingle {
+        title: t.to_string(),
+        artist: a.to_string(),
+        year,
+    })
+}
+
 #[cfg(target_arch = "wasm32")]
 pub mod host_lidarr {
     use crate::config::Config;
@@ -208,6 +251,49 @@ pub mod host_lidarr {
         };
         let _ = crate::store::kv().set_with_ttl(&cache_key, cached.to_string().into_bytes(), 86_400);
         found
+    }
+
+    /// Lidarr's single/EP for (artist, track title), when the artist is
+    /// tracked there. Cached 24h including "not found". Used to label the
+    /// Singles bucket with Lidarr's canonical entry instead of the parent
+    /// album's tag meta.
+    pub fn find_single(cfg: &Config, artist: &str, title: &str) -> Option<LidarrSingle> {
+        if cfg.lidarr_url.trim().is_empty()
+            || cfg.lidarr_api_key.trim().is_empty()
+            || artist.trim().is_empty()
+            || title.trim().is_empty()
+            || !artist_tracked(cfg, artist)
+        {
+            return None;
+        }
+        crate::net::cached(
+            &format!(
+                "lidarr-single:{}|{}",
+                artist.to_lowercase(),
+                title.to_lowercase()
+            ),
+            86_400,
+            || {
+                let base = base_url(cfg);
+                let url = format!(
+                    "{base}/api/v1/album/lookup?term={}",
+                    url_encode(&format!("{artist} {title}"))
+                );
+                let found = match lidarr_send(cfg, "GET", url, vec![]) {
+                    Ok(Some(resp)) if resp.status_code == 200 => {
+                        serde_json::from_str::<Value>(&String::from_utf8_lossy(&resp.body))
+                            .ok()
+                            .and_then(|v| v.as_array().cloned())
+                            .and_then(|items| {
+                                items.iter().find_map(|it| parse_single(it, artist, title))
+                            })
+                    }
+                    _ => None,
+                };
+                Some(found)
+            },
+        )
+        .flatten()
     }
 
     /// Look up a Lidarr album's user rating (0.0-5.0) for the track's parent
@@ -488,6 +574,46 @@ mod tests {
             "Pink%20Floyd%20The%20Wall"
         );
         assert_eq!(url_encode("a&b=c"), "a%26b%3Dc");
+    }
+
+    #[test]
+    fn parses_lidarr_single() {
+        let v = json!({
+            "title": "Crazy",
+            "albumType": "single",
+            "releaseDate": "1991-09-12",
+            "artist": { "artistName": "Gnarls Barkley" }
+        });
+        let s = parse_single(&v, "Gnarls Barkley", "crazy").unwrap();
+        assert_eq!(s.title, "Crazy");
+        assert_eq!(s.artist, "Gnarls Barkley");
+        assert_eq!(s.year, Some(1991));
+    }
+
+    #[test]
+    fn single_match_rejects_album_wrong_title_and_wrong_artist() {
+        let album = json!({
+            "title": "Crazy",
+            "albumType": "album",
+            "artist": { "artistName": "Gnarls Barkley" }
+        });
+        assert!(parse_single(&album, "Gnarls Barkley", "Crazy").is_none());
+        let wrong_title = json!({
+            "title": "Crazy (Live)",
+            "albumType": "single",
+            "artist": { "artistName": "Gnarls Barkley" }
+        });
+        assert!(parse_single(&wrong_title, "Gnarls Barkley", "Crazy").is_none());
+        let wrong_artist = json!({
+            "title": "Crazy",
+            "albumType": "single",
+            "artist": { "artistName": "Someone Else" }
+        });
+        assert!(parse_single(&wrong_artist, "Gnarls Barkley", "Crazy").is_none());
+        // Missing albumType/releaseDate: still a match, no year.
+        let bare = json!({ "title": "Hurt", "artist": { "artistName": "Johnny Cash" } });
+        let s = parse_single(&bare, "johnny cash", "Hurt").unwrap();
+        assert_eq!(s.year, None);
     }
 }
 

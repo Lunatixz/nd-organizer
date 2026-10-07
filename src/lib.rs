@@ -308,7 +308,7 @@ pub(crate) mod wasm {
                 // find no data and exit immediately instead of timing out.
                 // Preserve scan.donev2 if the pipeline already completed —
                 // re-enabling the plugin should not re-run the entire pipeline.
-                let target_libs = target_libraries(&cfg);
+                let target_libs = walk_libraries(&cfg);
                 for &library_id in &target_libs {
                     let already_done = crate::store::kv()
                         .get(&format!("scan.donev2.{library_id}"))
@@ -336,7 +336,7 @@ pub(crate) mod wasm {
                 // Enqueue walk tasks directly from init to avoid the tight
                 // scheduler callback timeout. The scheduler path (run_pass)
                 // often exceeds the callback deadline on large libraries.
-                let target_libs = target_libraries(&cfg);
+                let target_libs = walk_libraries(&cfg);
                 if !target_libs.is_empty() {
                     // A walk start is a pass start: reset the per-run album
                     // budget like run_pass does. Init enqueues walk directly
@@ -364,7 +364,7 @@ pub(crate) mod wasm {
             // phase: walk/index/verify chain on their own, plan/apply tasks
             // are queued by group itself. Normal restarts wipe these keys
             // above, so this stays silent on a fresh start.
-            for &library_id in &target_libraries(&cfg) {
+            for &library_id in &walk_libraries(&cfg) {
                 let present = |p: &str| {
                     crate::store::kv()
                         .get(&format!("{p}{library_id}"))
@@ -523,7 +523,7 @@ pub(crate) mod wasm {
                     return Ok(());
                 }
                 let _ = crate::store::kv().set("task.pending.meta_refresh", now.to_string().into_bytes());
-                for &library_id in &target_libraries(&cfg) {
+                for &library_id in &walk_libraries(&cfg) {
                     if let Err(e) = enqueue("meta_refresh", library_id, "", "") {
                         log_warn(&format!("enqueue meta_refresh for library {library_id}: {e}"));
                     }
@@ -864,6 +864,26 @@ pub(crate) mod wasm {
         targets
     }
 
+    /// The moveDestinationLibrary when it is not also an organize target:
+    /// that library gets the full read-only pipeline (walk, verify, dup
+    /// reports, enrichment, meta_refresh, cleanup) but no plan/apply/moves.
+    pub(crate) fn meta_only_library(cfg: &Config) -> Option<i32> {
+        crate::state::meta_only_id(
+            resolve_library_id(&cfg.move_destination_library),
+            &target_libraries(cfg),
+        )
+    }
+
+    /// Libraries the pass walks: organize targets plus the meta-only
+    /// destination.
+    pub(crate) fn walk_libraries(cfg: &Config) -> Vec<i32> {
+        let mut libs = target_libraries(cfg);
+        if let Some(dest) = meta_only_library(cfg) {
+            libs.push(dest);
+        }
+        libs
+    }
+
     /// Resolve a library path/name to its numeric ID.
     /// Matches against path, mount_point, or name (case-insensitive).
     pub(crate) fn resolve_library_id(name: &str) -> Option<i32> {
@@ -935,7 +955,7 @@ pub(crate) mod wasm {
     /// Check if the organize pipeline is active (walk/index/verify/group).
     /// Used by scheduler callbacks to avoid blocking the queue.
     fn is_pipeline_active(cfg: &Config) -> bool {
-        for &library_id in &target_libraries(cfg) {
+        for &library_id in &walk_libraries(&cfg) {
             if crate::store::kv().get(&format!("scan.walkv2.{library_id}")).ok().flatten().is_some()
                 || crate::store::kv().get(&format!("scan.index_cursor.{library_id}")).ok().flatten().is_some()
                 || crate::store::kv().get(&format!("scan.unverified.{library_id}")).ok().flatten().is_some()
@@ -1754,7 +1774,7 @@ pub(crate) mod wasm {
             }
         }
         let mut enqueued = 0;
-        for &library_id in &target_libs {
+        for &library_id in &walk_libraries(cfg) {
             // A fresh scan pass: reset the maxScanEntries per-pass counter so
             // the cap applies per run, not cumulatively forever.
             let _ = crate::store::kv().delete(&format!("scan.pass.{library_id}"));
@@ -2032,15 +2052,25 @@ pub(crate) mod wasm {
     fn apply_lidarr_naming(cfg: &Config, json: &str) -> Option<Config> {
         let v: serde_json::Value = serde_json::from_str(json).ok()?;
         let artist = v.get("artistFolderFormat").and_then(|x| x.as_str())?;
-        let album = v.get("albumFolderFormat").and_then(|x| x.as_str())?;
         let track = v.get("standardTrackFormat").and_then(|x| x.as_str())?;
+        // Lidarr's API has no albumFolderFormat; the album folder is the
+        // first path segment of the track format. Keep the year in the
+        // folder (Lidarr's conventional album folder) instead of dropping
+        // the whole schema over the missing key.
+        let album = v
+            .get("albumFolderFormat")
+            .and_then(|x| x.as_str())
+            .unwrap_or("{Album Title} ({Release Year})");
+        // Track format's leading "AlbumFolder/" segment is folder structure,
+        // not a file name.
+        let file = track.split_once('/').map(|(_, f)| f).unwrap_or(track);
         let mut eff = cfg.clone();
         eff.folder_schema = format!(
             "{}/{}",
             template::translate_lidarr_format(artist),
             template::translate_lidarr_format(album)
         );
-        eff.file_schema = template::translate_lidarr_format(track);
+        eff.file_schema = template::translate_lidarr_format(file);
         log_info(&format!(
             "using Lidarr naming schema: folder='{}' file='{}'",
             eff.folder_schema, eff.file_schema

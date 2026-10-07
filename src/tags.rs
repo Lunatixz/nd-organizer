@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use lofty::prelude::*;
-use lofty::tag::Tag;
+use lofty::tag::{ItemValue, Tag, TagItem};
 use serde::{Deserialize, Serialize};
 
 /// Crash-safe file replace: write to a temp sibling, fsync, then rename over
@@ -241,6 +241,42 @@ pub fn should_write(existing: &str, new: &str, overwrite: bool) -> bool {
     true
 }
 
+/// Read the first non-empty string among candidate keys. The same concept
+/// lives under different keys per format (BPM: Vorbis "BPM" vs ID3 TBPM /
+/// `IntegerBpm`), so readers must check all of them.
+pub fn get_str_any<'a>(tag: &'a Tag, keys: &[ItemKey]) -> &'a str {
+    for k in keys {
+        if let Some(v) = tag.get_string(k) {
+            if !v.trim().is_empty() {
+                return v;
+            }
+        }
+    }
+    ""
+}
+
+/// Insert a text item, trying each candidate key (formats map the same
+/// concept differently: `Bpm` vs `IntegerBpm`). `ItemKey::Unknown` has no
+/// mapping and the checked `insert_text` silently rejects it — fall back to
+/// `insert_unchecked`, which the writers render as TXXX / freeform fields.
+/// Known keys no tag type maps (e.g. ReplayGain on MP4) are skipped honestly
+/// instead of failing the whole save. Returns true when the item was added.
+pub fn insert_text_any(tag: &mut Tag, keys: &[ItemKey], value: &str) -> bool {
+    for k in keys {
+        if tag.insert_text(k.clone(), value.to_string()) {
+            return true;
+        }
+    }
+    if matches!(keys.first(), Some(ItemKey::Unknown(_))) {
+        tag.insert_unchecked(TagItem::new(
+            keys[0].clone(),
+            ItemValue::Text(value.to_string()),
+        ));
+        return true;
+    }
+    false
+}
+
 /// Persist a resolved identity into the file's own tags. Once the file carries
 /// an MBID, every later run reads it straight out of the tags (confidence ->
 /// Verified), so AcoustID is never re-queried for it - even after the ident
@@ -365,17 +401,18 @@ pub fn write_replaygain(path: &Path, gain: f64, peak: Option<f64>, overwrite: bo
     let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
     let mut changed = false;
     let gain_str = format!("{gain:+.2} dB");
-    let existing = tag.get_string(&ItemKey::Unknown("REPLAYGAIN_TRACK_GAIN".into())).unwrap_or("");
+    // ponytail: ItemKey::ReplayGain* — Unknown(...) has no mapping and the
+    // checked insert silently rejected it (writes were no-ops until now).
+    // MP4 does not map ReplayGain: skipped honestly (no false "changed").
+    let existing = get_str_any(&tag, &[ItemKey::ReplayGainTrackGain]);
     if should_write(existing, &gain_str, overwrite) {
-        tag.insert_text(ItemKey::Unknown("REPLAYGAIN_TRACK_GAIN".into()), gain_str);
-        changed = true;
+        changed |= insert_text_any(&mut tag, &[ItemKey::ReplayGainTrackGain], &gain_str);
     }
     if let Some(peak) = peak {
         let peak_str = format!("{peak:.6}");
-        let existing = tag.get_string(&ItemKey::Unknown("REPLAYGAIN_TRACK_PEAK".into())).unwrap_or("");
+        let existing = get_str_any(&tag, &[ItemKey::ReplayGainTrackPeak]);
         if should_write(existing, &peak_str, overwrite) {
-            tag.insert_text(ItemKey::Unknown("REPLAYGAIN_TRACK_PEAK".into()), peak_str);
-            changed = true;
+            changed |= insert_text_any(&mut tag, &[ItemKey::ReplayGainTrackPeak], &peak_str);
         }
     }
     if !changed {
@@ -393,17 +430,15 @@ pub fn write_replaygain_album(path: &Path, gain: f64, peak: Option<f64>, overwri
     let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
     let mut changed = false;
     let gain_str = format!("{gain:+.2} dB");
-    let existing = tag.get_string(&ItemKey::Unknown("REPLAYGAIN_ALBUM_GAIN".into())).unwrap_or("");
+    let existing = get_str_any(&tag, &[ItemKey::ReplayGainAlbumGain]);
     if should_write(existing, &gain_str, overwrite) {
-        tag.insert_text(ItemKey::Unknown("REPLAYGAIN_ALBUM_GAIN".into()), gain_str);
-        changed = true;
+        changed |= insert_text_any(&mut tag, &[ItemKey::ReplayGainAlbumGain], &gain_str);
     }
     if let Some(peak) = peak {
         let peak_str = format!("{peak:.6}");
-        let existing = tag.get_string(&ItemKey::Unknown("REPLAYGAIN_ALBUM_PEAK".into())).unwrap_or("");
+        let existing = get_str_any(&tag, &[ItemKey::ReplayGainAlbumPeak]);
         if should_write(existing, &peak_str, overwrite) {
-            tag.insert_text(ItemKey::Unknown("REPLAYGAIN_ALBUM_PEAK".into()), peak_str);
-            changed = true;
+            changed |= insert_text_any(&mut tag, &[ItemKey::ReplayGainAlbumPeak], &peak_str);
         }
     }
     if !changed {
@@ -412,6 +447,48 @@ pub fn write_replaygain_album(path: &Path, gain: f64, peak: Option<f64>, overwri
     let _ = tagged.insert_tag(tag);
     save_tagged_atomic(&tagged, path)?;
     Ok(true)
+}
+
+/// Verify-first gate: true when the file already carries a ReplayGain track
+/// gain tag. Refresh cycles call this before requesting analysis so already
+/// tagged files are never re-fetched. ponytail: track gain only; album-mode
+/// tags are written by organize-pass enrichment.
+pub fn replaygain_present(path: &Path) -> bool {
+    let Ok(tagged) = lofty::read_from_path(path) else {
+        return false;
+    };
+    tagged
+        .primary_tag()
+        .map(|t| replaygain_in_tag(t))
+        .unwrap_or(false)
+}
+
+fn replaygain_in_tag(tag: &Tag) -> bool {
+    !get_str_any(tag, &[ItemKey::ReplayGainTrackGain]).is_empty()
+}
+
+/// Verify-first gate: true when any AudioMuse acoustic marker (BPM / key /
+/// mood / energy) is missing from the file. Refresh cycles only ask the
+/// network for files that actually have gaps; the AudioMuse 7d KV cache
+/// bounds retries for values the service never returns.
+pub fn acoustic_missing(path: &Path) -> bool {
+    let Ok(tagged) = lofty::read_from_path(path) else {
+        return true;
+    };
+    match tagged.primary_tag() {
+        None => true,
+        Some(t) => acoustic_missing_in_tag(t),
+    }
+}
+
+fn acoustic_missing_in_tag(tag: &Tag) -> bool {
+    // BPM: Bpm (Vorbis/MP4) or IntegerBpm (ID3 TBPM); mood: Mood (TMOO/MOOD);
+    // energy has no lofty variant and lives as Unknown("ENERGY").
+    let has = |keys: &[ItemKey]| !get_str_any(tag, keys).is_empty();
+    !(has(&[ItemKey::Bpm, ItemKey::IntegerBpm])
+        && has(&[ItemKey::InitialKey])
+        && has(&[ItemKey::Mood])
+        && has(&[ItemKey::Unknown("ENERGY".into())]))
 }
 
 /// Write genre tags to a file. Genres are semicolon-separated.
@@ -488,6 +565,63 @@ pub fn is_unknown_artist(artist: &str) -> bool {
         || a == "various"
 }
 
+/// Decide which sidecar match may replace a placeholder artist tag.
+/// Returns the winning artist when `current` is a placeholder and some match
+/// is confident (>= min_confidence) and itself a real artist name.
+pub fn artist_fill_candidate<'a, I>(current: &str, min_confidence: f64, matches: I) -> Option<String>
+where
+    I: Iterator<Item = (f64, &'a str)>,
+{
+    if !is_unknown_artist(current) {
+        return None;
+    }
+    matches
+        .filter(|(score, a)| *score >= min_confidence && !a.trim().is_empty() && !is_unknown_artist(a))
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, a)| a.trim().to_string())
+}
+
+/// Write a confirmed artist into a file whose artist tag is still a
+/// placeholder. Never clobbers a real artist (re-reads; tag may differ from
+/// the KV copy the decision was made against).
+pub fn fill_placeholder_artist(path: &Path, artist: &str) -> Result<bool, String> {
+    if artist.trim().is_empty() || is_unknown_artist(artist) {
+        return Ok(false);
+    }
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    let cur = tag.artist().map(|s| s.to_string()).unwrap_or_default();
+    if !is_unknown_artist(&cur) {
+        return Ok(false);
+    }
+    tag.set_artist(artist.trim().to_string());
+    let _ = tagged.insert_tag(tag);
+    save_tagged_atomic(&tagged, path)?;
+    Ok(true)
+}
+
+/// Replace a placeholder/VA album artist with the resolved one. A real album
+/// artist is never clobbered.
+pub fn fill_placeholder_album_artist(path: &Path, album_artist: &str) -> Result<bool, String> {
+    let new = album_artist.trim();
+    if new.is_empty() || is_unknown_artist(new) {
+        return Ok(false);
+    }
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    let cur = tag
+        .get_string(&ItemKey::AlbumArtist)
+        .unwrap_or("")
+        .to_string();
+    if !crate::organizer::is_placeholder_album_artist(&cur) {
+        return Ok(false);
+    }
+    let _ = tag.insert_text(ItemKey::AlbumArtist, new.to_string());
+    let _ = tagged.insert_tag(tag);
+    save_tagged_atomic(&tagged, path)?;
+    Ok(true)
+}
+
 /// Write title tag to a file, stripping instrumental patterns if configured.
 pub fn write_title(path: &Path, new_title: &str) -> Result<bool, String> {
     let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
@@ -518,5 +652,83 @@ mod unknown_artist_tests {
         assert!(is_unknown_artist("Various"));
         assert!(!is_unknown_artist("Radiohead"));
         assert!(!is_unknown_artist("Unknowingly"));
+    }
+
+    #[test]
+    fn artist_fill_candidate_gates() {
+        use super::artist_fill_candidate;
+        // Placeholder + confident match -> filled.
+        assert_eq!(
+            artist_fill_candidate(
+                "Various Artists",
+                0.6,
+                [(0.9, "Real Artist")].into_iter()
+            ),
+            Some("Real Artist".into())
+        );
+        // Real artist never touched.
+        assert_eq!(
+            artist_fill_candidate("Radiohead", 0.6, [(0.9, "Other")].into_iter()),
+            None
+        );
+        // Below confidence threshold -> none.
+        assert_eq!(
+            artist_fill_candidate(
+                "Unknown Artist",
+                0.6,
+                [(0.4, "Real Artist")].into_iter()
+            ),
+            None
+        );
+        // Placeholder match is not a resolution.
+        assert_eq!(
+            artist_fill_candidate(
+                "",
+                0.6,
+                [(0.9, "Various Artists")].into_iter()
+            ),
+            None
+        );
+        // Empty match artist skipped; lower confident match wins.
+        assert_eq!(
+            artist_fill_candidate("Unknown", 0.6, [(0.99, ""), (0.7, "Real")].into_iter()),
+            Some("Real".into())
+        );
+        assert_eq!(
+            artist_fill_candidate("Unknown", 0.6, [].into_iter()),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod verify_gate_tests {
+    use super::{acoustic_missing_in_tag, insert_text_any, replaygain_in_tag};
+    use lofty::tag::{ItemKey, Tag, TagType};
+
+    #[test]
+    fn replaygain_gate_only_when_track_gain_present() {
+        let mut t = Tag::new(TagType::Id3v2);
+        assert!(!replaygain_in_tag(&t));
+        assert!(insert_text_any(&mut t, &[ItemKey::ReplayGainTrackGain], "-6.00 dB"));
+        assert!(replaygain_in_tag(&t));
+        assert!(insert_text_any(&mut t, &[ItemKey::ReplayGainTrackGain], "  "));
+        assert!(!replaygain_in_tag(&t));
+    }
+
+    #[test]
+    fn acoustic_gate_missing_when_any_of_four_absent() {
+        let mut t = Tag::new(TagType::Id3v2);
+        assert!(acoustic_missing_in_tag(&t));
+        // Production write keys: Bpm+IntegerBpm covers Vorbis and ID3.
+        assert!(insert_text_any(&mut t, &[ItemKey::Bpm, ItemKey::IntegerBpm], "120"));
+        assert!(acoustic_missing_in_tag(&t));
+        assert!(insert_text_any(&mut t, &[ItemKey::InitialKey], "Am"));
+        assert!(acoustic_missing_in_tag(&t));
+        assert!(insert_text_any(&mut t, &[ItemKey::Mood], "happy"));
+        assert!(acoustic_missing_in_tag(&t));
+        // Unknown keys go through insert_unchecked (checked insert rejects them).
+        assert!(insert_text_any(&mut t, &[ItemKey::Unknown("ENERGY".into())], "0.7"));
+        assert!(!acoustic_missing_in_tag(&t));
     }
 }
