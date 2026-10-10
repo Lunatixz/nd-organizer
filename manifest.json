@@ -2,7 +2,7 @@
   "id": "nd-organizer",
   "name": "Music Organizer",
   "author": "nd-organizer",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Organizes your Navidrome library: classifies albums (Soundtrack > Various Artists > Singles > Normal) and renames folders/files to your schemas, preserving live/bootleg recordings. Refreshes tags + artwork from MusicBrainz, Cover Art Archive, iTunes and Last.fm; reads/writes Kodi NFO sidecars; verifies identity (AcoustID fingerprint + tags + names) before writing. Integrates with Lidarr (metadata, naming schema, force-search incomplete albums) and AudioMuse-AI (acoustic tags, re-sync). Dry-run default, change history with rollback, metadata backups, reports + status feed (log webhook). Runs in idle-only batches and rescans Navidrome after moves so playback never hits stale files.",
   "website": "https://github.com/Lunatixz/nd-organizer",
   "permissions": {
@@ -414,14 +414,14 @@
         "folderSchema": {
           "type": "string",
           "title": "Album folder schema",
-          "default": "{albumArtist}/{album} ({year})",
-          "description": "Path template for normal albums. Supported placeholders: {albumArtist} {album} {year} {genre} {mbid} {artist} {title}. '/' creates nested folders."
+          "default": "{albumArtist}/{album} ({year}) ({disambiguation})",
+          "description": "Path template for normal albums. Supported placeholders: {albumArtist} {album} {year} {disambiguation} {genre} {mbid} {artist} {title}. '/' creates nested folders. Empty () groups are dropped automatically."
         },
         "fileSchema": {
           "type": "string",
           "title": "Track file schema",
-          "default": "{track:02} - {title}",
-          "description": "File name template (extension appended automatically). Placeholders: {track} {disc} {title} {artist} {album} {albumArtist} {year} {genre} {mbid}. Use {track:02}/{disc:02} for zero-padding."
+          "default": "{albumArtist} {album} {track:02} - {title}",
+          "description": "File name template (extension appended automatically). Placeholders: {track} {disc} {title} {artist} {album} {albumArtist} {year} {genre} {mbid} {disambiguation}. Use {track:02}/{disc:02} for zero-padding."
         },
         "renameSidecars": {
           "type": "boolean",
@@ -842,6 +842,12 @@
           "title": "Move to library",
           "default": "",
           "description": "Path or name of the library to move processed albums into. Leave empty to keep albums in their current library. Match must be exact (e.g. '/music' or 'Music'). Check the warnings panel for available libraries. If this library is not also listed under 'Organize specific libraries only', it is treated as read-only for moves: it still gets full metadata enrichment, duplicate reports, and empty-folder cleanup, but its files are never moved or renamed. Exception: with a 'Force re-fingerprint' option enabled, confirmed AcoustID matches that correct an artist name also re-file the affected folders and files in this library to match — run a dry pass first to review the moves."
+        },
+        "enableLibraryRename": {
+          "type": "boolean",
+          "title": "Enable renaming/moving within the destination library",
+          "default": false,
+          "description": "Allow the background metadata refresh to rename and move files inside the destination library (Move to library). Off by default: the destination library stays read-only for moves. Requires apply mode; with it on, confirmed metadata corrections re-file folders and files in that library. After moves, Navidrome, AudioMuse, and Lidarr rescans are triggered automatically."
         },
         "libraries": {
           "type": "string",
@@ -2119,6 +2125,10 @@
             {
               "type": "Control",
               "scope": "#/properties/moveDestinationLibrary"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/enableLibraryRename"
             }
           ]
         },

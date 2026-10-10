@@ -1502,9 +1502,43 @@ def _group_stats(lib):
     return None
 
 
+def _trail_from_log():
+    """Last-resort processing trail: parse currentFile lines out of the tail
+    of webhook.log (the in-memory `entries` buffer is empty after a restart).
+    Log lines look like "[YYYY-MM-DD HH:MM:SS] POST / - {json}"."""
+    rows, seen = [], set()
+    try:
+        size = os.path.getsize(LOGFILE)
+        with open(LOGFILE, "rb") as f:
+            f.seek(max(0, size - 262144))
+            data = f.read().decode("utf-8", "replace")
+    except OSError:
+        return rows
+    for line in reversed(data.splitlines()):
+        if len(rows) >= 15:
+            break
+        idx = line.find("{")
+        if idx < 0 or '"currentFile"' not in line:
+            continue
+        try:
+            j = json.loads(line[idx:])
+        except Exception:
+            continue
+        if not isinstance(j, dict):
+            continue
+        cf = (j.get("currentFile") or "").strip()
+        if not cf or "complete" in cf or cf in seen:
+            continue
+        seen.add(cf)
+        ts = line[1:20] if line.startswith("[") else ""
+        rows.append((ts, j.get("phase") or "scan", cf))
+    return rows
+
+
 def processing_html():
     """What is flowing through the pipeline right now: the newest distinct
-    files the plugin reported it is reading/verifying, newest first."""
+    files the plugin reported it is reading/verifying, newest first. Falls
+    back to webhook.log when the in-memory buffer is empty (post-restart)."""
     rows, seen = [], set()
     for ts, _, body in reversed(entries):
         if len(rows) >= 15:
@@ -1522,6 +1556,8 @@ def processing_html():
             continue
         seen.add(cf)
         rows.append((ts, j.get("phase") or "scan", cf))
+    if not rows:
+        rows = _trail_from_log()
     if not rows:
         return "<div class='note'>No files in flight - this fills in while the plugin scans or verifies.</div>"
     out = ""
@@ -1591,14 +1627,14 @@ def artists_html():
 
 
 def rollback_runs_html():
-    """Every apply run recorded in the plugin's KV: run ID, when, what it
-    changed (albums/files/dirs), whether it was already rolled back, and
-    when its retention expires."""
+    """Every apply run ever recorded: run ID, when, what it changed, whether it
+    was rolled back, and whether its undo data is still present. Run listings
+    come from the never-pruned `history:` keys unioned with live `apply:`
+    records, so IDs stay visible forever even after retention prunes the undo
+    data."""
+    # Live undo data (apply records) - the source of detail when present.
     la = kv_op("list", prefix="apply:") or {}
     keys = la.get("keys") or []
-    if not keys:
-        return ("<div class='note'>No apply runs yet - rollback data appears here "
-                "as soon as a run moves files.</div>")
     vals = (kv_op("get_many", keys=keys) or {}).get("values") or {}
     runs = {}
     for k in keys:
@@ -1608,6 +1644,26 @@ def rollback_runs_html():
         except Exception:
             continue
         runs.setdefault(run, []).append(rec)
+    # Persistent history summaries (never pruned with the undo data).
+    hist = {}
+    hkeys = (kv_op("list", prefix="history:") or {}).get("keys") or []
+    if hkeys:
+        hvals = (kv_op("get_many", keys=hkeys) or {}).get("values") or {}
+        for k in hkeys:
+            run = k[len("history:"):]
+            try:
+                hist[run] = json.loads(base64.b64decode(hvals[k]))
+            except Exception:
+                continue
+    all_runs = sorted(
+        set(runs) | set(hist),
+        key=lambda r: max(
+            [rec.get("ts", 0) for rec in runs.get(r, [])]
+            + [int((hist.get(r) or {}).get("ts") or 0)]
+            + [0]
+        ),
+        reverse=True,
+    )[:100]
     done = set()
     for k in (kv_op("list", prefix="rollback:done:") or {}).get("keys") or []:
         done.add(k[len("rollback:done:"):])
@@ -1617,13 +1673,17 @@ def rollback_runs_html():
     except Exception:
         ret_days = 30
 
-    ordered = sorted(runs.items(), key=lambda kv: max(r.get("ts", 0) for r in kv[1]),
-                     reverse=True)[:12]
     out = ""
-    for run, recs in ordered:
+    for run in all_runs:
+        recs = runs.get(run) or []
         recs.sort(key=lambda r: r.get("seq", 0))
-        ts = recs[0].get("ts") or 0
-        n_files = sum(len(r.get("file_renames") or []) for r in recs)
+        h = hist.get(run) or {}
+        ts = (
+            max((r.get("ts", 0) for r in recs), default=0)
+            or int(h.get("ts") or 0)
+        )
+        n_files = sum(len(r.get("file_renames") or []) for r in recs) or int(h.get("files") or 0)
+        n_albums = len(recs) or int(h.get("albums") or 0)
         dirs = []
         for r in recs:
             d = "%s &rarr; %s" % (esc(str(r.get("from_dir", ""))), esc(str(r.get("to_dir", ""))))
@@ -1636,10 +1696,12 @@ def rollback_runs_html():
         tags = ""
         if run in done:
             tags += "<span class='tag ok'>rolled back</span>"
-        else:
+        elif recs:
             tags += "<span class='tag run'>undoable</span>"
+        else:
+            tags += "<span class='tag bad'>expired &mdash; undo data pruned</span>"
         expires = ""
-        if ts:
+        if ts and recs:
             left = int((ts + ret_days * 86400 - time.time()) / 86400)
             if left > 0:
                 expires = "<span class='tag %s'>expires in %dd</span>" % (
@@ -1661,11 +1723,15 @@ def rollback_runs_html():
         out += ("<details class='collapse'><summary><code>%s</code> "
                 "<span class='dim'>%s</span> &middot; %d album(s) &middot; %d file(s) &middot; "
                 "%s %s</summary><div class='collapse-body'>%s%s</div></details>") % (
-            esc(run), when, len(recs), n_files, tags, expires,
+            esc(run), when, n_albums, n_files, tags, expires,
             ("<div>" + "".join("<div class='dim'>%s</div>" % d for d in dirs[:6]) + "</div>") if dirs else "",
             renames)
+    if not out:
+        return ("<div class='note'>No apply runs yet - rollback data appears here "
+                "as soon as a run moves files.</div>")
     return ("<div class='dim'>Set <b>rollbackRunId</b> to a run ID in the plugin settings, "
-            "then run a pass to restore that run. Newest first.</div>") + out
+            "then run a pass to restore that run. Newest first; run IDs are kept forever, "
+            "undo data expires after rollbackRetentionDays.</div>") + out
 
 
 # ---------------------------------------------------------------- dashboard bits

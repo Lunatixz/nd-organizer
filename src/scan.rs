@@ -1636,7 +1636,19 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
                 .iter()
                 .filter_map(|r| by_rel.get(r.as_str()).map(|t| t.artist.clone()))
                 .collect();
-            let Some(new_aa) = crate::organizer::collapse_album_artist(&cur_aa, &tracks) else {
+            let new_aa = crate::organizer::collapse_album_artist(&cur_aa, &tracks).or_else(
+                || {
+                    // AcoustID mixed/no-match: last resort is the file name
+                    // ("Rihanna Feat. Drake ..."). VA markers never qualify -
+                    // a genuine compilation keeps Various Artists.
+                    if !cur_aa.trim().is_empty() && !crate::tags::is_unknown_artist(&cur_aa) {
+                        return None;
+                    }
+                    let name = g.first().map(|r| r.rsplit('/').next().unwrap_or(r))?;
+                    crate::organizer::parse_file_artist(name)
+                },
+            );
+            let Some(new_aa) = new_aa else {
                 continue;
             };
             if apply_writes {
@@ -1807,20 +1819,22 @@ pub fn plan_singles_step(cfg: &Config, library_id: i32) -> Result<(usize, usize)
         else {
             continue;
         };
-        // Already sitting in a Singles folder - consume without moving
-        // (same-library only; cross-library still owes the move to dest).
-        let artist = if t.album_artist.trim().is_empty() {
-            cfg.various_folder.clone()
-        } else {
-            t.album_artist.trim().to_string()
-        };
-        if dest_root == root
-            && (rel.starts_with(&format!("{artist}/{}/", cfg.singles_folder))
-                || rel.starts_with(&format!("{}/{}", cfg.various_folder, cfg.singles_folder)))
-        {
+        // Already sitting in the right artist's Singles folder - consume
+        // without moving (same-library only; cross-library still owes the
+        // move to dest). Files under Various Artists/Singles do NOT count:
+        // singles are re-filed under an artist, never left in VA.
+        let artist = crate::organizer::singles_artist(&[&t.album_artist, &t.artist]);
+        if dest_root == root && rel.starts_with(&format!("{artist}/{}/", cfg.singles_folder)) {
             continue;
         }
-        let to = crate::organizer::singles_target(&dest_root, cfg, &t.album_artist, &t.album, rel);
+        let to = crate::organizer::singles_target(
+            &dest_root,
+            cfg,
+            &t.album_artist,
+            &t.artist,
+            &t.album,
+            rel,
+        );
         if dest_root == root && to.eq_ignore_ascii_case(rel) {
             continue;
         }
@@ -2231,6 +2245,8 @@ pub fn plan_move_step(
     let mut total_moves = 0usize;
     let mut total_dupes = 0usize;
     let mut total_to_move = 0usize;
+    let mut unknown_artist = 0usize;
+    let mut last_current = String::new();
     let mut plans: Vec<serde_json::Value> = Vec::new();
     let move_start = std::time::SystemTime::now();
     let move_budget = std::time::Duration::from_secs(15);
@@ -2335,14 +2351,15 @@ pub fn plan_move_step(
             &folder_hint,
             &mb_type,
             mb_release.as_ref().and_then(|r| r.date.as_deref()),
+            mb_release.as_ref().map(|r| r.disambiguation.as_str()).unwrap_or(""),
         );
         if crate::wasm::meta_only_library(cfg).is_some_and(|id| id == library_id) {
             // Destination library: singles routing is disabled there
             // (plan_singles never runs for it) and files only move under the
             // force-fingerprint reparse toggles. plan_enrich applies the same
             // rule so its post-move path mapping stays truthful.
-            let force_moves =
-                cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist;
+            let force_moves = cfg.enable_library_rename
+                && (cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist);
             if plan.bucket == crate::organizer::Bucket::Singles || !force_moves {
                 plan.moves.clear();
             }
@@ -2354,6 +2371,10 @@ pub fn plan_move_step(
         total_moves += plan.moves.len();
         total_dupes += plan.duplicates.len();
         total_to_move += usize::from(!plan.moves.is_empty());
+        if plan.target_dir.starts_with("Unknown Artist/") {
+            unknown_artist += 1;
+        }
+        last_current = plan.target_dir.clone();
         report_parts.push(group_report(&plan, cfg.mode != Mode::Apply));
         if cfg.star_tally_enabled {
             let mut star_lines: Vec<String> = Vec::new();
@@ -2509,6 +2530,11 @@ pub fn plan_move_step(
         report_text.push_str(&format!(
             "\n[rollback] Run ID: {run_id}\nTo undo everything in this run, set 'rollbackRunId' = {run_id} in the plugin settings, then run a pass.\n"
         ));
+        if unknown_artist > 0 {
+            report_text.push_str(&format!(
+                "\n[warn] Unknown Artist: {unknown_artist} folder(s) unresolved (no tag/MB/filename artist).\n"
+            ));
+        }
         crate::wasm::save_report(&report_text, cfg.backup_retention_days as i64);
         crate::wasm::log_info(&report_text);
         let report_envelope = serde_json::json!({
@@ -2544,6 +2570,7 @@ pub fn plan_move_step(
         "inProgress": true,
         "phase": "plan",
         "batch": { "index": batch_index, "total": batch_total },
+        "currentFile": last_current,
         "libraries": [{
             "id": library_id,
             "albumsFound": groups.len(),
@@ -2660,13 +2687,14 @@ pub fn plan_enrich_step(
             else if r.secondary_types.iter().any(|t| t.eq_ignore_ascii_case("compilation") || t.eq_ignore_ascii_case("live")) || r.primary_type == "Compilation" { "Compilation".to_string() }
             else if r.primary_type == "Single" || r.primary_type == "EP" { "Single".to_string() }
             else { String::new() }
-        }).unwrap_or_default(), mb_release.as_ref().and_then(|r| r.date.as_deref()));
+        }).unwrap_or_default(), mb_release.as_ref().and_then(|r| r.date.as_deref()), mb_release.as_ref().map(|r| r.disambiguation.as_str()).unwrap_or(""));
         if meta_only {
             // Force-fingerprint reparse + apply: plan_move in this task's
             // enqueue chain already executed the moves (dry runs never reach
             // enrich; a stale enrich enqueued before the toggles went on runs
             // without mode==apply and falls through to the safe branch).
-            let keep_moves = (cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist)
+            let keep_moves = cfg.enable_library_rename
+                && (cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist)
                 && cfg.mode == Mode::Apply;
             if plan.bucket == crate::organizer::Bucket::Singles || !keep_moves {
                 // Read-only for this plan: files stay put (singles routing is
@@ -3417,6 +3445,19 @@ pub fn plan_enrich_step(
     })
     .to_string();
     crate::wasm::post_webhook(cfg, &status_json);
+    // Persist a lightweight history entry so this run stays listed in the
+    // webhook UI after the apply:/backup: undo data is pruned.
+    if batch_index + 1 >= batch_total {
+        if let Err(e) = crate::state::host_state::record_run_history(
+            &run_id,
+            "apply",
+            library_id,
+            groups.len(),
+            total_autotags + total_replaygains,
+        ) {
+            crate::wasm::log_warn(&format!("history write failed: {e}"));
+        }
+    }
     Ok(())
 }
 
@@ -4080,7 +4121,7 @@ fn group_report(plan: &crate::organizer::GroupPlan, dry: bool) -> String {
     let mut s = String::new();
     let kind = match plan.bucket {
         crate::organizer::Bucket::Soundtrack => "Soundtrack",
-        crate::organizer::Bucket::Various => "Various artists (compilation)",
+        crate::organizer::Bucket::Various => "Various artists (multi-artist)",
         crate::organizer::Bucket::Singles => "Single / incomplete",
         crate::organizer::Bucket::Normal => "Normal album",
     };

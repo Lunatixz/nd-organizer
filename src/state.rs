@@ -211,6 +211,39 @@ pub mod host_state {
             .map_err(|e| e.to_string())
     }
 
+    /// Lightweight run summary for the webhook's history list. Written at run
+    /// end; NEVER pruned (prune_rollback only touches apply/backup/seq/done
+    /// prefixes) so run IDs stay visible after the undo data expires.
+    pub fn record_run_history(
+        run_id: &str,
+        mode: &str,
+        library_id: i32,
+        albums: usize,
+        files: usize,
+    ) -> Result<(), String> {
+        let key = format!("history:{run_id}");
+        // Upsert: accumulate across batches (each batch posts its own slice).
+        let rec = crate::store::kv()
+            .get(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let prev_albums = rec.get("albums").and_then(|a| a.as_u64()).unwrap_or(0) as usize;
+        let prev_files = rec.get("files").and_then(|a| a.as_u64()).unwrap_or(0) as usize;
+        let rec = serde_json::json!({
+            "runId": run_id,
+            "ts": rec.get("ts").and_then(|t| t.as_i64()).unwrap_or_else(now_ts),
+            "mode": mode,
+            "libraryId": library_id,
+            "albums": prev_albums + albums,
+            "files": prev_files + files,
+        });
+        crate::store::kv()
+            .set(&key, rec.to_string().into_bytes())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn rollback_done(run_id: &str) -> bool {
         crate::store::kv().get(&format!("rollback:done:{run_id}"))
             .map(|o| o.is_some())

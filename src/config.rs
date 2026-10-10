@@ -288,6 +288,8 @@ pub struct Config {
     /// (keep in place). When set, processed albums are moved to this library
     /// after processing. Supports cross-filesystem moves via copy+delete.
     pub move_destination_library: String,
+    /// Allow rename/move within the destination library (meta-only). Default off.
+    pub enable_library_rename: bool,
     /// Snapshot previous tags (and original .nfo) to plugin storage before any
     /// tag/nfo write. Metadata-only, never copies audio bytes.
     pub backup_before_write: bool,
@@ -466,8 +468,8 @@ impl Default for Config {
             classify_from_mb: true,
             read_nfo: true,
             write_nfo: false,
-            folder_schema: "{albumArtist}/{album} ({year})".into(),
-            file_schema: "{track:02} - {title}".into(),
+            folder_schema: "{albumArtist}/{album} ({year}) ({disambiguation})".into(),
+            file_schema: "{albumArtist} {album} {track:02} - {title}".into(),
             rename_sidecars: true,
             illegal_char_replacement: "_".into(),
             max_name_length: 180,
@@ -491,6 +493,7 @@ impl Default for Config {
             filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke,comedy".into(),
             exclude_paths: Vec::new(),
             move_destination_library: String::new(), // empty = disabled
+            enable_library_rename: false,
             backup_before_write: true,
             backup_retention_days: 30,
             rollback_retention_days: 30,
@@ -586,7 +589,7 @@ const CONFIG_KEYS: &[&str] = &[
     "replayGainReference", "trimMissingDays", "navidromeAdminUser",
     "navidromeAdminPassword", "navidromeUrl", "skipHiddenFiles", "preserveRecordingType",
     "singlesUnderArtist", "singlesEnabled", "fillerKeywords", "excludePaths",
-    "moveDestinationLibrary", "backupBeforeWrite", "backupRetentionDays",
+    "moveDestinationLibrary", "enableLibraryRename", "backupBeforeWrite", "backupRetentionDays",
     "rollbackRetentionDays",     "verifyIdentity", "forceFingerprint", "forceRefingerprintUnknownArtist", "minConfidence",
     "skipUnverified", "acoustidMode", "acoustidApiKey", "acoustidUrl",
     "primarySource", "musicbrainzToken", "lastfmApiKey", "lastfmUser",
@@ -862,6 +865,7 @@ impl Config {
                 }
             }
         }
+        c.enable_library_rename = bool(map, "enableLibraryRename", c.enable_library_rename);
         c.backup_before_write = bool(map, "backupBeforeWrite", c.backup_before_write);
         if let Some(v) = map.get("backupRetentionDays") {
             c.backup_retention_days = v.trim().parse().unwrap_or(c.backup_retention_days);
@@ -1080,8 +1084,8 @@ mod tests {
     fn defaults_apply_when_empty() {
         let c = Config::from_map(&HashMap::new());
         assert_eq!(c.mode, Mode::DryRun);
-        assert_eq!(c.folder_schema, "{albumArtist}/{album} ({year})");
-        assert_eq!(c.file_schema, "{track:02} - {title}");
+        assert_eq!(c.folder_schema, "{albumArtist}/{album} ({year}) ({disambiguation})");
+        assert_eq!(c.file_schema, "{albumArtist} {album} {track:02} - {title}");
         assert_eq!(c.soundtrack_folder, "Sound Tracks");
         assert_eq!(c.incomplete_album_min_tracks, 3);
         assert!(c.scan_after_album);

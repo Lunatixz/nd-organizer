@@ -79,6 +79,8 @@ pub struct AlbumInfo {
     pub compilation: bool,
     /// MusicBrainz release type read from embedded tags (RELEASETYPE / TXXX:MusicBrainz Album Type).
     pub release_type_from_tag: String,
+    /// MusicBrainz release disambiguation comment (e.g. "deluxe edition").
+    pub disambiguation: String,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +326,7 @@ fn album_info_raw(album: &AlbumDir) -> AlbumInfo {
         description: String::new(),
         compilation,
         release_type_from_tag,
+        disambiguation: String::new(),
     }
 }
 
@@ -455,32 +458,37 @@ pub fn collapse_album_artist(album_artist: &str, track_artists: &[String]) -> Op
 /// Classify an album into a bucket. Local-tag heuristics only; MusicBrainz /
 /// Lidarr release-type signals slot in ahead of this in Phase 2.
 pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
-    // 1. Picard compilation flag — most reliable VA signal (TCMP/cpil/COMPILATION=1).
-    if info.compilation {
-        return Bucket::Various;
+    // 1. Below the album track threshold -> singles. A folder with fewer files
+    //    than incompleteAlbumMinTracks is never an album (complete soundtracks
+    //    included); singlesEnabled off keeps such groups as normal albums.
+    if cfg.singles_enabled && info.track_count < cfg.incomplete_album_min_tracks {
+        return Bucket::Singles;
     }
     // 2. MusicBrainz release type from embedded tags (RELEASETYPE / TXXX:MusicBrainz Album Type).
     //    Picard writes this for compilations, soundtracks, singles, etc.
     match info.release_type_from_tag.to_ascii_lowercase().as_str() {
-        "soundtrack" | "score" => return Bucket::Soundtrack,
-        "compilation" | "live" => return Bucket::Various,
         "single" | "ep" | "mixtape" if cfg.singles_enabled => return Bucket::Singles,
+        "soundtrack" | "score" => return Bucket::Soundtrack,
         _ => {}
     }
     // 3. MusicBrainz API release type (when classifyFromMB is on).
     if cfg.classify_from_mb {
         match info.release_type.to_ascii_lowercase().as_str() {
-            "soundtrack" | "score" => return Bucket::Soundtrack,
-            "compilation" | "live" => return Bucket::Various,
             "single" | "ep" | "mixtape" if cfg.singles_enabled => return Bucket::Singles,
+            "soundtrack" | "score" => return Bucket::Soundtrack,
             _ => {}
         }
     }
     // 4. Genre/album name → soundtrack heuristic.
     let genre = info.genre.to_ascii_lowercase();
     let album = info.album.to_ascii_lowercase();
+    // ponytail: "ost" must match a whole genre token — plain contains() hits
+    // "Post-Rock"/"Post-Punk"/"Post-Grunge" and files whole albums as soundtracks.
+    let genre_is_ost = genre
+        .split(|c: char| c == ';' || c == ',' || c == '/' || c == '|')
+        .any(|g| g.trim() == "ost");
     let is_soundtrack = genre.contains("soundtrack")
-        || genre.contains("ost")
+        || genre_is_ost
         || album.contains("soundtrack")
         || album.contains("original motion picture")
         || album.contains("music from")
@@ -489,16 +497,17 @@ pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
         return Bucket::Soundtrack;
     }
 
-    // 5. Album artist string → various.
+    // 5. Various artists only for genuine multi-artist albums: a VA marker, or
+    //    no album artist at all with several distinct track artists.
+    //    Comps/greatest-hits/live with a real album artist stay with that
+    //    artist (they get classified Normal below).
     let aa = info.album_artist.trim();
-    let is_various =
-        is_various_marker(aa) || (info.distinct_artists.len() > 1 && aa.is_empty());
-    if is_various {
+    if is_various_marker(aa) || (aa.is_empty() && info.distinct_artists.len() > 1) {
         return Bucket::Various;
     }
 
     // 6. No artist → singles (incomplete metadata).
-    if info.album_artist.trim().is_empty() {
+    if aa.is_empty() {
         return Bucket::Singles;
     }
 
@@ -520,6 +529,7 @@ fn album_fields(info: &AlbumInfo, first_title: &str) -> TemplateFields {
         album_artist: info.album_artist.clone(),
         album: info.album.clone(),
         year: info.year,
+        disambiguation: info.disambiguation.clone(),
         genre: info.genre.clone(),
         recording: if matches!(info.recording, Recording::Mixed) {
             String::new()
@@ -530,14 +540,27 @@ fn album_fields(info: &AlbumInfo, first_title: &str) -> TemplateFields {
     }
 }
 
+/// The artist a singles folder files under: the first real candidate (album
+/// artist, then track artists), else "Unknown Artist". Markers, unknown
+/// placeholders and empty strings never qualify — singles are never filed
+/// under Various Artists.
+pub(crate) fn singles_artist(candidates: &[&str]) -> String {
+    candidates
+        .iter()
+        .map(|s| s.trim())
+        .find(|s| !is_placeholder_album_artist(s))
+        .unwrap_or("Unknown Artist")
+        .to_string()
+}
+
 /// Compute the target album directory (root-relative) for a bucket.
 ///
 /// Layout:
 ///   Soundtracks -> Various Artists/Sound Tracks/{album} ({year})
 ///   Various     -> Various Artists/{album} ({year})
-///   Singles     -> {albumArtist}/{singlesFolder}/{title}  (when
-///                  `singlesUnderArtist` and the artist is known), else
-///                  Various Artists/Singles/{albumArtist} - {title}
+///   Singles     -> {artist}/{singlesFolder}/{title}  (artist resolved via
+///                  `singles_artist`; when `singlesUnderArtist` is off:
+///                  Various Artists/Singles/{artist} - {title})
 ///   Normal      -> {folderSchema}
 ///
 /// Live/bootleg albums get a " (Live)"/" (Bootleg)" suffix so they never
@@ -548,7 +571,7 @@ pub fn target_album_dir(
     cfg: &Config,
     first_title: &str,
 ) -> String {
-    let fields = album_fields(info, first_title);
+    let mut fields = album_fields(info, first_title);
     let opts = sanitize_opts(cfg);
     let rendered = match bucket {
         Bucket::Soundtrack => {
@@ -564,15 +587,12 @@ pub fn target_album_dir(
             }
         }
         Bucket::Singles => {
-            if info.compilation {
-                // VA compilation singles always go under Various Artists.
-                let sub = render_folder_path(
-                    &format!("{}/{{albumArtist}} - {{title}}", cfg.singles_folder),
-                    &fields,
-                    &opts,
-                );
-                format!("{}/{}", cfg.various_folder, sub)
-            } else if cfg.singles_under_artist && !info.album_artist.trim().is_empty() {
+            // Singles are never filed under Various Artists: resolve the real
+            // album artist, else a track artist, else "Unknown Artist".
+            let mut cands = vec![info.album_artist.as_str()];
+            cands.extend(info.distinct_artists.iter().map(String::as_str));
+            fields.album_artist = singles_artist(&cands);
+            if cfg.singles_under_artist {
                 render_folder_path(
                     &format!("{{albumArtist}}/{}/{{title}}", cfg.singles_folder),
                     &fields,
@@ -623,6 +643,69 @@ fn parse_file_name(name: &str) -> (Option<u32>, String) {
     } else {
         (digits.parse().ok(), trimmed.to_string())
     }
+}
+
+/// Best-effort artist from a file name, last resort when tags, AcoustID and
+/// MusicBrainz all failed. Patterns, in order:
+///   "Artist - Title"        -> "Artist"
+///   "Artist Feat. X - ..."  -> "Artist Feat. X"
+///   "Rihanna Feat. Drake .." (no dash) -> "Rihanna Feat. Drake"
+///   "Artist Album 01 - ..." -> "Artist" (first word only)
+/// Never returns placeholder-ish tokens or a leading track number.
+pub(crate) fn parse_file_artist(name: &str) -> Option<String> {
+    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
+    let trimmed = stem.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // "NN - Title" (or "NN Title") is a track, not an artist.
+    let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 {
+        let rest = &trimmed[digits..];
+        if rest.is_empty()
+            || rest.starts_with(['-', ' ', '_', '.', ')', '('])
+        {
+            return None;
+        }
+    }
+    let cut = trimmed
+        .find(" - ")
+        .map(|i| &trimmed[..i])
+        .unwrap_or(trimmed);
+    let words: Vec<&str> = cut.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+    // Clean "Artist - Title" shape (cut doesn't end in a track number):
+    // everything before the dash is the artist, multi-word acts included.
+    // "Artist Album NN - Title" and no-dash names end in digits or run the
+    // album on - fall back to "Artist" / "Artist Feat. X".
+    let ends_in_trackno = words
+        .last()
+        .is_some_and(|w| w.chars().all(|c| c.is_ascii_digit()));
+    let artist = if !ends_in_trackno && trimmed.contains(" - ") {
+        cut.to_string()
+    } else {
+        let stop = words
+            .iter()
+            .position(|w| {
+                let w = w.trim_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .to_ascii_lowercase();
+                matches!(w.as_str(), "feat" | "featuring" | "ft" | "feats")
+            })
+            .map(|i| (i + 2).min(words.len()))
+            .unwrap_or(1);
+        words[..stop].join(" ")
+    };
+    let lower = artist.to_ascii_lowercase();
+    if artist.is_empty()
+        || lower.contains("unknown")
+        || is_various_marker(&artist)
+        || crate::tags::is_unknown_artist(&artist)
+    {
+        return None;
+    }
+    Some(artist)
 }
 
 /// Populate embedded tags for an album's tracks (no-op when already loaded).
@@ -706,6 +789,7 @@ pub fn build_plan(album: &AlbumDir, cfg: &Config, root: &Path) -> AlbumPlan {
             album_artist: info.album_artist.clone(),
             album: info.album.clone(),
             year: info.year,
+            disambiguation: info.disambiguation.clone(),
             genre: info.genre.clone(),
             recording: track_recording.as_str().to_string(),
             mbid: track
@@ -894,6 +978,7 @@ pub fn album_info_from_tags(files: &[(String, TrackTags)]) -> AlbumInfo {
         description: String::new(),
         compilation,
         release_type_from_tag,
+        disambiguation: String::new(),
     }
 }
 
@@ -977,19 +1062,17 @@ pub fn relabel_plan(plan: &mut GroupPlan, new_dir: &str) {
 
 /// Where a confirmed duplicate is moved: the artist's Singles folder, with the
 /// filename disambiguated (source album appended, then a counter) so it never
-/// overwrites existing singles.
+/// overwrites existing singles. Falls back to the track artist, then
+/// "Unknown Artist" — never the Various Artists folder.
 pub(crate) fn singles_target(
     root: &Path,
     cfg: &Config,
     album_artist: &str,
+    track_artist: &str,
     album: &str,
     loser_rel: &str,
 ) -> String {
-    let artist_folder = if album_artist.trim().is_empty() {
-        cfg.various_folder.clone()
-    } else {
-        album_artist.trim().to_string()
-    };
+    let artist_folder = singles_artist(&[album_artist, track_artist]);
     let ext = loser_rel
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
@@ -1026,10 +1109,14 @@ pub fn build_group_plan(
     folder_hint: &str,
     mb_release_type: &str,
     mb_date: Option<&str>,
+    mb_disamb: &str,
 ) -> GroupPlan {
     let mut info = album_info_from_tags(files);
     if !mb_release_type.trim().is_empty() {
         info.release_type = mb_release_type.to_string();
+    }
+    if !mb_disamb.trim().is_empty() {
+        info.disambiguation = mb_disamb.trim().to_string();
     }
     if info.album.is_empty() {
         // Last path segment only: the full hint would embed the source tree
@@ -1039,6 +1126,16 @@ pub fn build_group_plan(
     if info.album_artist.is_empty() && info.distinct_artists.len() == 1 {
         info.album_artist = info.distinct_artists[0].clone();
     }
+    // No artist from tags: last resort is the file name ("Rihanna Feat. Drake ...").
+    // VA markers don't qualify - a genuine compilation keeps Various Artists.
+    if info.album_artist.trim().is_empty() || crate::tags::is_unknown_artist(&info.album_artist) {
+        if let Some((rel, _)) = files.first() {
+            let name = rel.rsplit('/').next().unwrap_or(rel);
+            if let Some(a) = parse_file_artist(name) {
+                info.album_artist = a;
+            }
+        }
+    }
     // Year 0 / missing tag: fall back to the MB release date so the album
     // folder keeps its "(Year)" instead of rendering " ()".
     if !info.year.is_some_and(|y| y >= 1000) {
@@ -1046,6 +1143,17 @@ pub fn build_group_plan(
             .and_then(|d| d.get(..4))
             .and_then(|y| y.parse::<u32>().ok())
             .filter(|y| (1000..=2999).contains(y));
+    }
+    // Still no year: the existing album.nfo may carry one (written by an
+    // earlier enrich pass) - without this the folder never gains its
+    // "(Year)" and a year-suffixed twin folder appears instead.
+    if !info.year.is_some_and(|y| y >= 1000) && cfg.read_nfo {
+        if let Some((rel, _)) = files.first() {
+            let dir = root.join(rel.rsplit_once('/').map(|(d, _)| d).unwrap_or(""));
+            if let Some(nfo) = crate::nfo::read_album_nfo(&dir) {
+                info.year = nfo.year.filter(|y| (1000..=2999).contains(y));
+            }
+        }
     }
     let bucket = classify(&info, cfg);
     let first_title = files
@@ -1081,6 +1189,7 @@ pub fn build_group_plan(
             album_artist: info.album_artist.clone(),
             album: info.album.clone(),
             year: info.year,
+            disambiguation: info.disambiguation.clone(),
             genre: info.genre.clone(),
             recording: t.recording.as_str().to_string(),
             mbid: t.mbid_recording.clone(),
@@ -1147,6 +1256,7 @@ pub fn build_group_plan(
                 root,
                 cfg,
                 &files[i].1.album_artist,
+                &files[i].1.artist,
                 &files[i].1.album,
                 &loser_rel,
             );
@@ -1778,7 +1888,14 @@ mod tests {
                 &["01 - Dream On.flac", "02 - Walk This Way.mp3"] as &[&str],
             ),
             ("Various Artists/Greatest Hits", &["01 - Hit One.flac"]),
-            ("OST Sample/Original Soundtrack", &["01 - Theme.flac"]),
+            (
+                "OST Sample/Original Soundtrack",
+                &[
+                    "01 - Theme.flac",
+                    "02 - Credits.flac",
+                    "03 - End.flac",
+                ],
+            ),
             ("Lone Singer/Single Song", &["01 - Only One.flac"]),
         ] {
             for f in files {
@@ -1821,6 +1938,7 @@ mod tests {
             description: String::new(),
             compilation: false,
             release_type_from_tag: String::new(),
+            disambiguation: String::new(),
         };
 
         assert_eq!(
@@ -1830,6 +1948,15 @@ mod tests {
         assert_eq!(
             classify(&info("Album", "X", "OST", 12, false), &c),
             Bucket::Soundtrack
+        );
+        // "ost" matches whole genre tokens only — Post-* genres are not soundtracks.
+        assert_eq!(
+            classify(&info("Astronaut", "Duran Duran", "Pop; Rock; Post-Rock", 12, false), &c),
+            Bucket::Normal
+        );
+        assert_eq!(
+            classify(&info("Unknown Pleasures", "Joy Division", "Post-Punk", 10, false), &c),
+            Bucket::Normal
         );
         assert_eq!(
             classify(&info("Greatest", "Various Artists", "", 20, false), &c),
@@ -1843,9 +1970,19 @@ mod tests {
             classify(&info("Multi", "", "Rock", 10, true), &c),
             Bucket::Various
         );
+        // Below the track threshold -> singles, even with a real artist.
         assert_eq!(
             classify(&info("Solo", "X", "Rock", 1, false), &c),
-            Bucket::Normal
+            Bucket::Singles
+        );
+        // A compilation flag alone never overrides a real album artist.
+        let mut comp = info("Hits", "X", "Rock", 10, false);
+        comp.compilation = true;
+        assert_eq!(classify(&comp, &c), Bucket::Normal);
+        // Genuine multi-artist soundtracks still nest under VA.
+        assert_eq!(
+            classify(&info("OST", "Various Artists", "Soundtrack", 10, false), &c),
+            Bucket::Soundtrack
         );
         // MusicBrainz release type drives classification when classifyFromMB is on.
         let mut c2 = cfg();
@@ -1862,14 +1999,17 @@ mod tests {
             description: String::new(),
             compilation: false,
             release_type_from_tag: String::new(),
+            disambiguation: String::new(),
         };
         assert_eq!(classify(&mb_info("Soundtrack"), &c2), Bucket::Soundtrack);
-        assert_eq!(classify(&mb_info("Compilation"), &c2), Bucket::Various);
+        // MB types greatest-hits releases "Compilation" but credits the
+        // primary artist - that artist keeps the album.
+        assert_eq!(classify(&mb_info("Compilation"), &c2), Bucket::Normal);
         assert_eq!(classify(&mb_info("Single"), &c2), Bucket::Singles);
         assert_eq!(classify(&mb_info("Album"), &c2), Bucket::Normal);
         assert_eq!(
             classify(&info("Partial", "X", "Rock", 2, false), &c),
-            Bucket::Normal
+            Bucket::Singles
         );
         assert_eq!(
             classify(&info("Real", "X", "Rock", 12, false), &c),
@@ -1880,7 +2020,7 @@ mod tests {
         c2.incomplete_album_min_tracks = 5;
         assert_eq!(
             classify(&info("Partial", "X", "Rock", 4, false), &c2),
-            Bucket::Normal
+            Bucket::Singles
         );
         // Singles routing can be turned off entirely: singles/incomplete albums
         // stay as normal albums in their own folder.
@@ -1923,10 +2063,14 @@ mod tests {
                 let expect = format!("{}/{}", c.various_folder, c.soundtrack_folder);
                 assert!(p.target_dir.starts_with(&expect), "{:?}", p.target_dir);
             } else {
-                // Tagless albums have no artist, so singles fall back under various.
+                // Tagless albums have no artist, so singles fall back to
+                // Unknown Artist - never the various-artist folder.
                 assert_eq!(p.bucket, Bucket::Singles);
-                let expect = format!("{}/{}", c.various_folder, c.singles_folder);
-                assert!(p.target_dir.starts_with(&expect), "{:?}", p.target_dir);
+                assert!(
+                    p.target_dir.starts_with("Unknown Artist/Singles"),
+                    "{:?}",
+                    p.target_dir
+                );
             }
         }
         let _ = fs::remove_dir_all(&root);
@@ -1947,17 +2091,18 @@ mod tests {
             description: String::new(),
             compilation: false,
             release_type_from_tag: String::new(),
+            disambiguation: String::new(),
         };
         assert_eq!(
             target_album_dir(Bucket::Singles, &info, &c, "Crazy"),
             "Beyonce/Singles/Crazy"
         );
-        // Unknown artist falls back to the various-artist singles area.
+        // Unknown artist: singles are never filed under Various Artists.
         let mut anon = info.clone();
         anon.album_artist = String::new();
         assert_eq!(
             target_album_dir(Bucket::Singles, &anon, &c, "Crazy"),
-            "Various Artists/Singles/ - Crazy"
+            "Unknown Artist/Singles/Crazy"
         );
         // Live single stays distinct from the studio version.
         let mut live = info.clone();
@@ -2123,11 +2268,12 @@ mod tests {
         tags.track = Some(1);
         let files: Vec<(String, TrackTags)> =
             vec![("Old Dir/01 - Song.flac".into(), tags)];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Old Dir", "", None);
+        let plan = build_group_plan(&root, &Config::default(), &files, "Old Dir", "", None, "");
         assert_ne!(plan.target_dir, "Old Dir");
         apply_group_plan(&root, &plan, true).unwrap();
         let target = root.join(&plan.target_dir);
-        assert!(target.join("01 - Song.flac").exists());
+        // Default file schema is "{albumArtist} {album} {track:02} - {title}".
+        assert!(target.join("Artist New Album 01 - Song.flac").exists());
         assert!(target.join("folder.jpg").exists());
         assert!(target.join("album.sfv").exists());
         assert!(target.join("cd.png").exists());
@@ -2323,16 +2469,25 @@ mod tests {
         let root = std::env::temp_dir().join(format!("nd-organizer-year-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("Album")).unwrap();
-        fs::write(root.join("Album/01 - Song.flac"), b"x").unwrap();
-        let t = |year: Option<u32>| TrackTags {
+        for n in ["01 - Song.flac", "02 - Song.flac", "03 - Song.flac"] {
+            fs::write(root.join("Album").join(n), b"x").unwrap();
+        }
+        let t = |year: Option<u32>, track: u32| TrackTags {
             album_artist: "Artist".into(),
             album: "Album".into(),
             title: "Song".into(),
-            track: Some(1),
+            track: Some(track),
             year,
             ..Default::default()
         };
-        let files = vec![("Album/01 - Song.flac".to_string(), t(None))];
+        // 3 files with distinct track numbers (so they are not duplicates):
+        // a full album, so the (year) folder rendering under test is
+        // exercised (smaller groups would classify as Singles).
+        let files: Vec<(String, TrackTags)> = ["01", "02", "03"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("Album/{n} - Song.flac"), t(None, i as u32 + 1)))
+            .collect();
         // Missing tag year -> MB release date fills it: "(1991)".
         let plan = build_group_plan(
             &root,
@@ -2341,14 +2496,19 @@ mod tests {
             "Album",
             "",
             Some("1991-09-12"),
+            "",
         );
         assert!(plan.target_dir.ends_with("Album (1991)"), "{}", plan.target_dir);
         // No tag year and no MB date -> empty parens are stripped.
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None);
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
         assert!(plan.target_dir.ends_with("Album"), "{}", plan.target_dir);
         assert!(!plan.target_dir.contains("()"), "{}", plan.target_dir);
         // Year 0 in tags is invalid -> MB date wins.
-        let files0 = vec![("Album/01 - Song.flac".to_string(), t(Some(0)))];
+        let files0: Vec<(String, TrackTags)> = ["01", "02", "03"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("Album/{n} - Song.flac"), t(Some(0), i as u32 + 1)))
+            .collect();
         let plan = build_group_plan(
             &root,
             &Config::default(),
@@ -2356,9 +2516,104 @@ mod tests {
             "Album",
             "",
             Some("2003"),
+            "",
         );
         assert!(plan.target_dir.ends_with("Album (2003)"), "{}", plan.target_dir);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn group_plan_year_falls_back_to_existing_nfo() {
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-nfoyear-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Renegades")).unwrap();
+        // The NFO an earlier enrich pass wrote carries the year the tags lack.
+        fs::write(
+            root.join("Renegades/album.nfo"),
+            "<?xml version=\"1.0\"?><album><title>Renegades</title><year>2000</year></album>",
+        )
+        .unwrap();
+        let t = |n: u32| TrackTags {
+            album_artist: "Rage Against the Machine".into(),
+            album: "Renegades".into(),
+            title: "Song".into(),
+            track: Some(n),
+            year: None,
+            ..Default::default()
+        };
+        let files: Vec<(String, TrackTags)> = ["01", "02", "03"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("Renegades/{n} - Song.mp3"), t(i as u32 + 1)))
+            .collect();
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        assert!(plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
+        // read_nfo off -> NFO ignored, no year.
+        let mut cfg = Config::default();
+        cfg.read_nfo = false;
+        let plan = build_group_plan(&root, &cfg, &files, "Renegades", "", None, "");
+        assert!(!plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn group_plan_disambiguation_renders_and_strips_empty() {
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-disamb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Album")).unwrap();
+        let t = |n: u32| TrackTags {
+            album_artist: "Artist".into(),
+            album: "Album".into(),
+            title: "Song".into(),
+            track: Some(n),
+            year: Some(2026),
+            ..Default::default()
+        };
+        let files: Vec<(String, TrackTags)> = ["01", "02", "03"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("Album/{n} - Song.flac"), t(i as u32 + 1)))
+            .collect();
+        let plan = build_group_plan(
+            &root, &Config::default(), &files, "Album", "", None, "deluxe edition",
+        );
+        assert!(plan.target_dir.contains("(deluxe edition)"), "{}", plan.target_dir);
+        // No disambiguation -> the " ()" group is stripped.
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
+        assert!(!plan.target_dir.contains("()"), "{}", plan.target_dir);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_file_artist_patterns() {
+        // Plain "Artist - Title".
+        assert_eq!(parse_file_artist("Rihanna - Umbrella.flac").as_deref(), Some("Rihanna"));
+        // Feat act kept (the real-world Now-compilation name).
+        assert_eq!(
+            parse_file_artist(
+                "Rihanna Feat. Drake Now That's What I Call Music, Vol. 78 Disc 2 04 - Rihann.flac"
+            )
+            .as_deref(),
+            Some("Rihanna Feat. Drake")
+        );
+        // Dash form with feat.
+        assert_eq!(
+            parse_file_artist("Jay-Z feat. Alicia Keys - Empire State of Mind.mp3").as_deref(),
+            Some("Jay-Z feat. Alicia Keys")
+        );
+        // Leading track number is a track, not an artist.
+        assert_eq!(parse_file_artist("01 - Dream On.flac"), None);
+        assert_eq!(parse_file_artist("01 Dream On.flac"), None);
+        // Placeholders rejected.
+        assert_eq!(parse_file_artist("Unknown Artist - Song.flac"), None);
+        assert_eq!(parse_file_artist("Various Artists - Song.flac"), None);
+        // No dash: first word only.
+        assert_eq!(
+            parse_file_artist("Metallica ...And Justice for All 01 - Blackened.flac").as_deref(),
+            Some("Metallica")
+        );
     }
 
     #[test]
@@ -2399,7 +2654,7 @@ mod tests {
             ("Album/01 - Intro.flac".to_string(), t1),
             ("Album/02 - Real Song.flac".to_string(), t2),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None);
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
         assert_eq!(plan.fillers.len(), 1);
         assert!(plan.fillers[0].contains("01 - Intro.flac"));
         // Albums stay whole: no subfolder routing, every file moves to album root.
@@ -2468,7 +2723,7 @@ mod tests {
             ("A/03 - Song.flac".to_string(), t1.clone()),
             ("B/03 - Song.flac".to_string(), t1),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None);
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
         assert_eq!(plan.duplicates.len(), 1, "one duplicate pair");
         // Winner is the first file; the loser routes to the artist's Singles folder.
         assert_eq!(plan.duplicates[0].winner, "A/03 - Song.flac");
@@ -2505,7 +2760,7 @@ mod tests {
             ("A/03 - Song.flac".to_string(), t1.clone()),
             ("B/03 - Song.flac".to_string(), t1),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None);
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
         assert!(
             plan.duplicates.is_empty(),
             "not 100% same -> not a confirmed duplicate"
@@ -2538,7 +2793,7 @@ mod tests {
             ("One/1.flac".to_string(), tags),
             ("Two/2.flac".to_string(), tags2),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None);
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
         assert_eq!(plan.moves.len(), 2);
         // Both land in the same target album dir.
         assert!(plan

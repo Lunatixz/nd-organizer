@@ -18,6 +18,8 @@ pub struct MbRelease {
     pub secondary_types: Vec<String>,
     pub title: String,
     pub date: Option<String>,
+    /// Release disambiguation comment (e.g. "deluxe edition"); empty when none.
+    pub disambiguation: String,
 }
 
 fn urlenc(s: &str) -> String {
@@ -109,6 +111,8 @@ struct RawRelease {
     #[serde(default)]
     date: Option<String>,
     #[serde(default)]
+    disambiguation: Option<String>,
+    #[serde(default)]
     #[serde(rename = "release-group")]
     release_group: Option<RawReleaseGroup>,
 }
@@ -149,6 +153,7 @@ fn parse_releases(v: &Value, _artist: &str, album: &str) -> Option<MbRelease> {
                 secondary_types: group.map(|g| g.secondary_types.clone()).unwrap_or_default(),
                 title: r.title,
                 date: r.date,
+                disambiguation: r.disambiguation.unwrap_or_default(),
             },
         ))
     });

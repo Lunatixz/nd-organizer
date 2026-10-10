@@ -19,6 +19,8 @@ pub struct TemplateFields {
     pub album_artist: String,
     pub album: String,
     pub year: Option<u32>,
+    /// MusicBrainz release disambiguation comment (e.g. "deluxe edition").
+    pub disambiguation: String,
     pub genre: String,
     /// "Live"/"Bootleg"/"" (recording source, so live tracks are never
     /// confused with studio releases).
@@ -36,6 +38,7 @@ impl TemplateFields {
             "artist" => Some(self.artist.clone()),
             "albumArtist" => Some(self.album_artist.clone()),
             "album" => Some(self.album.clone()),
+            "disambiguation" => Some(self.disambiguation.clone()),
             "genre" => Some(self.genre.clone()),
             "recording" => Some(self.recording.clone()),
             "mbid" => Some(self.mbid.clone()),
@@ -212,7 +215,7 @@ pub fn translate_lidarr_format(fmt: &str) -> String {
         ("{Artist Name}", "{albumArtist}"),
         ("{Artists}", "{artist}"),
         ("{Artist Disambiguation}", ""),
-        ("{Album Disambiguation}", ""),
+        ("{Album Disambiguation}", "{disambiguation}"),
         ("{Label}", ""),
         ("{Catalog Number}", ""),
         ("{Track Title First Character}", ""),
@@ -235,6 +238,7 @@ mod tests {
             album_artist: "Various Artists".into(),
             album: "Rock: 70's".into(),
             year: Some(1973),
+            disambiguation: String::new(),
             genre: "Rock".into(),
             recording: String::new(),
             mbid: "abc-123".into(),
@@ -263,6 +267,18 @@ mod tests {
     }
 
     #[test]
+    fn disambiguation_placeholder_renders() {
+        let mut f = fields();
+        f.disambiguation = "deluxe edition".into();
+        assert_eq!(
+            render("{album} ({disambiguation})", &f),
+            "Rock: 70's (deluxe edition)"
+        );
+        f.disambiguation = String::new();
+        assert_eq!(render("{album} ({disambiguation})", &f), "Rock: 70's ()");
+    }
+
+    #[test]
     fn lidarr_format_translation() {
         assert_eq!(
             translate_lidarr_format("{Artist Name}/{Album Title} ({Release Year})"),
@@ -275,6 +291,10 @@ mod tests {
         assert_eq!(
             translate_lidarr_format("{Track Title With Artist}"),
             "{artist} - {title}"
+        );
+        assert_eq!(
+            translate_lidarr_format("{Album Title} ({Album Disambiguation})"),
+            "{album} ({disambiguation})"
         );
         // Unknown tokens survive (they render empty downstream).
         assert_eq!(
