@@ -2,7 +2,7 @@
   "id": "nd-organizer",
   "name": "Music Organizer",
   "author": "nd-organizer",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "description": "Organizes your Navidrome library: classifies albums (Soundtrack > Various Artists > Singles > Normal) and renames folders/files to your schemas, preserving live/bootleg recordings. Refreshes tags + artwork from MusicBrainz, Cover Art Archive, iTunes and Last.fm; reads/writes Kodi NFO sidecars; verifies identity (AcoustID fingerprint + tags + names) before writing. Integrates with Lidarr (metadata, naming schema, force-search incomplete albums) and AudioMuse-AI (acoustic tags, re-sync). Dry-run default, change history with rollback, metadata backups, reports + status feed (log webhook). Runs in idle-only batches and rescans Navidrome after moves so playback never hits stale files.",
   "website": "https://github.com/Lunatixz/nd-organizer",
   "permissions": {
@@ -126,7 +126,9 @@
         "logWebhookToken": {
           "type": "string",
           "title": "Log webhook token",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Optional token sent as X-Token and Authorization: Bearer headers."
         },
         "persistenceBackend": {
@@ -507,7 +509,9 @@
         "acoustidApiKey": {
           "type": "string",
           "title": "AcoustID API key",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Required for AcoustID lookup/fingerprinting. https://acoustid.org/new-application"
         },
         "acoustidUrl": {
@@ -543,19 +547,25 @@
         "musicbrainzToken": {
           "type": "string",
           "title": "MusicBrainz API token",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Optional. Raises the rate limit from ~1 to ~50 requests/sec."
         },
         "lastfmApiKey": {
           "type": "string",
           "title": "Last.fm API key",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Optional. Used for genres and user playcounts."
         },
         "lastfmApiSecret": {
           "type": "string",
           "title": "Last.fm API secret",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Required for favorites sync (write methods need an API signature)."
         },
         "lastfmPassword": {
@@ -740,7 +750,9 @@
         "lidarrApiKey": {
           "type": "string",
           "title": "Lidarr API key",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "API key for the Lidarr instance above (Lidarr: Settings > General)."
         },
         "lidarrMode": {
@@ -838,7 +850,10 @@
           "description": "Delay Navidrome rescans by this many seconds so a burst of changes coalesces into a single scan. 0 = rescan immediately after each change."
         },
         "moveDestinationLibrary": {
-          "type": ["string", "integer"],
+          "type": [
+            "string",
+            "integer"
+          ],
           "title": "Move to library",
           "default": "",
           "description": "Path or name of the library to move processed albums into. Leave empty to keep albums in their current library. Match must be exact (e.g. '/music' or 'Music'). Check the warnings panel for available libraries. If this library is not also listed under 'Organize specific libraries only', it is treated as read-only for moves: it still gets full metadata enrichment, duplicate reports, and empty-folder cleanup, but its files are never moved or renamed. Exception: with a 'Force re-fingerprint' option enabled, confirmed AcoustID matches that correct an artist name also re-file the affected folders and files in this library to match — run a dry pass first to review the moves."
@@ -996,9 +1011,18 @@
           "title": "Scrobble provider",
           "default": "none",
           "oneOf": [
-            { "const": "none", "title": "Off" },
-            { "const": "lastfm", "title": "Last.fm" },
-            { "const": "librefm", "title": "Libre.fm (open-source)" }
+            {
+              "const": "none",
+              "title": "Off"
+            },
+            {
+              "const": "lastfm",
+              "title": "Last.fm"
+            },
+            {
+              "const": "librefm",
+              "title": "Libre.fm (open-source)"
+            }
           ],
           "description": "Which scrobble service to use. Off = no provider-based scrobbling (recommended when Navidrome's own scrobbler already runs). lastfmScrobble can still force Last.fm scrobbles, and listenbrainzScrobble gates ListenBrainz independently. Last.fm is the most popular; Libre.fm is a free open-source alternative with the same API. Both use the same credentials (lastfmApiKey/lastfmUser/lastfmApiSecret). Selecting Libre.fm just changes the API backend."
         },
@@ -1066,7 +1090,9 @@
           "type": "string",
           "title": "Discogs personal access token",
           "default": "",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Discogs API token for fetching release credits (performers, producers, engineers) and community ratings. Get one at https://www.discogs.com/settings/developers"
         },
         "discogsCredits": {
@@ -1079,7 +1105,9 @@
           "type": "string",
           "title": "TheAudioDB API key",
           "default": "",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "TheAudioDB public API key for fetching fanart, artist bios, and album descriptions. Get a free key at https://www.theaudiodb.com/api"
         },
         "theAudioDbFanart": {
@@ -1092,7 +1120,9 @@
           "type": "string",
           "title": "Genius API access token",
           "default": "",
-          "options": { "format": "password" },
+          "options": {
+            "format": "password"
+          },
           "description": "Genius client access token for fetching lyrics, annotations, and artist backgrounds. Register at https://genius.com/api-clients"
         },
         "appleMusicCountries": {
@@ -1321,7 +1351,9 @@
                 {
                   "type": "Control",
                   "scope": "#/properties/navidromeAdminPassword",
-                  "options": { "format": "password" }
+                  "options": {
+                    "format": "password"
+                  }
                 },
                 {
                   "type": "Control",
@@ -1475,7 +1507,9 @@
             {
               "type": "Control",
               "scope": "#/properties/musicbrainzToken",
-              "options": { "format": "password" }
+              "options": {
+                "format": "password"
+              }
             }
           ]
         },
@@ -1498,7 +1532,9 @@
             {
               "type": "Control",
               "scope": "#/properties/acoustidApiKey",
-              "options": { "format": "password" }
+              "options": {
+                "format": "password"
+              }
             },
             {
               "type": "Control",
@@ -1564,7 +1600,9 @@
               "type": "Control",
               "scope": "#/properties/lastfmApiKey",
               "description": "API key for Last.fm (or Libre.fm API key if scrobble provider is Libre.fm)",
-              "options": { "format": "password" }
+              "options": {
+                "format": "password"
+              }
             },
             {
               "type": "Control",
@@ -1742,7 +1780,9 @@
             {
               "type": "Control",
               "scope": "#/properties/discogsToken",
-              "options": { "format": "password" }
+              "options": {
+                "format": "password"
+              }
             },
             {
               "type": "Control",
@@ -1761,7 +1801,9 @@
             {
               "type": "Control",
               "scope": "#/properties/theAudioDbKey",
-              "options": { "format": "password" }
+              "options": {
+                "format": "password"
+              }
             },
             {
               "type": "Control",
@@ -1780,7 +1822,9 @@
             {
               "type": "Control",
               "scope": "#/properties/geniusToken",
-              "options": { "format": "password" }
+              "options": {
+                "format": "password"
+              }
             }
           ]
         },

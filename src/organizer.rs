@@ -359,7 +359,7 @@ impl AlbumInfo {
             self.album_artist = nfo.album_artists.first().cloned().unwrap_or_default();
         }
         if self.year.is_none() {
-            self.year = nfo.year;
+            self.year = nfo.effective_year();
         }
         if self.genre.is_empty() {
             self.genre = first_of(&nfo.genres, &nfo.styles, &nfo.moods);
@@ -1100,6 +1100,62 @@ pub(crate) fn singles_target(
     target
 }
 
+/// Strip a trailing " (YYYY)" year suffix: "Album (2000)" -> "Album".
+fn strip_year_suffix(name: &str) -> &str {
+    let cut = name.len().wrapping_sub(7);
+    if name.len() > 7 && name.ends_with(')') && name.is_char_boundary(cut) {
+        let tail = &name[cut..];
+        if tail.starts_with(" (") && tail[2..6].bytes().all(|c| c.is_ascii_digit()) {
+            return &name[..cut];
+        }
+    }
+    name
+}
+
+/// The schema renders a yearless folder while a "(YYYY)" variant of the same
+/// album already sits beside it (or vice versa): adopt the existing year'd
+/// sibling as the target so twin folders merge instead of coexisting.
+/// Cross-artist targets and ambiguous multi-year siblings are left alone.
+fn adopt_year_variant(root: &Path, files: &[(String, TrackTags)], target: &str) -> String {
+    let Some((rel, _)) = files.first() else {
+        return target.to_string();
+    };
+    // Siblings live beside the album dir, in its parent.
+    let album_dir = match rel.rsplit_once('/') {
+        Some((d, _)) => d,
+        None => "",
+    };
+    let album_parent = match album_dir.rsplit_once('/') {
+        Some((d, _)) => d,
+        None => "",
+    };
+    let Some((t_parent, t_base)) = target.rsplit_once('/') else {
+        return target.to_string();
+    };
+    if !t_parent.eq_ignore_ascii_case(album_parent) {
+        return target.to_string();
+    }
+    if strip_year_suffix(t_base).len() != t_base.len() {
+        return target.to_string();
+    }
+    let Ok(rd) = std::fs::read_dir(root.join(album_parent)) else {
+        return target.to_string();
+    };
+    let yeared: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| {
+            strip_year_suffix(n).eq_ignore_ascii_case(t_base) && !n.eq_ignore_ascii_case(t_base)
+        })
+        .collect();
+    if yeared.len() == 1 {
+        format!("{t_parent}/{}", yeared[0])
+    } else {
+        target.to_string()
+    }
+}
+
 /// Build a change plan for a whole album group. `folder_hint` names the album
 /// when it has no metadata at all.
 pub fn build_group_plan(
@@ -1151,7 +1207,7 @@ pub fn build_group_plan(
         if let Some((rel, _)) = files.first() {
             let dir = root.join(rel.rsplit_once('/').map(|(d, _)| d).unwrap_or(""));
             if let Some(nfo) = crate::nfo::read_album_nfo(&dir) {
-                info.year = nfo.year.filter(|y| (1000..=2999).contains(y));
+                info.year = nfo.effective_year();
             }
         }
     }
@@ -1160,7 +1216,11 @@ pub fn build_group_plan(
         .first()
         .map(|(_, t)| t.title.clone())
         .unwrap_or_default();
-    let target_dir = target_album_dir(bucket, &info, cfg, &first_title);
+    let target_dir = adopt_year_variant(
+        root,
+        files,
+        &target_album_dir(bucket, &info, cfg, &first_title),
+    );
     let opts = sanitize_opts(cfg);
     let mut plan = GroupPlan {
         bucket,
@@ -2554,6 +2614,122 @@ mod tests {
         cfg.read_nfo = false;
         let plan = build_group_plan(&root, &cfg, &files, "Renegades", "", None, "");
         assert!(!plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn group_plan_year_falls_back_to_nfo_releasedate() {
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-ndreleasedate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Renegades")).unwrap();
+        // Real-world NFOs often only carry <releasedate>, never <year>.
+        fs::write(
+            root.join("Renegades/album.nfo"),
+            "<?xml version=\"1.0\"?><album><title>Renegades</title><releasedate>11/28/2000</releasedate></album>",
+        )
+        .unwrap();
+        let t = |n: u32| TrackTags {
+            album_artist: "Rage Against the Machine".into(),
+            album: "Renegades".into(),
+            title: "Song".into(),
+            track: Some(n),
+            year: None,
+            ..Default::default()
+        };
+        let files: Vec<(String, TrackTags)> = ["01", "02", "03"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("Renegades/{n} - Song.mp3"), t(i as u32 + 1)))
+            .collect();
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        assert!(plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn group_plan_adopts_existing_year_sibling() {
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-adoptyear-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // Yearless twin + year'd twin beside it, no year source anywhere:
+        // the yearless group must plan into the year'd folder, not stay put.
+        fs::create_dir_all(root.join("Artist/Renegades")).unwrap();
+        fs::create_dir_all(root.join("Artist/Renegades (2000)")).unwrap();
+        let t = |n: u32| TrackTags {
+            album_artist: "Artist".into(),
+            album: "Renegades".into(),
+            title: "Song".into(),
+            track: Some(n),
+            year: None,
+            ..Default::default()
+        };
+        let files: Vec<(String, TrackTags)> = ["01", "02", "03"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("Artist/Renegades/{n} - Song.mp3"), t(i as u32 + 1)))
+            .collect();
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        assert_eq!(plan.target_dir, "Artist/Renegades (2000)");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn group_plan_yeared_group_not_drained_to_yearless_sibling() {
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-nodrain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // Year'd current dir + no year source: rendered target is yearless and
+        // exists - the plan must stay in the year'd folder, not drain into it.
+        fs::create_dir_all(root.join("Artist/Renegades")).unwrap();
+        fs::create_dir_all(root.join("Artist/Renegades (2000)")).unwrap();
+        let t = |n: u32| TrackTags {
+            album_artist: "Artist".into(),
+            album: "Renegades".into(),
+            title: "Song".into(),
+            track: Some(n),
+            year: None,
+            ..Default::default()
+        };
+        let files: Vec<(String, TrackTags)> = ["01", "02", "03"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    format!("Artist/Renegades (2000)/{n} - Song.flac"),
+                    t(i as u32 + 1),
+                )
+            })
+            .collect();
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        assert_eq!(plan.target_dir, "Artist/Renegades (2000)");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn group_plan_ambiguous_year_siblings_not_adopted() {
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-ambigyear-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // Two year'd variants: ambiguous, leave the rendered target alone.
+        fs::create_dir_all(root.join("Artist/Renegades")).unwrap();
+        fs::create_dir_all(root.join("Artist/Renegades (1999)")).unwrap();
+        fs::create_dir_all(root.join("Artist/Renegades (2000)")).unwrap();
+        let t = |n: u32| TrackTags {
+            album_artist: "Artist".into(),
+            album: "Renegades".into(),
+            title: "Song".into(),
+            track: Some(n),
+            year: None,
+            ..Default::default()
+        };
+        let files: Vec<(String, TrackTags)> = ["01", "02", "03"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("Artist/Renegades/{n} - Song.mp3"), t(i as u32 + 1)))
+            .collect();
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        assert_eq!(plan.target_dir, "Artist/Renegades");
         let _ = fs::remove_dir_all(&root);
     }
 

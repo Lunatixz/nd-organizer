@@ -54,6 +54,16 @@ pub struct NfoArtist {
     pub thumb: String,
 }
 
+impl NfoAlbum {
+    /// Year for folder naming: explicit `<year>`, else derived from
+    /// `<releasedate>` (real-world NFOs often only carry the latter).
+    pub fn effective_year(&self) -> Option<u32> {
+        self.year
+            .or_else(|| parse_releasedate_year(&self.releasedate))
+            .filter(|y| (1000..=2999).contains(y))
+    }
+}
+
 pub fn read_album_nfo(dir: &Path) -> Option<NfoAlbum> {
     let xml = std::fs::read_to_string(dir.join("album.nfo")).ok()?;
     parse_album_nfo(&xml)
@@ -83,6 +93,27 @@ fn parse_year(value: &str) -> Option<u32> {
         .take(4)
         .collect();
     digits.parse().ok()
+}
+
+/// Year from a release date string: first >=4-digit run. Handles both
+/// "2000-11-28" (ISO) and "11/28/2000" (US) - the naive first-4-digits
+/// parse of the US form yields the month+day.
+fn parse_releasedate_year(value: &str) -> Option<u32> {
+    let mut run = String::new();
+    for c in value.chars() {
+        if c.is_ascii_digit() {
+            run.push(c);
+        } else if run.len() >= 4 {
+            return run[..4].parse().ok();
+        } else {
+            run.clear();
+        }
+    }
+    if run.len() >= 4 {
+        run[..4].parse().ok()
+    } else {
+        None
+    }
 }
 
 pub fn parse_album_nfo(xml: &str) -> Option<NfoAlbum> {
@@ -324,6 +355,25 @@ mod tests {
         assert_eq!(nfo.styles, vec!["Progressive Rock"]);
         assert_eq!(nfo.moods, vec!["Brooding"]);
         assert!(!nfo.mbid.is_empty());
+    }
+
+    #[test]
+    fn effective_year_prefers_year_then_releasedate() {
+        // Real-world NFOs often only carry <releasedate>.
+        let nfo = parse_album_nfo(
+            "<album><title>T</title><releasedate>11/28/2000</releasedate></album>",
+        )
+        .unwrap();
+        assert_eq!(nfo.effective_year(), Some(2000));
+        // Explicit <year> wins.
+        let nfo = parse_album_nfo(
+            "<album><title>T</title><year>1999</year><releasedate>11/28/2000</releasedate></album>",
+        )
+        .unwrap();
+        assert_eq!(nfo.effective_year(), Some(1999));
+        // Nothing usable.
+        let nfo = parse_album_nfo("<album><title>T</title></album>").unwrap();
+        assert_eq!(nfo.effective_year(), None);
     }
 
     #[test]
