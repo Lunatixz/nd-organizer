@@ -58,6 +58,22 @@ pub fn parse_album(val: &Value) -> Option<LidarrAlbum> {
     })
 }
 
+/// Read a cached find_album entry. The cache holds the RAW Lidarr payload
+/// (nested artist object, artistId). Entries from older versions cached the
+/// flat struct instead — those parse with artist_id=0 and are rejected so the
+/// caller falls through to a live lookup. Null = cached "not found".
+pub fn parse_cached_album(val: &Value) -> Option<LidarrAlbum> {
+    if val.is_null() {
+        return None;
+    }
+    let a = parse_album(val)?;
+    if a.id > 0 && a.artist_id > 0 {
+        Some(a)
+    } else {
+        None
+    }
+}
+
 fn url_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -196,7 +212,13 @@ pub mod host_lidarr {
         );
         if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
             if let Ok(val) = serde_json::from_slice::<Value>(&v) {
-                return parse_album(&val);
+                if val.is_null() {
+                    return None; // cached "not found"
+                }
+                if let Some(a) = parse_cached_album(&val) {
+                    return Some(a);
+                }
+                // legacy flat-struct entry (artist_id=0): re-lookup below
             }
         }
         let base = base_url(cfg);
@@ -204,7 +226,7 @@ pub mod host_lidarr {
             "{base}/api/v1/album/lookup?term={}",
             url_encode(&format!("{artist} {album}"))
         );
-        let mut found: Option<LidarrAlbum> = match lidarr_send(cfg, "GET", url, vec![]) {
+        let mut found: Option<(LidarrAlbum, Value)> = match lidarr_send(cfg, "GET", url, vec![]) {
             Ok(Some(resp)) if resp.status_code == 200 => {
                 let body = String::from_utf8_lossy(&resp.body).into_owned();
                 serde_json::from_str::<Value>(&body)
@@ -216,7 +238,7 @@ pub mod host_lidarr {
                             if a.title.eq_ignore_ascii_case(album)
                                 && a.artist.eq_ignore_ascii_case(artist)
                             {
-                                Some(a)
+                                Some((a, it.clone()))
                             } else {
                                 None
                             }
@@ -226,7 +248,7 @@ pub mod host_lidarr {
             _ => None,
         };
         // If the lookup lacks statistics, fetch the album detail for the count.
-        if let Some(a) = &found {
+        if let Some((a, _)) = &found {
             if a.track_count.is_none() {
                 let url = format!("{base}/api/v1/album/{}", a.id);
                 if let Ok(Some(resp)) = lidarr_send(cfg, "GET", url, vec![]) {
@@ -238,19 +260,22 @@ pub mod host_lidarr {
                                     .and_then(|s| s.get("trackCount"))
                                     .and_then(|t| t.as_i64())
                                     .or(a.track_count);
-                                found = Some(a2);
+                                // Cache the raw detail payload (full artist object).
+                                found = Some((a2, v));
                             }
                         }
                     }
                 }
             }
         }
+        // Cache the RAW Lidarr payload — parse_album on the flat struct loses
+        // artist/artist_id (nested fields), which used to send artistIds:[0].
         let cached = match &found {
-            Some(a) => serde_json::to_value(a).unwrap_or_else(|_| Value::Null),
+            Some((_, raw)) => raw.clone(),
             None => Value::Null,
         };
         let _ = crate::store::kv().set_with_ttl(&cache_key, cached.to_string().into_bytes(), 86_400);
-        found
+        found.map(|(a, _)| a)
     }
 
     /// Lidarr's single/EP for (artist, track title), when the artist is
@@ -550,6 +575,39 @@ mod tests {
         assert_eq!(a.artist_id, 99);
         assert!(a.monitored && a.artist_monitored);
         assert_eq!(a.track_count, Some(26));
+    }
+
+    #[test]
+    fn cached_raw_roundtrips_but_legacy_flat_struct_is_rejected() {
+        let raw = json!({
+            "id": 42,
+            "title": "The Wall",
+            "monitored": true,
+            "artistId": 99,
+            "artist": { "id": 99, "artistName": "Pink Floyd", "monitored": true },
+            "statistics": { "trackCount": 26 }
+        });
+        let a = parse_cached_album(&raw).unwrap();
+        assert_eq!(a.artist, "Pink Floyd");
+        assert_eq!(a.artist_id, 99);
+
+        // What the old cache write (serde of the flat struct) produced:
+        let legacy = serde_json::to_value(LidarrAlbum {
+            id: 42,
+            title: "The Wall".into(),
+            artist: "Pink Floyd".into(),
+            artist_id: 99,
+            monitored: true,
+            artist_monitored: true,
+            track_count: Some(26),
+        })
+        .unwrap();
+        // Flat `artist_id` key + string `artist` → parse gives artist_id=0 →
+        // rejected, so callers fall through to a live lookup instead of
+        // sending artistIds:[0].
+        assert!(parse_cached_album(&legacy).is_none());
+        // Null = cached "not found".
+        assert!(parse_cached_album(&Value::Null).is_none());
     }
 
     #[test]

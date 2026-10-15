@@ -810,11 +810,10 @@ pub fn index_step(
         }
         // Delete cursor AFTER paths_key is written — group checks cursor to defer.
         let _ = crate::store::kv().delete(&cursor_key);
-        // Pre-cache the unverified list as paths only (no mtimes) so verify_step
-        // doesn't need to recompute from the full indexed key (which times out WASM).
-        let unverified_key = format!("scan.unverified.{library_id}");
-        let unverified_paths: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
-        let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&unverified_paths).unwrap_or_default());
+        // ponytail: no unverified pre-cache here — it stored paths WITHOUT
+        // mtimes (the sidecar rejects mtime=0 entries) and without the
+        // verified-filter, so verify re-swept everything and never landed
+        // results. load_unverified's recompute writes pairs + filter instead.
         let _ = crate::store::kv().set(
             &pass_key,
             (pass_count + processed).to_string().into_bytes(),
@@ -841,21 +840,15 @@ fn load_unverified(
     indexed_key: &str,
     unverified_key: &str,
 ) -> Vec<(String, i64)> {
-    // Try to load from unverified key. Handle both formats:
-    // - New: Vec<String> (paths only, written by index)
-    // - Old: Vec<(String, i64)> (paths + mtimes, from previous runs)
+    // Try to load from unverified key: Vec<(String, i64)> (paths + mtimes).
+    // Legacy paths-only entries fail this parse and fall through to the
+    // recompute, which recovers mtimes from the index (the sidecar validates
+    // mtime before fingerprinting) and applies the verified-filter.
     crate::store::kv()
         .get(unverified_key)
         .ok()
         .flatten()
-        .and_then(|v| {
-            // Try new paths-only format first.
-            if let Ok(paths) = serde_json::from_slice::<Vec<String>>(&v) {
-                return Some(paths.into_iter().map(|p| (p, 0i64)).collect());
-            }
-            // Fall back to old format.
-            serde_json::from_slice(&v).ok()
-        })
+        .and_then(|v| serde_json::from_slice::<Vec<(String, i64)>>(&v).ok())
         .unwrap_or_else(|| {
             crate::wasm::log_info("verify_step: recomputing unverified list from indexed key");
             let recompute_start = std::time::SystemTime::now();
@@ -1120,20 +1113,35 @@ pub fn verify_step(
 }
 
 
+/// Apply sidecar verify results to KV. Returns (ok count, rel paths processed).
 fn _process_verify_results(
     cfg: &Config,
     root: &std::path::Path,
     library_id: i32,
     result: &serde_json::Value,
-) -> Result<usize, String> {
+) -> Result<(usize, Vec<String>), String> {
     let results = result.get("results").and_then(|r| r.as_object()).cloned().unwrap_or_default();
     let mode_apply = cfg.mode == Mode::Apply;
     let write_budget = std::time::Duration::from_secs(10);
     let write_start = std::time::SystemTime::now();
     let mut processed = 0usize;
+    let mut failed = 0usize;
     let mut filled = 0usize;
     let mut written = 0usize;
-    for (path, entry) in &results {
+    let mut done: Vec<String> = Vec::new();
+    for (idx, entry) in &results {
+        if entry.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+            // Failed / mtime-rejected: leave it in the unverified list so the
+            // next round retries it (sidecar idempotency makes retries cheap).
+            failed += 1;
+            continue;
+        }
+        // Sidecar keys results by batch index; entries carry their own path.
+        let path = entry
+            .get("path")
+            .and_then(|p| p.as_str())
+            .filter(|p| !p.is_empty())
+            .unwrap_or(idx);
         let rel = path.trim_start_matches(&root.to_string_lossy().to_string())
             .trim_start_matches('/');
         let key = file_key(library_id, rel);
@@ -1196,6 +1204,7 @@ fn _process_verify_results(
             }
         }
         processed += 1;
+        done.push(rel.to_string());
     }
     let fill_note = if filled > 0 {
         format!(", filled artist on {filled} placeholder track(s) ({written} file tag(s) written)")
@@ -1203,10 +1212,10 @@ fn _process_verify_results(
         String::new()
     };
     crate::wasm::log_info(&format!(
-        "verify_step: processed {} results from sidecar{}",
-        processed, fill_note
+        "verify_step: processed {} results from sidecar ({} failed, kept for retry){}",
+        processed, failed, fill_note
     ));
-    Ok(processed)
+    Ok((processed, done))
 }
 
 
@@ -1221,7 +1230,7 @@ fn _complete_verify_job(
     unverified_key: &str,
     job_id_key: &str,
 ) -> Result<(ScanOutcome, usize), String> {
-    let processed = _process_verify_results(cfg, root, library_id, result)?;
+    let (processed, done) = _process_verify_results(cfg, root, library_id, result)?;
     // Cleanup job
     let _ = crate::store::kv().delete(job_id_key);
     let _ = host::http::send(host::http::HTTPRequest {
@@ -1233,14 +1242,18 @@ fn _complete_verify_job(
         timeout_ms: 5_000,
     });
 
-    // Remove processed files from unverified list
-    let remaining: Vec<(String, i64)> = unverified.iter().skip(processed).cloned().collect();
+    // Remove files the sidecar actually processed (path-based — results can
+    // fail per file, so a positional skip would drop the wrong entries).
+    let remaining: Vec<(String, i64)> = unverified
+        .iter()
+        .filter(|(r, _)| !done.iter().any(|d| d == r))
+        .cloned()
+        .collect();
     if remaining.is_empty() {
         let _ = crate::store::kv().delete(unverified_key);
     } else {
-        // Save as paths only to keep KV value small.
-        let remaining_paths: Vec<String> = remaining.iter().map(|(r, _)| r.clone()).collect();
-        let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&remaining_paths).unwrap_or_default());
+        // Keep mtimes — the sidecar validates them before fingerprinting.
+        let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&remaining).unwrap_or_default());
         // Reset cursor since the list was truncated — next send starts from the beginning.
         let _ = crate::store::kv().delete(&format!("verify_cursor.{}", library_id));
         // If sidecar returned 0 results but files remain, log it.
@@ -1749,8 +1762,9 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     // and a late/duplicate group task must no-op instead of re-grouping.
     let _ = crate::store::kv().delete(&format!("scan.group_paths.{library_id}"));
     // Identity gate queue: files below minConfidence for Singles routing.
-    // Meta-only libraries never move, so nothing is queued there.
-    if !meta_only && !failed.is_empty() {
+    // Singles are a structural move (not a fingerprint reparse) so they
+    // route in every library including meta-only.
+    if !failed.is_empty() {
         let rels: Vec<&String> = failed.iter().map(|(r, _)| r).collect();
         crate::store::kv()
             .set(
@@ -1772,12 +1786,6 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
 /// group_step in budgeted chunks; consumed entries never stick even when
 /// skipped, so the queue always converges.
 pub fn plan_singles_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), String> {
-    // The destination library never moves: drop any queue left over from
-    // before it became meta-only instead of routing it.
-    if crate::wasm::meta_only_library(cfg).is_some_and(|id| id == library_id) {
-        let _ = crate::store::kv().delete(&format!("scan.singles.{library_id}"));
-        return Ok((0, 0));
-    }
     let root = lib_root(library_id)?;
     // moveDestinationLibrary: singles land in the destination library, same
     // contract as plan_move_step's cross-library relocation.
@@ -2360,7 +2368,10 @@ pub fn plan_move_step(
             // rule so its post-move path mapping stays truthful.
             let force_moves = cfg.enable_library_rename
                 && (cfg.force_fingerprint || cfg.force_refingerprint_unknown_artist);
-            if plan.bucket == crate::organizer::Bucket::Singles || !force_moves {
+            // Singles moves are structural (not fingerprint reparse) so
+            // they bypass the force_moves gate; album re-organization
+            // still requires it.
+            if plan.bucket != crate::organizer::Bucket::Singles && !force_moves {
                 plan.moves.clear();
             }
         } else if plan.bucket == crate::organizer::Bucket::Singles

@@ -1,3 +1,68 @@
+# HANDOFF - nd-organizer session state (2026-10-15, v3.1.3 verify/AcoustID/Lidarr/ReplayGain fixes)
+
+Read `AGENTS.md` first (repo rules: scope = this repo + 5 sidecar dirs only
+`acoustid/ webhook/ proxy/ mysql/ essentia/`; Navidrome = logs + plugin config
+edits only, NEVER Navidrome's own code).
+
+## Deployed (2026-10-15) - v3.1.3, pipeline bugfixes + doc audit
+
+- **AcoustID verify (scan.rs) - 3 real bugs fixed**: (1) index pre-cached the
+  unverified list WITHOUT mtimes, so every file was sent with mtime=0 and the
+  sidecar rejected all of them before fingerprinting (0 lookups ever); the
+  pre-cache is gone - `load_unverified` now always loads/writes (path, mtime)
+  pairs and legacy paths-only entries fall through to the filtered recompute
+  (which recovers mtimes from the index). (2) `_process_verify_results` treated
+  the sidecar's integer-batch-index result keys as file paths, so NO KV write
+  ever landed (`_acoustid_checked` never set, files resent every pass); results
+  are now keyed by each entry's own `path` field, failed entries are kept for
+  retry (path-based removal in `_complete_verify_job` replaces the positional
+  `skip(processed)`), and the remaining list is saved as pairs again.
+  Sidecar stats explained: lookups=0, matches=0, errors=886701.
+- **Lidarr find_album cache roundtrip (lidarr.rs)**: the cache was WRITTEN as
+  the flat struct (`artist` string, `artist_id`) but READ through `parse_album`
+  (expects raw payload with nested `artist.artistName` + `artistId`), so every
+  cache hit returned `artist=""`, `artist_id=0` -> `refresh_artist(0)` sent
+  `artistIds:[0]` (17 empty-label submissions). Now caches the RAW Lidarr
+  payload; read goes through new `parse_cached_album` (null = cached miss,
+  rejects legacy flat entries with artist_id=0, falls through to a live
+  lookup). New test: cached_raw_roundtrips_but_legacy_flat_struct_is_rejected.
+- **ReplayGain parser (acoustid/server.py)**: `replaygain()` required "LUFS" on
+  the SAME line as "Integrated loudness:", but ffmpeg prints the value on the
+  NEXT line ("I: -8.9 LUFS") - every call failed ("could not compute
+  loudness"), replaygains=0 forever. Parser now matches value lines
+  (`I:`/`Peak:` startswith). Patched /app/server.py in the running container
+  via docker exec + restarted sidecar; verified end-to-end
+  (POST /replaygain -> ok:true, integrated/peak parsed). Root cause of the
+  886k sidecar errors (replaygain POSTs + fpcalc-era noise). NOTE: the image
+  still serves the OLD server.py until GHCR is rebuilt - the container file
+  was patched in place; a container recreate reverts it. Commit + tag rebuilds.
+- **AudioMuse**: config `audiomuseToken` (64-char, from sidecar config.py)
+  was written via PUT {"config":"<json string>"} (top-level fields are
+  ignored, nested object 400s). `GET /api/analysis?artist=&track=` EXISTS
+  (401 unauthenticated, not 404) - per-track acoustic tags were only ever
+  blocked by the empty token. Endpoint check done via webhook-container probe.
+- **Docs audited against code**: README - sources bullet (Apple Music notes,
+  TADB artwork/genre only, Genius lyrics only), verifyAcoustic wording
+  (voice/instrumental classifier + HPSS vocal ratio, NOT mood_acoustic),
+  NFO-written-once vs per-source tags, Metadata Source Matrix (dropped
+  Album Title/Year rows - nothing writes them; Track Title/Artist = MusicBrainz
+  only; TADB bio/image Xs dropped; Mood/synced-lyrics rows were misaligned),
+  fallback-chain lines (genre rotates genreSource with Essentia leg separate;
+  lyrics = LRCLIB always first, Genius only when lyricsSource=genius;
+  BPM/Key/Mood = AudioMuse primary, Essentia tag writes when
+  genreSource=essentia), verify phase (MBID writeback, ISRC read-only),
+  forceRefingerprintUnknownArtist documented. manifest.json: version 3.1.3,
+  verifyAcoustic/TADB/Genius descriptions + section labels corrected,
+  verifyIdentity description now matches reality (gates enrich/meta-gate +
+  logging only - routing is minConfidence + skipUnverified, partition always
+  runs at scan.rs:1573), force* "Requires verifyIdentity" dropped (they only
+  need acoustidUrl), lyricsSource title/desc fixed.
+- **Tests**: 102/102 (new lidarr cache test). Cargo.toml + manifest both 3.1.3.
+- **Removed**: untracked PLAN.md (stale v3.1.1 plan) + empty
+  test_webhook_pipeline.py.
+- **Live verification pending after deploy**: first AudioMuse re-sync success
+  (no 401), AcoustID lookups > 0 + `_acoustid_checked` writes, lidarr refresh
+  with real artistId, plugin replaygains > 0.
 # HANDOFF — nd-organizer session state (2026-10-07, v3.1.0 force-fingerprint reparse deployed, dry pass running)
 
 Read `AGENTS.md` first (repo rules: scope = this repo + 5 sidecar dirs only

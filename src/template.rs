@@ -98,14 +98,14 @@ fn pad_field(value: &str, fmt: &str) -> String {
 /// Options controlling sanitization. Users can tweak these in the plugin config.
 #[derive(Debug, Clone, Copy)]
 pub struct SanitizeOptions {
-    pub illegal_char_replacement: char,
+    pub illegal_char_replacement: Option<char>,
     pub max_name_length: usize,
 }
 
 impl Default for SanitizeOptions {
     fn default() -> Self {
         SanitizeOptions {
-            illegal_char_replacement: '_',
+            illegal_char_replacement: Some('_'),
             max_name_length: 180,
         }
     }
@@ -129,13 +129,13 @@ fn is_reserved_windows(name: &str) -> bool {
 pub fn sanitize_with(s: &str, opts: &SanitizeOptions) -> String {
     let mut out: String = s
         .chars()
-        .map(|c| {
+        .filter_map(|c| {
             if is_forbidden(c) {
                 opts.illegal_char_replacement
             } else if (c as u32) < 32 {
-                ' '
+                Some(' ')
             } else {
-                c
+                Some(c)
             }
         })
         .collect();
@@ -339,12 +339,22 @@ mod tests {
     #[test]
     fn custom_sanitize_options_apply() {
         let o = SanitizeOptions {
-            illegal_char_replacement: '-',
+            illegal_char_replacement: Some('-'),
             max_name_length: 10,
         };
         assert_eq!(sanitize_with("a/b:c", &o), "a-b-c");
         let long = "x".repeat(50);
         assert_eq!(sanitize_with(&long, &o).chars().count(), 10);
+    }
+
+    #[test]
+    fn empty_replacement_strips_forbidden_chars() {
+        let o = SanitizeOptions {
+            illegal_char_replacement: None,
+            max_name_length: 180,
+        };
+        assert_eq!(sanitize_with("Hungarian Rhapsody: Live in Budapest", &o), "Hungarian Rhapsody Live in Budapest");
+        assert_eq!(sanitize_with("a/b\\c:d*e?f\"g<h>i|j", &o), "abcdefghij");
     }
 
     #[test]

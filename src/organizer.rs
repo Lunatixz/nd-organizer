@@ -192,7 +192,7 @@ pub fn is_excluded(rel: &str, excludes: &[String]) -> bool {
 
 fn sanitize_opts(cfg: &Config) -> SanitizeOptions {
     SanitizeOptions {
-        illegal_char_replacement: cfg.illegal_char_replacement.chars().next().unwrap_or('_'),
+        illegal_char_replacement: cfg.illegal_char_replacement.chars().next(),
         max_name_length: cfg.max_name_length.max(1),
     }
 }
@@ -490,6 +490,9 @@ pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
     let is_soundtrack = genre.contains("soundtrack")
         || genre_is_ost
         || album.contains("soundtrack")
+        || album.contains("original soundtrack")
+        || album.contains("(ost)")
+        || album.contains("- ost ")
         || album.contains("original motion picture")
         || album.contains("music from")
         || album.contains("music inspired by");
@@ -589,18 +592,20 @@ pub fn target_album_dir(
         Bucket::Singles => {
             // Singles are never filed under Various Artists: resolve the real
             // album artist, else a track artist, else "Unknown Artist".
+            // Flat folder — album/track info lives in the filename and tags,
+            // never as a per-track subfolder (matches plan_singles path).
             let mut cands = vec![info.album_artist.as_str()];
             cands.extend(info.distinct_artists.iter().map(String::as_str));
             fields.album_artist = singles_artist(&cands);
             if cfg.singles_under_artist {
                 render_folder_path(
-                    &format!("{{albumArtist}}/{}/{{title}}", cfg.singles_folder),
+                    &format!("{{albumArtist}}/{}", cfg.singles_folder),
                     &fields,
                     &opts,
                 )
             } else {
                 let sub = render_folder_path(
-                    &format!("{}/{{albumArtist}} - {{title}}", cfg.singles_folder),
+                    &format!("{}/{{albumArtist}}", cfg.singles_folder),
                     &fields,
                     &opts,
                 );
@@ -615,8 +620,11 @@ pub fn target_album_dir(
         Bucket::Normal => render_folder_path(&cfg.folder_schema, &fields, &opts),
     };
     // Keep live/bootleg albums distinct from the studio release.
-    let suffix = match info.recording {
-        Recording::Live | Recording::Bootleg => format!(" ({})", info.recording.as_str()),
+    // Singles stay flat — no suffix, it would rename the whole Singles dir.
+    let suffix = match (bucket, info.recording) {
+        (Bucket::Singles, _) => String::new(),
+        (_, Recording::Live) => " (Live)".to_string(),
+        (_, Recording::Bootleg) => " (Bootleg)".to_string(),
         _ => String::new(),
     };
     let rendered = format!("{rendered}{suffix}");
@@ -2155,27 +2163,27 @@ mod tests {
         };
         assert_eq!(
             target_album_dir(Bucket::Singles, &info, &c, "Crazy"),
-            "Beyonce/Singles/Crazy"
+            "Beyonce/Singles"
         );
         // Unknown artist: singles are never filed under Various Artists.
         let mut anon = info.clone();
         anon.album_artist = String::new();
         assert_eq!(
             target_album_dir(Bucket::Singles, &anon, &c, "Crazy"),
-            "Unknown Artist/Singles/Crazy"
+            "Unknown Artist/Singles"
         );
-        // Live single stays distinct from the studio version.
+        // Live single: flat Singles dir, no per-recording folder.
         let mut live = info.clone();
         live.recording = Recording::Live;
         assert_eq!(
             target_album_dir(Bucket::Singles, &live, &c, "Crazy"),
-            "Beyonce/Singles/Crazy (Live)"
+            "Beyonce/Singles"
         );
         // Opting out restores the flat various-artist layout.
         c.singles_under_artist = false;
         assert_eq!(
             target_album_dir(Bucket::Singles, &info, &c, "Crazy"),
-            "Various Artists/Singles/Beyonce - Crazy"
+            "Various Artists/Singles/Beyonce"
         );
     }
 

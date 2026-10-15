@@ -2,7 +2,7 @@
   "id": "nd-organizer",
   "name": "Music Organizer",
   "author": "nd-organizer",
-  "version": "3.1.2",
+  "version": "3.1.3",
   "description": "Organizes your Navidrome library: classifies albums (Soundtrack > Various Artists > Singles > Normal) and renames folders/files to your schemas, preserving live/bootleg recordings. Refreshes tags + artwork from MusicBrainz, Cover Art Archive, iTunes and Last.fm; reads/writes Kodi NFO sidecars; verifies identity (AcoustID fingerprint + tags + names) before writing. Integrates with Lidarr (metadata, naming schema, force-search incomplete albums) and AudioMuse-AI (acoustic tags, re-sync). Dry-run default, change history with rollback, metadata backups, reports + status feed (log webhook). Runs in idle-only batches and rescans Navidrome after moves so playback never hits stale files.",
   "website": "https://github.com/Lunatixz/nd-organizer",
   "permissions": {
@@ -214,7 +214,7 @@
           "type": "boolean",
           "title": "Put singles under the artist's folder",
           "default": true,
-          "description": "Artist/Singles/{title} instead of the Various Artists singles area. Falls back to Various Artists/Singles when the artist is unknown."
+          "description": "Artist/Singles/ instead of the Various Artists singles area. Flat folder - album and track info lives in the filename and tags, never a per-track subfolder. Falls back to Various Artists/Singles when the artist is unknown."
         },
         "singlesEnabled": {
           "type": "boolean",
@@ -447,7 +447,7 @@
           "type": "string",
           "title": "Illegal filename char replacement",
           "default": "_",
-          "description": "Character used to replace characters that are illegal in filenames ( \\ / : * ? \" < > | )."
+          "description": "Character used to replace characters that are illegal in filenames ( \\ / : * ? \" < > | ). Leave empty to strip the illegal characters entirely instead of replacing them."
         },
         "maxNameLength": {
           "type": "integer",
@@ -470,7 +470,7 @@
           "type": "boolean",
           "title": "Verify identity before changing a track",
           "default": true,
-          "description": "Only change a track once its identity is confirmed - fingerprint, embedded tags and filenames all agree. Safer, but files with messy tags may be left in place."
+          "description": "When on, metadata enrichment pauses while the AcoustID sidecar is unreachable (AcoustID must be configured), and status reports unverified counts. Identity verification itself runs whenever the sidecar is configured; minConfidence + skipUnverified decide how unverified files are routed, regardless of this switch."
         },
         "minConfidence": {
           "type": "number",
@@ -720,10 +720,10 @@
             },
             {
               "const": "genius",
-              "title": "Genius (plain + annotations)"
+              "title": "Genius (plain lyrics, LRCLIB fallback)"
             }
           ],
-          "description": "Primary lyrics source. LRCLIB is default (free, no key). Fallback tries other configured sources automatically."
+          "description": "Primary lyrics source. LRCLIB is default (free, no key) and is always tried first. Choosing Genius additionally enables it as a plain-lyrics fallback when LRCLIB has no result."
         },
         "lyricsFormat": {
           "type": "string",
@@ -1060,13 +1060,13 @@
           "type": "boolean",
           "title": "Force re-fingerprint all files",
           "default": false,
-          "description": "Re-fingerprint ALL files via AcoustID even if they already have a MusicBrainz ID. Use this to refresh identity verification across the entire library. A confirmed match (score at or above minConfidence) also fills placeholder track artists (missing / 'Unknown...' / 'Various Artists'), and when every track of an album resolves to one artist the album artist, folder and file names are corrected to match — including inside the 'Move to library' destination, which is otherwise never moved or renamed. Requires verifyIdentity and acoustidUrl."
+          "description": "Re-fingerprint ALL files via AcoustID even if they already have a MusicBrainz ID. Use this to refresh identity verification across the entire library. A confirmed match (score at or above minConfidence) also fills placeholder track artists (missing / 'Unknown...' / 'Various Artists'), and when every track of an album resolves to one artist the album artist, folder and file names are corrected to match — including inside the 'Move to library' destination, which is otherwise never moved or renamed. Requires acoustidUrl."
         },
         "forceRefingerprintUnknownArtist": {
           "type": "boolean",
           "title": "Force re-fingerprint tracks with unknown artist",
           "default": false,
-          "description": "Re-fingerprint tracks where either artist or album_artist is missing meta or contains 'Unknown' (e.g. 'Unknown Artist', 'Unknown Artist (Live)', 'Various Artists'). After AcoustID identifies the track, the artist is filled in and the file joins the normal organize pipeline; when every track of an album resolves to one artist, the album artist, folder and file names are corrected to match — including inside the 'Move to library' destination, which is otherwise never moved or renamed. Requires verifyIdentity and acoustidUrl."
+          "description": "Re-fingerprint tracks where either artist or album_artist is missing meta or contains 'Unknown' (e.g. 'Unknown Artist', 'Unknown Artist (Live)', 'Various Artists'). After AcoustID identifies the track, the artist is filled in and the file joins the normal organize pipeline; when every track of an album resolves to one artist, the album artist, folder and file names are corrected to match — including inside the 'Move to library' destination, which is otherwise never moved or renamed. Requires acoustidUrl."
         },
         "verifyInstrumental": {
           "type": "boolean",
@@ -1078,7 +1078,7 @@
           "type": "boolean",
           "title": "Verify acoustic tracks",
           "default": false,
-          "description": "When enabled, tracks are checked for acoustic performance via Essentia mood_acoustic model. If a track is acoustic but not labeled, '(Acoustic)' is appended to the title. Requires essentiaUrl."
+          "description": "When enabled, tracks are checked for acoustic performance via the sidecar's voice/instrumental classifier and vocal-energy ratio (librosa HPSS fallback). If a track is acoustic but not labeled, '(Acoustic)' is appended to the title. Requires essentiaUrl."
         },
         "acoustidSubmit": {
           "type": "boolean",
@@ -1108,13 +1108,13 @@
           "options": {
             "format": "password"
           },
-          "description": "TheAudioDB public API key for fetching fanart, artist bios, and album descriptions. Get a free key at https://www.theaudiodb.com/api"
+          "description": "TheAudioDB public API key for fetching album artwork and genre tags (genre fallback). Get a free key at https://www.theaudiodb.com/api"
         },
         "theAudioDbFanart": {
           "type": "boolean",
-          "title": "Fetch fanart from TheAudioDB",
+          "title": "Fetch fanart/bios from TheAudioDB",
           "default": false,
-          "description": "When enabled, fetches artist fanart (backgrounds, banners) and album art from TheAudioDB as additional artwork sources. Requires theAudioDbKey."
+          "description": "When enabled, fetches artist fanart/bio data from TheAudioDB. No current feature consumes this data - album artwork and genre tags work without it. Requires theAudioDbKey."
         },
         "geniusToken": {
           "type": "string",
@@ -1123,7 +1123,7 @@
           "options": {
             "format": "password"
           },
-          "description": "Genius client access token for fetching lyrics, annotations, and artist backgrounds. Register at https://genius.com/api-clients"
+          "description": "Genius client access token for fetching plain lyrics (as an LRCLIB fallback when lyricsSource = genius). Register at https://genius.com/api-clients"
         },
         "appleMusicCountries": {
           "type": "string",
@@ -1792,11 +1792,11 @@
         },
         {
           "type": "Group",
-          "label": "TheAudioDB (fanart & bios)",
+          "label": "TheAudioDB (artwork & genres)",
           "elements": [
             {
               "type": "Label",
-              "text": "Fetch artist fanart (backgrounds, banners), album art, and artist biographies from TheAudioDB. Enhances the visual experience in media centers."
+              "text": "Fetch album artwork and genre tags from TheAudioDB (genre fallback). Artist fanart/bios are fetched by the toggle below but no current feature consumes them."
             },
             {
               "type": "Control",
@@ -1813,11 +1813,11 @@
         },
         {
           "type": "Group",
-          "label": "Genius (lyrics & annotations)",
+          "label": "Genius (lyrics)",
           "elements": [
             {
               "type": "Label",
-              "text": "Fetch song lyrics from Genius as a fallback when LRCLIB doesn't have them. Also provides artist backgrounds and song annotations."
+              "text": "Fetch plain song lyrics from Genius as an LRCLIB fallback when lyricsSource = genius."
             },
             {
               "type": "Control",

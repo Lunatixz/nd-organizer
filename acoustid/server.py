@@ -347,14 +347,17 @@ def replaygain(path):
     integrated = None
     peak_db = None
     for line in stderr.splitlines():
-        if "Integrated loudness:" in line and "LUFS" in line:
+        s = line.strip()
+        # Summary block prints label and value on DIFFERENT lines
+        # ("Integrated loudness:" then "I: -8.9 LUFS") — match the value line.
+        if "LUFS" in line and (s.startswith("I:") or "Integrated loudness:" in s):
             try:
-                integrated = float(line.split("I:")[1].split("LUFS")[0].strip())
+                integrated = float(s.split("I:")[-1].split("LUFS")[0])
             except (ValueError, IndexError):
                 pass
-        if "True peak:" in line and "dBFS" in line:
+        if "dBFS" in line and (s.startswith("Peak:") or "True peak:" in s):
             try:
-                peak_db = float(line.split("TP:")[1].split("dBFS")[0].strip())
+                peak_db = float(s.split("Peak:")[-1].split("dBFS")[0])
             except (ValueError, IndexError):
                 pass
     dt = time.time() - t0

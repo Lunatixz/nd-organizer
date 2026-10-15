@@ -31,7 +31,7 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   renames folders/files to your schemas:
   - Soundtracks → `Various Artists/Sound Tracks/{album} ({year})`
   - Compilations → `Various Artists/{album} ({year})`
-  - Singles / incomplete albums → `{albumArtist}/Singles/{title}`
+  - Singles / incomplete albums → `{albumArtist}/Singles/` (flat - album info lives in filename + tags)
   - Everything else → `{albumArtist}/{album} ({year})`
 - **Preserves recording source**: live/bootleg tracks get `(Live)`/`(Bootleg)`
   suffixes so they never collide with the studio release.
@@ -68,8 +68,9 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
    **ListenBrainz** (`listenbrainzScrobble`); the baseline can be
    **imported from Last.fm** (`lastfmImportPlaycount`).
    **The playcount itself never reaches file tags unless `writePlaycount` is on.**
-- **Refreshes metadata + artwork** from MusicBrainz, Cover Art Archive, iTunes,
-  Last.fm, Discogs (credits), TheAudioDB (fanart/bios), and Genius (lyrics);
+- **Refreshes metadata + artwork** from MusicBrainz, Cover Art Archive, Apple
+  Music (artwork, artist bios/images, album notes), Last.fm, Discogs
+  (credits/styles), TheAudioDB (artwork/genre fallback), and Genius (lyrics);
   reads/writes Kodi-style `album.nfo`/`artist.nfo` sidecars.
 - **Integrates with Lidarr** (metadata/classification source, optional Lidarr
   naming schema, force-search for incomplete **monitored** albums) and
@@ -94,15 +95,17 @@ A [Navidrome](https://www.navidrome.org/) plugin (Rust → WebAssembly, packaged
   are verified via Essentia and stripped if not truly instrumental. Tracks that
   ARE instrumental but not labeled get "(Instrumental)" appended.
 - **Verify acoustic**: Same trust-but-verify pattern for acoustic performance
-  via Essentia mood_acoustic model. Strips false labels, appends when missing.
+  via the sidecar's voice/instrumental classifier + vocal-energy ratio (librosa
+  HPSS fallback). Strips false labels, appends when missing.
 - **Background metadata refresh**: When the organize pipeline is idle,
   periodically fills MISSING metadata for files across ALL libraries without
   organizing — verify-first: each file's current tags are read from disk, and
   only gaps are processed (ReplayGain, genre, acoustic tags, MBIDs, album.nfo,
   artwork). Never assumes a file was enriched by an organize pass before.
   User-gated (`metaRefreshEnabled`), respects existing enrichment settings.
-- **Unified metadata writing**: All metadata sources are queried first, gaps are
-  filled with priority logic, then written once (tags + NFO) at the end.
+- **Unified metadata writing**: Metadata sources are queried in priority order
+  and fill gaps as they resolve; the `album.nfo`/`artist.nfo` sidecars are
+  written once at the end, after all sources have been queried.
 
 ## Prerequisites
 
@@ -119,7 +122,7 @@ Before enabling features, configure the required API keys and sidecar URLs:
 | **ML analysis** | nd-organizer-essentia sidecar | `essentiaUrl` |
 | **Acoustic tags** | AudioMuse-AI sidecar | `audiomuseUrl` (+ `audiomuseToken` if required) |
 | **Credits** | Discogs account | `discogsToken` |
-| **Fanart/bios** | TheAudioDB account | `theAudioDbKey` |
+| **Artwork/genre fallback** | TheAudioDB account | `theAudioDbKey` |
 | **Lyrics** | Genius account | `geniusToken` |
 | **MySQL persistence** | MariaDB + MySQL sidecar | `persistenceBackend=mysql` + MySQL credentials |
 
@@ -279,8 +282,9 @@ sync and scrobble will retry automatically via the circuit breaker.
 | `listenbrainzScrobble` | false | Scrobble + push ratings to ListenBrainz |
 | `listenbrainzUser` | (empty) | ListenBrainz username (defaults to lastfmUser) |
 | `forceFingerprint` | false | Re-fingerprint ALL files via AcoustID (ignores existing MBIDs) |
+| `forceRefingerprintUnknownArtist` | false | Re-fingerprint files whose artist/album artist is missing or a placeholder (companion to `forceFingerprint`) |
 | `verifyInstrumental` | false | Verify instrumental tracks via Essentia + librosa |
-| `verifyAcoustic` | false | Verify acoustic performance via Essentia mood_acoustic model |
+| `verifyAcoustic` | false | Verify acoustic performance via the sidecar's voice/instrumental classifier + vocal-energy ratio |
 | `metaRefreshEnabled` | false | Enable background metadata refresh when pipeline is idle |
 | `metaRefreshCron` | `*/30 * * * *` | Cron schedule for metadata refresh checks |
 
@@ -313,21 +317,19 @@ The plugin pulls metadata from multiple sources to enrich your library:
 | **ListenBrainz** | Listening metrics, scrobbles, ratings | Yes (MusicBrainz token) | `listenbrainzScrobble` |
 | **Lidarr** | Track/album ratings, monitored status | Yes | `lidarrUrl` + `lidarrApiKey` |
 | **Discogs** | Release credits, community ratings, genre/style tags | Yes (personal token) | `discogsToken` + `discogsCredits` |
-| **TheAudioDB** | Artist fanart, bios, album descriptions, artwork, genres | Yes (public key) | `theAudioDbKey` + `theAudioDbFanart` |
-| **Genius** | Lyrics, annotations, artist backgrounds | Yes (client token) | `geniusToken` + `lyricsSource = genius` |
+| **TheAudioDB** | Artwork, genre tags (genre fallback) | Yes (public key) | `theAudioDbKey` + `theAudioDbFanart` |
+| **Genius** | Lyrics (plain) | Yes (client token) | `geniusToken` + `lyricsSource = genius` |
 | **AcoustID** | Fingerprinting, identity verification | Yes | `acoustidUrl` + `acoustidApiKey` |
 | **AudioMuse-AI** | BPM/key/mood acoustic tags | No | `audiomuseUrl` |
-| **Essentia / librosa** | Genre/mood ML analysis, song structure, chords, BPM/key, fingerprinting (librosa fallback for BPM/key/structure/chords when Essentia unavailable) | No | `essentiaUrl` + `essentiaStructure` + `essentiaChords` + `essentiaBpm` + `essentiaFingerprint` |
+| **Essentia / librosa** | Genre, mood, voice/instrumental ML analysis; structure, chords, BPM/key; duplicate fingerprints (librosa fallback for BPM/key/structure/chords when Essentia unavailable) | No | `essentiaUrl` + `essentiaStructure` + `essentiaChords` + `essentiaBpm` + `essentiaFingerprint` |
 | **LRCLIB** | Synchronized + plain lyrics | No | `lyricsSource = lrclib` |
 
 ### Metadata Source Matrix
 
 | Type | MusicBrainz | CAA | Apple Music | TheAudioDB | Discogs | Genius | LRCLIB | Essentia | **librosa** | AudioMuse | AcoustID |
 |------|:-----------:|:---:|:-----------:|:----------:|:-------:|:------:|:------:|:--------:|:-----------:|:---------:|:--------:|
-| Album Title | X | | X | X | X | X | | | | | |
-| Track Title | X | | | | | X | | | | | |
-| Artist | X | | X | X | | X | | | | | |
-| Year | X | | X | | X | | | | | | |
+| Track Title | X | | | | | | | | | | |
+| Artist | X | | | | | | | | | | |
 | Release Type | X | | | | | | | | | | |
 | **Genre** | **X** | | | **X** | **X** | | | **X** | | | |
 | **Styles** | | | | | **X** | | | | | | |
@@ -338,8 +340,8 @@ The plugin pulls metadata from multiple sources to enrich your library:
 | **Chords** | | | | | | | | **X** | **X** | | |
 | **Structure** | | | | | | | | **X** | **X** | | |
 | **Album Art** | | **X** | **X** | **X** | | | | | | | |
-| Artist Bio | | | **X** | **X** | | | | | | | |
-| Artist Image | | | **X** | **X** | | | | | | | |
+| Artist Bio | | | **X** | | | | | | | | |
+| Artist Image | | | **X** | | | | | | | | |
 | **Lyrics (plain)** | | | | | | **X** | **X** | | | | |
 | **Lyrics (synced)** | | | | | | | **X** | | | | |
 | **Credits** | | | | | **X** | | | | | | |
@@ -348,16 +350,23 @@ The plugin pulls metadata from multiple sources to enrich your library:
 | Recording MBID | X | | | | | | | | | | X |
 | Release MBID | X | | | | | | | | | | |
 
+Notes: album/track titles, artist and year come from file tags (auto-tag fills
+missing track titles/artists/MBIDs from MusicBrainz only). The **librosa**
+column is the Essentia sidecar's internal fallback for BPM/key/structure/chords
+— those features work even when Essentia's models are unavailable. The plugin
+consumes the sidecar's **genre, mood, and voice/instrumental** classifiers; the
+remaining classifiers are computed but not yet consumed.
+
 ### Filling missing tags on AcoustID match
 
 When a file is identified via AcoustID, the plugin automatically fills in missing
 metadata from the available sources with automatic fallback chains:
 - **Artwork**: tries `artworkSource` first, then other configured sources (CoverArtArchive → Apple Music → TheAudioDB → embedded)
-- **Genre**: tries `genreSource` first, then other configured sources (MusicBrainz → Discogs → TheAudioDB → Essentia → NFO)
-- **Lyrics**: tries `lyricsSource` first, then other configured sources (LRCLIB → Genius)
-- **BPM/Key/Mood**: AudioMuse-AI (primary), Essentia (fallback), librosa (BPM/key only when Essentia unavailable)
-- **Chords**: Essentia (primary), librosa (fallback)
-- **Structure**: Essentia (primary), librosa (fallback)
+- **Genre**: `genreSource` leads, then the other configured sources (MusicBrainz → Discogs → TheAudioDB → NFO); the Essentia genre/mood/BPM/key step runs separately when `genreSource = essentia`
+- **Lyrics**: LRCLIB first; Genius is also tried when `lyricsSource = genius`
+- **BPM/Key/Mood**: AudioMuse-AI per-track analysis (primary, `writeAcousticTags`), Essentia tag writes when `genreSource = essentia`, librosa BPM/key fallback inside the Essentia sidecar
+- **Chords**: Essentia (primary, `essentiaChords`), librosa (sidecar fallback)
+- **Structure**: Essentia (primary, `essentiaStructure`), librosa (sidecar fallback)
 
 ### Pipeline phases
 
@@ -367,7 +376,7 @@ The plugin processes your library in sequential phases. Each phase is visible on
 |-------|-------------|----------|
 | **Walk** | Discovers all audio files in the library tree. Collects file paths + mtimes. Deduplicates across chunks. | ~15-60 min (library size dependent) |
 | **Index** | Reads tags (MP3/FLAC metadata) for new/changed files. Skips unchanged files via mtime. Saves complete file list for group phase. | ~15-30 min |
-| **Verify** | Fingerprints unverified files through the AcoustID sidecar in batches; writes MBID/ISRC identity results back to the scan index. | ~15-30 min (AcoustID calls) |
+| **Verify** | Fingerprints unverified files through the AcoustID sidecar in batches; writes album/recording MBID identity results (and placeholder-artist fills) back to the scan index. ISRC comes from file tags only. | ~15-30 min (AcoustID calls) |
 | **Group** | Loads indexed files, reads tags from KV, groups files into albums by MBID/artist/album/year, reports duplicates, enqueues plan tasks. | ~5-15 min |
 | **Plan Move** | For each album batch: moves files to organized folders, writes NFO, records rollback. Dry-run generates report; apply executes moves. | Per batch |
 | **Plan Enrich** | Per-album metadata enrichment: auto-tag, ReplayGain, artwork, lyrics, genre, acoustic tags, Lidarr refresh. Network-heavy. | Per album |
@@ -386,7 +395,7 @@ All external metadata providers cache results in the plugin's KV store:
 | Discogs | 7 days | Release search, credits |
 | Genius | — | Song search, lyrics |
 | LRCLIB | 7 days | Lyrics |
-| AcoustID | Until re-verified | File identity (`_acoustid_checked` tag; redo with `forceFingerprint`) |
+| AcoustID | Until re-verified | File identity (`_acoustid_checked` tag; redo with `forceFingerprint`, or `forceRefingerprintUnknownArtist` for placeholder-artist files) |
 | Essentia | 7 days | Fingerprint |
 | AudioMuse | 7 days | Acoustic tags |
 | ReplayGain | 7 days | Loudness analysis |
@@ -412,7 +421,7 @@ The plugin itself is a `.ndp` file in Navidrome's plugins folder. Optional
 | `ghcr.io/lunatixz/nd-organizer/proxy:latest` | Subsonic filtering proxy — sits in front of Navidrome; drops filler-keyword tracks from every media response (except explicit user searches), limits skip-heavy content in queued lists, and re-sorts by weight — without touching files. |
 | `ghcr.io/lunatixz/nd-organizer/mysql:latest` | Optional MySQL bridge — executes the plugin's kvstore operations against your MySQL/MariaDB when `persistenceBackend = mysql`. |
 | `docker.io/library/mariadb:11.8` | MySQL server for persistent plugin state (ratings, playcounts, scan cache). Included in the compose. |
-| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | ML analysis with 9 classifiers: genre (Discogs400, 400 classes), mood (Moods MIREX, 5 clusters), voice/instrumental, danceability, voice gender, arousal/valence, approachability, engagement, timbre. Plus song structure, chords, BPM/key, audio fingerprinting. Falls back to librosa when Essentia unavailable. **Requires library volumes to match Navidrome's mounts.** |
+| `ghcr.io/lunatixz/nd-organizer/essentia:latest` | ML analysis with 9 classifiers: genre (Discogs400, 400 classes), mood (Moods MIREX, 5 clusters), voice/instrumental, danceability, voice gender, arousal/valence, approachability, engagement, timbre — the plugin consumes genre, mood, and voice/instrumental; the rest are computed for future use. Plus song structure, chords, BPM/key, audio fingerprinting. Falls back to librosa when Essentia unavailable. **Requires library volumes to match Navidrome's mounts.** |
 | `ghcr.io/neptunehub/audiomuse-ai:latest` | Optional sonic-analysis server (third-party, AGPL-3.0) — powers acoustic BPM/key/mood tags and re-sync after renames. Runs as postgres + flask (`audiomuse-ai-flask-app`, `:8000`) + worker. **Commented out** in the compose. |
 
 ### MySQL setup (optional)
@@ -549,6 +558,9 @@ Plus song structure segmentation, chord detection, BPM/key detection, and
 audio fingerprinting for cover/duplicate detection. Falls back to **librosa**
 when Essentia is unavailable — BPM/key/structure/chords still work; classifiers
 require Essentia's pre-trained models (auto-downloaded on first start, ~20MB total).
+The plugin currently consumes the **genre, mood, and voice/instrumental**
+outputs (genre/mood tags via `genreSource = essentia`; `verifyInstrumental` /
+`verifyAcoustic`); the remaining classifiers are computed but not yet consumed.
 
 > **Critical rule:** like the Acoustid sidecar, the Essentia sidecar reads
 > audio files directly from the library volumes. **Mirror every library mount
