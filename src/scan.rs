@@ -35,6 +35,23 @@ fn library_real_path(library_id: i32) -> Result<String, String> {
     Ok(lib.path.trim_end_matches('/').to_string())
 }
 
+/// Sidecar-visible absolute path: Navidrome's mount_point (/libraries/N) is NOT
+/// what the sidecar mounts — it mounts lib.path (/music, /unsorted). Rewrite the
+/// prefix so os.path.exists() inside the sidecar container finds the file.
+fn sidecar_path(library_id: i32, abs: &std::path::Path) -> String {
+    let mp = lib_root(library_id)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let real = library_real_path(library_id).unwrap_or_default();
+    let s = abs.to_string_lossy();
+    if !mp.is_empty() && !real.is_empty() && s.starts_with(&mp) {
+        format!("{}{}", real, &s[mp.len()..])
+    } else {
+        s.into_owned()
+    }
+}
+
 fn stack_key(library_id: i32) -> String {
     format!("scan.stackv2.{library_id}")
 }
@@ -990,7 +1007,7 @@ pub fn verify_step(
                         let result: serde_json::Value = serde_json::from_slice(&resp.body)
                             .map_err(|e| format!("bad results response: {e}"))?;
                         crate::net::circuit_clear("acoustid");
-                        return _complete_verify_job(cfg, &root, library_id, acoustid_url, existing_id, &result, &unverified, &unverified_key, &job_id_key);
+                        return _complete_verify_job(cfg, library_id, acoustid_url, existing_id, &result, &unverified, &unverified_key, &job_id_key);
                     }
                     _ => {
                         crate::wasm::log_warn("verify_step: failed to read job results, retrying");
@@ -1056,7 +1073,7 @@ pub fn verify_step(
     for (batch_idx, chunk) in files_to_send.chunks(batch_size).enumerate() {
         let batch_files: Vec<serde_json::Value> = chunk.iter().map(|(rel, mtime)| {
             let abs = root.join(rel);
-            serde_json::json!({"path": abs.to_string_lossy(), "mtime": mtime})
+            serde_json::json!({"path": sidecar_path(library_id, &abs), "mtime": mtime})
         }).collect();
 
         let body = serde_json::json!({
@@ -1113,14 +1130,28 @@ pub fn verify_step(
 }
 
 
+/// Reverse of sidecar_path: strip the library's real path prefix (the path the
+/// sidecar returns) back to the relative form the KV index uses.
+fn sidecar_result_rel(library_id: i32, path: &str) -> String {
+    let real = library_real_path(library_id).unwrap_or_default();
+    let p = if !real.is_empty() && path.starts_with(&real) {
+        &path[real.len()..]
+    } else {
+        path
+    };
+    p.trim_start_matches('/').to_string()
+}
+
 /// Apply sidecar verify results to KV. Returns (ok count, rel paths processed).
 fn _process_verify_results(
     cfg: &Config,
-    root: &std::path::Path,
     library_id: i32,
     result: &serde_json::Value,
 ) -> Result<(usize, Vec<String>), String> {
     let results = result.get("results").and_then(|r| r.as_object()).cloned().unwrap_or_default();
+    // File-tag writes run in Navidrome's filesystem, so they need the
+    // mount_point root (sidecar paths are remapped by sidecar_result_rel).
+    let root = lib_root(library_id)?;
     let mode_apply = cfg.mode == Mode::Apply;
     let write_budget = std::time::Duration::from_secs(10);
     let write_start = std::time::SystemTime::now();
@@ -1142,9 +1173,8 @@ fn _process_verify_results(
             .and_then(|p| p.as_str())
             .filter(|p| !p.is_empty())
             .unwrap_or(idx);
-        let rel = path.trim_start_matches(&root.to_string_lossy().to_string())
-            .trim_start_matches('/');
-        let key = file_key(library_id, rel);
+        let rel = sidecar_result_rel(library_id, path);
+        let key = file_key(library_id, &rel);
         if let Ok(Some(v)) = crate::store::kv().get(&key) {
             if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
                 if let Some(tags) = val.get_mut("tags") {
@@ -1187,7 +1217,7 @@ fn _process_verify_results(
                                 t.insert("artist".into(), serde_json::Value::String(artist.clone()));
                                 filled += 1;
                                 if mode_apply && !past(write_start, write_budget) {
-                                    match crate::tags::fill_placeholder_artist(&root.join(rel), &artist) {
+                                    match crate::tags::fill_placeholder_artist(&root.join(&rel), &artist) {
                                         Ok(true) => written += 1,
                                         Ok(false) => {}
                                         Err(e) => crate::wasm::log_warn(&format!(
@@ -1221,7 +1251,6 @@ fn _process_verify_results(
 
 fn _complete_verify_job(
     cfg: &Config,
-    root: &std::path::Path,
     library_id: i32,
     acoustid_url: &str,
     job_id: &str,
@@ -1230,7 +1259,7 @@ fn _complete_verify_job(
     unverified_key: &str,
     job_id_key: &str,
 ) -> Result<(ScanOutcome, usize), String> {
-    let (processed, done) = _process_verify_results(cfg, root, library_id, result)?;
+    let (processed, done) = _process_verify_results(cfg, library_id, result)?;
     // Cleanup job
     let _ = crate::store::kv().delete(job_id_key);
     let _ = host::http::send(host::http::HTTPRequest {
@@ -2791,7 +2820,7 @@ pub fn plan_enrich_step(
                 for (rel, _) in &files {
                     if past(enrich_start, enrich_budget) { break; }
                     let abs = abs_of(rel);
-                    if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
+                    if let Some((gain, peak)) = replaygain_for(cfg, &sidecar_path(library_id, &abs)) {
                         if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
                             .unwrap_or(false)
                         {
@@ -2969,7 +2998,7 @@ pub fn plan_enrich_step(
                         break;
                     }
                     let body = serde_json::to_vec(&serde_json::json!({
-                        "path": abs_of(rel).to_string_lossy().to_string(),
+                        "path": sidecar_path(library_id, &abs_of(rel)),
                         "acoustidApiKey": cfg.acoustid_api_key,
                         "recordingId": t.mbid_recording,
                     }))
@@ -3759,7 +3788,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 && !past(start, budget)
                 && !crate::tags::replaygain_present(&abs)
             {
-                if let Some((gain, peak)) = replaygain_for(cfg, &abs.to_string_lossy()) {
+                if let Some((gain, peak)) = replaygain_for(cfg, &sidecar_path(library_id, &abs)) {
                     if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
                         .unwrap_or(false)
                     {

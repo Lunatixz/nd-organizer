@@ -2,7 +2,7 @@
   "id": "nd-organizer",
   "name": "Music Organizer",
   "author": "nd-organizer",
-  "version": "3.1.3",
+  "version": "3.1.4",
   "description": "Organizes your Navidrome library: classifies albums (Soundtrack > Various Artists > Singles > Normal) and renames folders/files to your schemas, preserving live/bootleg recordings. Refreshes tags + artwork from MusicBrainz, Cover Art Archive, iTunes and Last.fm; reads/writes Kodi NFO sidecars; verifies identity (AcoustID fingerprint + tags + names) before writing. Integrates with Lidarr (metadata, naming schema, force-search incomplete albums) and AudioMuse-AI (acoustic tags, re-sync). Dry-run default, change history with rollback, metadata backups, reports + status feed (log webhook). Runs in idle-only batches and rescans Navidrome after moves so playback never hits stale files.",
   "website": "https://github.com/Lunatixz/nd-organizer",
   "permissions": {
