@@ -1,10 +1,33 @@
-# HANDOFF - nd-organizer session state (2026-10-15, v3.1.3 verify/AcoustID/Lidarr/ReplayGain fixes)
+# HANDOFF - nd-organizer session state (2026-10-15, v3.1.4 sidecar path fix)
 
 Read `AGENTS.md` first (repo rules: scope = this repo + 5 sidecar dirs only
 `acoustid/ webhook/ proxy/ mysql/ essentia/`; Navidrome = logs + plugin config
 edits only, NEVER Navidrome's own code).
 
-## Deployed (2026-10-15) - v3.1.3, pipeline bugfixes + doc audit
+## Deployed (2026-10-15) - v3.1.4, sidecar mount_point -> real path fix
+
+- **Root cause of the verify retry loop (post-v3.1.3)**: verify/submit/
+  replaygain sent sidecar paths built from `lib_root()` = `lib.mount_point`
+  (`/libraries/1`, `/libraries/2` - valid inside Navidrome's container only),
+  but the AcoustID sidecar mounts `lib.path` (`/music`, `/unsorted`). Every
+  file returned `{"ok":false,"error":"file not found","transient":true}`;
+  sidecar processed batches in ~1ms with `lookups=0`, plugin saw 0 usable
+  results and resent forever (`unverified=14700` lib2 / 493 lib1).
+- **Fix**: new `sidecar_path(library_id, abs)` in scan.rs rewrites the
+  mount_point prefix to the real path before sending (4 call sites: verify
+  batch, `/submit` body, both `replaygain_for` callers). Reverse mapping
+  `sidecar_result_rel(library_id, path)` strips the real-path prefix so
+  `_process_verify_results` keys KV by the same rel path as the index (the
+  old `root`-based trim would have produced `/music/...` file_keys). Unused
+  `root` params dropped from `_process_verify_results`/`_complete_verify_job`.
+  Probe confirmed the pipeline works with a correct path: fpcalc ran (HTTP 400
+  only from the fake AcoustID key).
+- Sidecar `_results_cache` caches failures keyed `{path}:{mtime}` in memory -
+  stale "file not found" entries from the old paths are unreachable once paths
+  change; cleared on container restart anyway.
+- Tests 102/102.
+
+## v3.1.3 (2026-10-15, commit `b66807e` + tag pushed) - pipeline bugfixes + doc audit
 
 - **AcoustID verify (scan.rs) - 3 real bugs fixed**: (1) index pre-cached the
   unverified list WITHOUT mtimes, so every file was sent with mtime=0 and the
