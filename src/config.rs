@@ -114,6 +114,11 @@ pub struct Config {
     pub meta_refresh_enabled: bool,
     /// Cron schedule for metadata refresh checks (default: every 30 minutes).
     pub meta_refresh_cron: String,
+    /// Skip the recurring meta_refresh sweep until this many days after the
+    /// last COMPLETE pass (0 = no cooldown, every cron tick walks the library).
+    /// New files and fresh gaps from organize passes are still enriched
+    /// immediately by plan_enrich — this only throttles the full-library sweep.
+    pub meta_refresh_cooldown_days: i64,
 
     // Favorites sync (Navidrome hub <-> Last.fm loved tracks)
     /// Enable favorites sync with Last.fm/Libre.fm.
@@ -421,6 +426,7 @@ impl Default for Config {
             run_only_when_idle: true,
             meta_refresh_enabled: false,
             meta_refresh_cron: "*/30 * * * *".to_string(),
+            meta_refresh_cooldown_days: 30,
             favorites_sync_lastfm: false,
             favorites_sync_max: 500,
             favorites_sync_minutes: 30,
@@ -609,7 +615,7 @@ const CONFIG_KEYS: &[&str] = &[
     "appleMusicCountries", "appleMusicCacheTtl", "appleMusicArtistImages",
     "appleMusicArtistBios", "appleMusicSimilarArtists", "appleMusicAlbumArt",
      "appleMusicAlbumInfo",
-     "metaRefreshEnabled", "metaRefreshCron",
+     "metaRefreshEnabled", "metaRefreshCron", "metaRefreshCooldownDays",
      "favoritesSyncBidirectional", "favoritesSyncMinutes",
      "ratingSyncWriteToLidarr", "ratingSyncPullFromNavidrome",
      "useCommunityRatings", "listenbrainzUser",
@@ -709,6 +715,9 @@ impl Config {
         c.meta_refresh_enabled = bool(map, "metaRefreshEnabled", c.meta_refresh_enabled);
         if let Some(v) = map.get("metaRefreshCron") {
             c.meta_refresh_cron = v.clone();
+        }
+        if let Some(v) = map.get("metaRefreshCooldownDays") {
+            c.meta_refresh_cooldown_days = v.trim().parse().unwrap_or(c.meta_refresh_cooldown_days);
         }
         c.favorites_sync_lastfm = bool(map, "favoritesSyncLastfm", c.favorites_sync_lastfm);
         if let Some(v) = map.get("favoritesSyncMax") {
@@ -1088,6 +1097,7 @@ mod tests {
         assert_eq!(c.file_schema, "{albumArtist} {album} {track:02} - {title}");
         assert_eq!(c.soundtrack_folder, "Sound Tracks");
         assert_eq!(c.incomplete_album_min_tracks, 3);
+        assert_eq!(c.meta_refresh_cooldown_days, 30);
         assert!(c.scan_after_album);
         // Star rating defaults
         assert!(c.star_tally_enabled);
@@ -1100,6 +1110,16 @@ mod tests {
         assert!(!c.filter_albums && !c.filter_search);
         assert_eq!(c.skip_content_mode, SkipContentMode::LessThanHalf);
         assert!((c.skip_heavy_ratio - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn meta_refresh_cooldown_days_parse() {
+        let c = Config::from_map(&map(&[("metaRefreshCooldownDays", "0")]));
+        assert_eq!(c.meta_refresh_cooldown_days, 0, "0 disables the cooldown");
+        let c = Config::from_map(&map(&[("metaRefreshCooldownDays", "7")]));
+        assert_eq!(c.meta_refresh_cooldown_days, 7);
+        let c = Config::from_map(&map(&[("metaRefreshCooldownDays", "later")]));
+        assert_eq!(c.meta_refresh_cooldown_days, 30, "invalid keeps the default");
     }
 
     #[test]

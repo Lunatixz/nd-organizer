@@ -560,6 +560,10 @@ pub fn strip_acoustic(title: &str) -> String {
 pub fn is_unknown_artist(artist: &str) -> bool {
     let a = artist.trim().to_ascii_lowercase();
     a.is_empty()
+        // "????" / "?" placeholders from taggers with no metadata — never a
+        // real artist name, so they flow through the same resolve/refingerprint
+        // path as "Unknown Artist".
+        || a.chars().all(|c| c == '?' || c.is_whitespace())
         || a.contains("unknown")
         || a == "various artists"
         || a == "various"
@@ -650,7 +654,11 @@ mod unknown_artist_tests {
         assert!(is_unknown_artist("The Unknown Dubs"));
         assert!(is_unknown_artist("Various Artists"));
         assert!(is_unknown_artist("Various"));
+        assert!(is_unknown_artist("????"));
+        assert!(is_unknown_artist("  ? ? ?  "));
+        assert!(is_unknown_artist("?"));
         assert!(!is_unknown_artist("Radiohead"));
+        assert!(!is_unknown_artist("?dios"));
         assert!(!is_unknown_artist("Unknowingly"));
     }
 

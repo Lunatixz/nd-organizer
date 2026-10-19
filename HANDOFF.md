@@ -1,10 +1,43 @@
-# HANDOFF - nd-organizer session state (2026-10-15, v3.1.4 sidecar path fix)
+# HANDOFF - nd-organizer session state (2026-10-19, v3.1.5 cooldown + tracklist leftovers)
 
 Read `AGENTS.md` first (repo rules: scope = this repo + 5 sidecar dirs only
 `acoustid/ webhook/ proxy/ mysql/ essentia/`; Navidrome = logs + plugin config
 edits only, NEVER Navidrome's own code).
 
-## Deployed (2026-10-15) - v3.1.4, sidecar mount_point -> real path fix
+## Deployed (2026-10-19) - v3.1.5, meta_refresh cooldown + MB tracklist leftovers
+
+- **meta_refresh cooldown**: new config key `metaRefreshCooldownDays`
+  (default 30, 0 = off). KV `meta_refresh.last_done.{library_id}` is stamped
+  ONLY when a pass completes (cursor reaches end); `meta_refresh_step` skips
+  the sweep when `now - last_done < cooldown`. New files/gaps from organize
+  passes are still enriched by plan_enrich — this only throttles the cron
+  sweep over unchanged files. Mid-pass resumes can't self-block (stamp only
+  written on completion, elapsed only grows).
+- **`is_unknown_artist("????")`**: all-`?`/whitespace strings now count as
+  unknown → flow through resolve/refingerprint like "Unknown Artist" (the
+  `????/Snake Eyes` folder case).
+- **MusicBrainz tracklist leftovers**: `build_group_plan` gained
+  `mb_tracks: Option<&[MbTrack]>` (fetched by both plan_move and plan_enrich
+  via `release_tracks`, 7d KV cache, 9s budget gate, None on failure → plain
+  current behavior). A file with track number AND title matching no release
+  track (lenient: recording MBID / track number-or-position / normalized
+  title) is routed to `{albumArtist}/Singles/` with fileSchema naming;
+  collision fallback ` (from {album})` then `-2`. Majority guard: <50% of
+  judgeable files matching → skip routing entirely (wrong `lookup()` can't
+  mass-move an album). Files missing track number or title are never routed.
+  Skipped for Singles bucket (already there). `GroupPlan.leftovers` feeds the
+  plan JSON (`leftovers` count), the group report, and `write_group_nfo`
+  (leftover tags excluded from album artist/genre aggregation; all-leftover
+  group skips the NFO entirely).
+- **Duplicate losers use fileSchema naming** too (was raw stem): rendered
+  name into the same Singles dir, shared `seen_singles` dedupe within a plan.
+- **`MbTrack` moved to organizer.rs** (host-compiled) with re-export from
+  musicbrainz.rs so plan building is testable under `cargo test`.
+- Tests 107/107 (new: leftover routing majority/fallback/None, mbid+title
+  sparing, collision disambiguation, Singles-bucket skip, dup fileSchema
+  name, config cooldown parse, `????` matrix).
+
+## v3.1.4 (2026-10-15, commit `1027bd1` + tag pushed) - sidecar mount_point -> real path fix
 
 - **Root cause of the verify retry loop (post-v3.1.3)**: verify/submit/
   replaygain sent sidecar paths built from `lib_root()` = `lib.mount_point`

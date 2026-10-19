@@ -163,15 +163,7 @@ fn parse_releases(v: &Value, _artist: &str, album: &str) -> Option<MbRelease> {
 }
 
 /// One track from a MusicBrainz release tracklist (for auto-tagging).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MbTrack {
-    pub title: String,
-    pub position: Option<u32>,
-    pub number: Option<u32>,
-    pub length: Option<u32>,
-    pub recording_mbid: String,
-    pub artist: String,
-}
+pub use crate::organizer::MbTrack;
 
 /// Fetch a release's full tracklist (`release/{mbid}?inc=recordings+artist-credits`),
 /// cached 7 days. Reuses the same circuit + throttle as `lookup`.

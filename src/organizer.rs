@@ -1008,6 +1008,10 @@ pub struct GroupPlan {
     pub moves: Vec<FileMove>,
     /// Confirmed duplicates within the album.
     pub duplicates: Vec<Duplicate>,
+    /// Files absent from the MusicBrainz release tracklist, rerouted to the
+    /// artist's Singles folder (rel paths). Reported and excluded from the
+    /// album NFO aggregation.
+    pub leftovers: Vec<String>,
     /// Filler tracks (intro/outro/...) detected within the album. Reported only,
     /// never moved - the Subsonic filter proxy drops them from playback.
     pub fillers: Vec<String>,
@@ -1108,6 +1112,76 @@ pub(crate) fn singles_target(
     target
 }
 
+/// One track from a MusicBrainz release tracklist (auto-tag input and
+/// leftover validation). Lives here (host-compiled) so plan building can use
+/// it under `cargo test`; `musicbrainz` re-exports it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MbTrack {
+    pub title: String,
+    pub position: Option<u32>,
+    pub number: Option<u32>,
+    pub length: Option<u32>,
+    pub recording_mbid: String,
+    pub artist: String,
+}
+
+/// Does this file's tag data match ANY track on the release tracklist?
+/// Lenient: recording MBID, track number/position, or normalized title.
+fn mb_track_fits(t: &TrackTags, tracks: &[MbTrack]) -> bool {
+    let rec = t.mbid_recording.trim();
+    if !rec.is_empty() && tracks.iter().any(|m| m.recording_mbid.eq_ignore_ascii_case(rec)) {
+        return true;
+    }
+    if let Some(n) = t.track {
+        if tracks.iter().any(|m| m.number == Some(n) || m.position == Some(n)) {
+            return true;
+        }
+    }
+    let title = norm(&t.title);
+    !title.is_empty() && tracks.iter().any(|m| norm(&m.title) == title)
+}
+
+/// Drop a rendered filename into the artist's Singles folder, disambiguating
+/// collisions: base → " (from {album})" → "-2", "-3". `seen` holds names
+/// claimed earlier in the same plan — new files don't exist on disk yet, so
+/// existence checks alone can't dedupe them.
+fn singles_file_target(
+    root: &Path,
+    cfg: &Config,
+    singles_dir: &str,
+    full_name: &str,
+    album: &str,
+    seen: &mut HashSet<String>,
+) -> String {
+    let (name, ext) = match full_name.rsplit_once('.') {
+        Some((n, e)) => (n.to_string(), e.to_string()),
+        None => (full_name.to_string(), String::new()),
+    };
+    let taken = |to: &str, seen: &HashSet<String>| {
+        root.join(to).exists() || seen.contains(&to.to_ascii_lowercase())
+    };
+    let mut to = format!("{singles_dir}/{name}.{ext}");
+    if taken(&to, seen) {
+        let opts = sanitize_opts(cfg);
+        let from = if album.trim().is_empty() {
+            "another album".to_string()
+        } else {
+            album.trim().to_string()
+        };
+        let alt = sanitize_with(&format!("{name} (from {from})"), &opts);
+        to = format!("{singles_dir}/{alt}.{ext}");
+        if taken(&to, seen) {
+            let mut n = 2;
+            while taken(&format!("{singles_dir}/{alt}-{n}.{ext}"), seen) {
+                n += 1;
+            }
+            to = format!("{singles_dir}/{alt}-{n}.{ext}");
+        }
+    }
+    seen.insert(to.to_ascii_lowercase());
+    to
+}
+
 /// Strip a trailing " (YYYY)" year suffix: "Album (2000)" -> "Album".
 fn strip_year_suffix(name: &str) -> &str {
     let cut = name.len().wrapping_sub(7);
@@ -1174,6 +1248,7 @@ pub fn build_group_plan(
     mb_release_type: &str,
     mb_date: Option<&str>,
     mb_disamb: &str,
+    mb_tracks: Option<&[MbTrack]>,
 ) -> GroupPlan {
     let mut info = album_info_from_tags(files);
     if !mb_release_type.trim().is_empty() {
@@ -1288,6 +1363,9 @@ pub fn build_group_plan(
     // AND track number are candidates (the "same version of the song"). They
     // must also be identical in size (the "100% same file") to be confirmed.
     // Confirmed duplicates are temp-moved to the artist's Singles folder.
+    // Names claimed by earlier Singles routing in this same plan (files don't
+    // exist on disk yet, so existence checks alone can't dedupe them).
+    let mut seen_singles: HashSet<String> = HashSet::new();
     let mut dup_groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, (_, t)) in files.iter().enumerate() {
         if t.track.is_none() || t.title.trim().is_empty() {
@@ -1320,19 +1398,62 @@ pub fn build_group_plan(
         for &i in &idxs[1..] {
             skip.insert(i);
             let loser_rel = files[i].0.clone();
-            let target = singles_target(
-                root,
-                cfg,
-                &files[i].1.album_artist,
-                &files[i].1.artist,
-                &files[i].1.album,
-                &loser_rel,
+            let loser = &files[i].1;
+            let singles_dir = format!(
+                "{}/{}",
+                singles_artist(&[&loser.album_artist, &loser.artist]),
+                cfg.singles_folder
             );
+            // FileSchema name (not the raw stem): the loser reads like any
+            // other single, disambiguated on collision.
+            let target =
+                singles_file_target(root, cfg, &singles_dir, &targets[i], &loser.album, &mut seen_singles);
             plan.duplicates.push(Duplicate {
                 winner: files[winner].0.clone(),
                 loser: loser_rel,
                 target,
             });
+        }
+    }
+
+    // MusicBrainz tracklist validation: a file WITH a track number and a
+    // title that matches no release track (recording MBID / track position /
+    // normalized title) isn't part of this album → the artist's Singles
+    // folder. ponytail: lenient on purpose — files missing either signal are
+    // never routed out, and the majority guard below falls back to plain
+    // behavior when the fetched tracklist doesn't look like this album's
+    // (wrong lookup() result). Upgrade path: duration comparison if false
+    // positives show up.
+    let mut leftover: HashSet<usize> = HashSet::new();
+    if bucket != Bucket::Singles {
+        if let Some(tracks) = mb_tracks.filter(|t| !t.is_empty()) {
+            let mut judgeable = 0usize;
+            let mut matched = 0usize;
+            for (i, (_, t)) in files.iter().enumerate() {
+                if skip.contains(&i)
+                    || (t.track.is_none() && t.title.trim().is_empty() && t.mbid_recording.trim().is_empty())
+                {
+                    continue;
+                }
+                judgeable += 1;
+                if mb_track_fits(t, tracks) {
+                    matched += 1;
+                }
+            }
+            if judgeable > 0 && matched * 2 >= judgeable {
+                for (i, (_, t)) in files.iter().enumerate() {
+                    if skip.contains(&i) || t.track.is_none() || t.title.trim().is_empty() {
+                        continue;
+                    }
+                    if !mb_track_fits(t, tracks) {
+                        leftover.insert(i);
+                    }
+                }
+            } else if judgeable > 0 {
+                crate::log::info(&format!(
+                    "group plan: tracklist majority check failed ({matched}/{judgeable} match) — skipping leftover routing"
+                ));
+            }
         }
     }
 
@@ -1346,7 +1467,16 @@ pub fn build_group_plan(
         if fillers[i] {
             plan.fillers.push(from.clone());
         }
-        let to = format!("{target_dir}/{}", targets[i]);
+        let to = if leftover.contains(&i) {
+            let singles_dir = format!(
+                "{}/{}",
+                singles_artist(&[info.album_artist.as_str(), t.artist.as_str()]),
+                cfg.singles_folder
+            );
+            singles_file_target(root, cfg, &singles_dir, &targets[i], &info.album, &mut seen_singles)
+        } else {
+            format!("{target_dir}/{}", targets[i])
+        };
         if from.eq_ignore_ascii_case(&to) {
             plan.kept += 1;
             continue;
@@ -1369,7 +1499,9 @@ pub fn build_group_plan(
         } else {
             Vec::new()
         };
-        let _ = t;
+        if leftover.contains(&i) {
+            plan.leftovers.push(from.clone());
+        }
         plan.moves.push(FileMove { from, to, sidecars });
     }
     plan
@@ -2336,7 +2468,7 @@ mod tests {
         tags.track = Some(1);
         let files: Vec<(String, TrackTags)> =
             vec![("Old Dir/01 - Song.flac".into(), tags)];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Old Dir", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Old Dir", "", None, "", None);
         assert_ne!(plan.target_dir, "Old Dir");
         apply_group_plan(&root, &plan, true).unwrap();
         let target = root.join(&plan.target_dir);
@@ -2565,10 +2697,11 @@ mod tests {
             "",
             Some("1991-09-12"),
             "",
+            None,
         );
         assert!(plan.target_dir.ends_with("Album (1991)"), "{}", plan.target_dir);
         // No tag year and no MB date -> empty parens are stripped.
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "", None);
         assert!(plan.target_dir.ends_with("Album"), "{}", plan.target_dir);
         assert!(!plan.target_dir.contains("()"), "{}", plan.target_dir);
         // Year 0 in tags is invalid -> MB date wins.
@@ -2585,6 +2718,7 @@ mod tests {
             "",
             Some("2003"),
             "",
+            None,
         );
         assert!(plan.target_dir.ends_with("Album (2003)"), "{}", plan.target_dir);
         let _ = fs::remove_dir_all(&root);
@@ -2615,12 +2749,12 @@ mod tests {
             .enumerate()
             .map(|(i, n)| (format!("Renegades/{n} - Song.mp3"), t(i as u32 + 1)))
             .collect();
-        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "", None);
         assert!(plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
         // read_nfo off -> NFO ignored, no year.
         let mut cfg = Config::default();
         cfg.read_nfo = false;
-        let plan = build_group_plan(&root, &cfg, &files, "Renegades", "", None, "");
+        let plan = build_group_plan(&root, &cfg, &files, "Renegades", "", None, "", None);
         assert!(!plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
         let _ = fs::remove_dir_all(&root);
     }
@@ -2650,7 +2784,7 @@ mod tests {
             .enumerate()
             .map(|(i, n)| (format!("Renegades/{n} - Song.mp3"), t(i as u32 + 1)))
             .collect();
-        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "", None);
         assert!(plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
         let _ = fs::remove_dir_all(&root);
     }
@@ -2677,7 +2811,7 @@ mod tests {
             .enumerate()
             .map(|(i, n)| (format!("Artist/Renegades/{n} - Song.mp3"), t(i as u32 + 1)))
             .collect();
-        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "", None);
         assert_eq!(plan.target_dir, "Artist/Renegades (2000)");
         let _ = fs::remove_dir_all(&root);
     }
@@ -2709,7 +2843,7 @@ mod tests {
                 )
             })
             .collect();
-        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "", None);
         assert_eq!(plan.target_dir, "Artist/Renegades (2000)");
         let _ = fs::remove_dir_all(&root);
     }
@@ -2736,7 +2870,7 @@ mod tests {
             .enumerate()
             .map(|(i, n)| (format!("Artist/Renegades/{n} - Song.mp3"), t(i as u32 + 1)))
             .collect();
-        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "", None);
         assert_eq!(plan.target_dir, "Artist/Renegades");
         let _ = fs::remove_dir_all(&root);
     }
@@ -2762,10 +2896,11 @@ mod tests {
             .collect();
         let plan = build_group_plan(
             &root, &Config::default(), &files, "Album", "", None, "deluxe edition",
+            None,
         );
         assert!(plan.target_dir.contains("(deluxe edition)"), "{}", plan.target_dir);
         // No disambiguation -> the " ()" group is stripped.
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "", None);
         assert!(!plan.target_dir.contains("()"), "{}", plan.target_dir);
         let _ = fs::remove_dir_all(&root);
     }
@@ -2838,7 +2973,7 @@ mod tests {
             ("Album/01 - Intro.flac".to_string(), t1),
             ("Album/02 - Real Song.flac".to_string(), t2),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "", None);
         assert_eq!(plan.fillers.len(), 1);
         assert!(plan.fillers[0].contains("01 - Intro.flac"));
         // Albums stay whole: no subfolder routing, every file moves to album root.
@@ -2907,7 +3042,7 @@ mod tests {
             ("A/03 - Song.flac".to_string(), t1.clone()),
             ("B/03 - Song.flac".to_string(), t1),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "", None);
         assert_eq!(plan.duplicates.len(), 1, "one duplicate pair");
         // Winner is the first file; the loser routes to the artist's Singles folder.
         assert_eq!(plan.duplicates[0].winner, "A/03 - Song.flac");
@@ -2917,6 +3052,8 @@ mod tests {
             "target: {}",
             plan.duplicates[0].target
         );
+        // FileSchema naming (not the raw stem): the loser reads like a single.
+        assert_eq!(plan.duplicates[0].target, "X/Singles/X Album 03 - Song.flac");
         // Only the winner is moved into the album.
         assert_eq!(plan.moves.len(), 1);
         assert_eq!(plan.moves[0].from, "A/03 - Song.flac");
@@ -2944,7 +3081,7 @@ mod tests {
             ("A/03 - Song.flac".to_string(), t1.clone()),
             ("B/03 - Song.flac".to_string(), t1),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "", None);
         assert!(
             plan.duplicates.is_empty(),
             "not 100% same -> not a confirmed duplicate"
@@ -2953,6 +3090,196 @@ mod tests {
         // reported as a name collision (not silently overwritten).
         assert_eq!(plan.moves.len(), 1);
         assert_eq!(plan.skipped.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn group_plan_leftovers_from_mb_tracklist() {
+        use crate::tags::TrackTags;
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-lootrack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inbox")).unwrap();
+        for n in ["01 - Alpha", "02 - Beta", "03 - Gamma", "10 - Delta"] {
+            fs::write(root.join(format!("inbox/{n}.flac")), n.to_string()).unwrap();
+        }
+        let mk = |track: Option<u32>, title: &str| TrackTags {
+            album_artist: "Artist".into(),
+            album: "Album".into(),
+            title: title.into(),
+            track,
+            ..Default::default()
+        };
+        let files = vec![
+            ("inbox/01 - Alpha.flac".into(), mk(Some(1), "Alpha")),
+            ("inbox/02 - Beta.flac".into(), mk(Some(2), "Beta")),
+            ("inbox/03 - Gamma.flac".into(), mk(Some(3), "Gamma")),
+            ("inbox/10 - Delta.flac".into(), mk(None, "Delta")),
+        ];
+        let tracks = vec![
+            MbTrack { title: "Alpha".into(), number: Some(1), ..Default::default() },
+            MbTrack { title: "Beta".into(), number: Some(2), ..Default::default() },
+        ];
+        // Majority (2/4 match) → Gamma (track#+title, matches nothing) is a
+        // leftover; Delta has no track number so it is never routed out.
+        let plan = build_group_plan(&root, &Config::default(), &files, "inbox", "", None, "", Some(&tracks));
+        assert_eq!(plan.leftovers, vec!["inbox/03 - Gamma.flac".to_string()]);
+        assert_eq!(plan.moves.len(), 4);
+        let lo = plan
+            .moves
+            .iter()
+            .find(|m| m.from.contains("Gamma"))
+            .expect("leftover is moved");
+        assert_eq!(lo.to, "Artist/Singles/Artist Album 03 - Gamma.flac");
+        assert!(plan
+            .moves
+            .iter()
+            .any(|m| m.from.contains("Delta") && !m.to.contains("/Singles/")));
+
+        // No tracklist → plain current behavior.
+        let plan2 = build_group_plan(&root, &Config::default(), &files, "inbox", "", None, "", None);
+        assert!(plan2.leftovers.is_empty());
+        assert_eq!(plan2.moves.len(), 4);
+
+        // Minority match (1/4) → majority guard falls back: a tracklist that
+        // doesn't look like this album routes nobody.
+        let few = vec![MbTrack { title: "Alpha".into(), number: Some(1), ..Default::default() }];
+        let plan3 = build_group_plan(&root, &Config::default(), &files, "inbox", "", None, "", Some(&few));
+        assert!(plan3.leftovers.is_empty(), "minority → fallback");
+        assert_eq!(plan3.moves.len(), 4);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leftover_match_by_recording_mbid_or_title_spares_file() {
+        use crate::tags::TrackTags;
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-lomatch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inbox")).unwrap();
+        fs::write(root.join("inbox/09 - Renamed.flac"), b"aaaaaaaaaa").unwrap();
+        fs::write(root.join("inbox/misc.flac"), b"bbbbbbbbbb").unwrap();
+        fs::write(root.join("inbox/05 - Alpha.flac"), b"cccccccccc").unwrap();
+        let files = vec![
+            (
+                "inbox/09 - Renamed.flac".to_string(),
+                TrackTags {
+                    album_artist: "Artist".into(),
+                    album: "Album".into(),
+                    title: "Totally Wrong".into(),
+                    track: Some(9),
+                    mbid_recording: "REC-1".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inbox/misc.flac".to_string(),
+                TrackTags {
+                    album_artist: "Artist".into(),
+                    album: "Album".into(),
+                    title: "Beta".into(),
+                    track: None,
+                    ..Default::default()
+                },
+            ),
+            (
+                "inbox/05 - Alpha.flac".to_string(),
+                TrackTags {
+                    album_artist: "Artist".into(),
+                    album: "Album".into(),
+                    title: "Alpha".into(),
+                    track: Some(5),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let tracks = vec![
+            MbTrack { title: "Alpha".into(), number: Some(1), recording_mbid: "REC-1".into(), ..Default::default() },
+            MbTrack { title: "Beta".into(), number: Some(2), ..Default::default() },
+        ];
+        // File 1 fits via recording MBID (title and track number both wrong);
+        // files 2 and 3 fit via title (one has no track number, one a wrong
+        // one). Nobody is routed out — and the group is a Normal bucket
+        // (3 files), so its target is the album folder, not Singles.
+        let plan = build_group_plan(&root, &Config::default(), &files, "inbox", "", None, "", Some(&tracks));
+        assert_eq!(plan.bucket, Bucket::Normal);
+        assert!(plan.leftovers.is_empty());
+        assert_eq!(plan.moves.len(), 3);
+        assert!(!plan.moves.iter().any(|m| m.to.contains("/Singles/")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leftover_same_name_collision_disambiguates() {
+        use crate::tags::TrackTags;
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-loocol-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("A")).unwrap();
+        fs::create_dir_all(root.join("B")).unwrap();
+        // Same rendered name, different sizes → not a confirmed duplicate,
+        // but both are leftovers with identical target names.
+        fs::write(root.join("A/01 - Alpha.flac"), b"a").unwrap();
+        fs::write(root.join("B/02 - Beta.flac"), b"bb").unwrap();
+        fs::write(root.join("A/03 - Gamma.flac"), b"xx").unwrap();
+        fs::write(root.join("B/03 - Gamma.flac"), b"yyy").unwrap();
+        let mk = |track: u32, title: &str| TrackTags {
+            album_artist: "Artist".into(),
+            album: "Album".into(),
+            title: title.into(),
+            track: Some(track),
+            ..Default::default()
+        };
+        let files = vec![
+            ("A/01 - Alpha.flac".into(), mk(1, "Alpha")),
+            ("B/02 - Beta.flac".into(), mk(2, "Beta")),
+            ("A/03 - Gamma.flac".into(), mk(3, "Gamma")),
+            ("B/03 - Gamma.flac".into(), mk(3, "Gamma")),
+        ];
+        let tracks = vec![
+            MbTrack { title: "Alpha".into(), number: Some(1), ..Default::default() },
+            MbTrack { title: "Beta".into(), number: Some(2), ..Default::default() },
+        ];
+        let plan = build_group_plan(&root, &Config::default(), &files, "A", "", None, "", Some(&tracks));
+        assert_eq!(plan.leftovers.len(), 2, "{:?}", plan.leftovers);
+        assert_eq!(plan.duplicates.is_empty(), true, "different sizes");
+        let tos: Vec<&str> = plan
+            .moves
+            .iter()
+            .filter(|m| m.to.contains("/Singles/"))
+            .map(|m| m.to.as_str())
+            .collect();
+        assert_eq!(tos[0], "Artist/Singles/Artist Album 03 - Gamma.flac");
+        assert_eq!(tos[1], "Artist/Singles/Artist Album 03 - Gamma (from Album).flac");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tracklist_split_skipped_for_singles_bucket() {
+        use crate::tags::TrackTags;
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-lobucket-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inbox")).unwrap();
+        fs::write(root.join("inbox/01 - Alpha.flac"), b"a").unwrap();
+        fs::write(root.join("inbox/02 - Beta.flac"), b"bb").unwrap();
+        let mk = |track: u32, title: &str| TrackTags {
+            album_artist: "Artist".into(),
+            album: "Album".into(),
+            title: title.into(),
+            track: Some(track),
+            ..Default::default()
+        };
+        let files = vec![
+            ("inbox/01 - Alpha.flac".into(), mk(1, "Alpha")),
+            ("inbox/02 - Beta.flac".into(), mk(2, "Beta")),
+        ];
+        // 2 files < incompleteAlbumMinTracks (3) → Singles bucket: the whole
+        // group already lives in Singles, so there is nothing to split.
+        let tracks = vec![MbTrack { title: "Alpha".into(), number: Some(1), ..Default::default() }];
+        let plan = build_group_plan(&root, &Config::default(), &files, "inbox", "", None, "", Some(&tracks));
+        assert_eq!(plan.bucket, Bucket::Singles);
+        assert!(plan.leftovers.is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2977,7 +3304,7 @@ mod tests {
             ("One/1.flac".to_string(), tags),
             ("Two/2.flac".to_string(), tags2),
         ];
-        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "");
+        let plan = build_group_plan(&root, &Config::default(), &files, "Album", "", None, "", None);
         assert_eq!(plan.moves.len(), 2);
         // Both land in the same target album dir.
         assert!(plan

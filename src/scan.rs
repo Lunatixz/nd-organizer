@@ -2381,6 +2381,14 @@ pub fn plan_move_step(
                 }
             }
         }
+        // Full release tracklist for leftover validation (cached 7d; None when
+        // the budget is out or MusicBrainz fails → plain current behavior).
+        let mb_tracks = mb_release
+            .as_ref()
+            .filter(|_| remain_ms(move_start, task_budget) >= 9_000)
+            .and_then(|r| {
+                crate::musicbrainz::release_tracks(&r.release_mbid, &cfg.musicbrainz_token)
+            });
         let mut plan = crate::organizer::build_group_plan(
             &root,
             cfg,
@@ -2389,6 +2397,7 @@ pub fn plan_move_step(
             &mb_type,
             mb_release.as_ref().and_then(|r| r.date.as_deref()),
             mb_release.as_ref().map(|r| r.disambiguation.as_str()).unwrap_or(""),
+            mb_tracks.as_deref(),
         );
         if crate::wasm::meta_only_library(cfg).is_some_and(|id| id == library_id) {
             // Destination library: singles routing is disabled there
@@ -2445,6 +2454,7 @@ pub fn plan_move_step(
             "target": plan.target_dir,
             "moves": plan.moves.iter().map(|m| serde_json::json!({"from": m.from, "to": m.to})).collect::<Vec<_>>(),
             "duplicates": plan.duplicates.len(),
+            "leftovers": plan.leftovers.len(),
             "fillers": plan.fillers.len(),
         }));
 
@@ -2722,12 +2732,20 @@ pub fn plan_enrich_step(
         } else {
             None
         };
+        // Same leftover validation as plan_move (KV-cached → cheap here) so
+        // its post-move path mapping sees the same plan plan_move executed.
+        let mb_tracks = mb_release
+            .as_ref()
+            .filter(|_| remain_ms(enrich_start, task_budget) >= 9_000)
+            .and_then(|r| {
+                crate::musicbrainz::release_tracks(&r.release_mbid, &cfg.musicbrainz_token)
+            });
         let mut plan = crate::organizer::build_group_plan(&root, cfg, &files, &folder_hint, &mb_release.as_ref().map(|r| {
             if r.primary_type == "Soundtrack" { "Soundtrack".to_string() }
             else if r.secondary_types.iter().any(|t| t.eq_ignore_ascii_case("compilation") || t.eq_ignore_ascii_case("live")) || r.primary_type == "Compilation" { "Compilation".to_string() }
             else if r.primary_type == "Single" || r.primary_type == "EP" { "Single".to_string() }
             else { String::new() }
-        }).unwrap_or_default(), mb_release.as_ref().and_then(|r| r.date.as_deref()), mb_release.as_ref().map(|r| r.disambiguation.as_str()).unwrap_or(""));
+        }).unwrap_or_default(), mb_release.as_ref().and_then(|r| r.date.as_deref()), mb_release.as_ref().map(|r| r.disambiguation.as_str()).unwrap_or(""), mb_tracks.as_deref());
         if meta_only {
             // Force-fingerprint reparse + apply: plan_move in this task's
             // enqueue chain already executed the moves (dry runs never reach
@@ -3532,6 +3550,29 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
         return Ok("meta_refresh: deferred — organize pipeline active".into());
     }
 
+    // Cooldown: skip the full-library sweep until N days after the last
+    // COMPLETE pass (0 = disabled). New files/gaps from organize passes are
+    // enriched by plan_enrich regardless — this only throttles the recurring
+    // cron-driven sweep over unchanged files.
+    let cooldown_days = cfg.meta_refresh_cooldown_days;
+    if cooldown_days > 0 {
+        let last_done = crate::store::kv()
+            .get(&format!("meta_refresh.last_done.{library_id}"))
+            .ok()
+            .flatten()
+            .and_then(|v| String::from_utf8(v).ok())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        // last_done == 0 → never completed a pass → no cooldown (first run).
+        let elapsed = crate::state::now_ts().saturating_sub(last_done);
+        if last_done > 0 && elapsed < cooldown_days * 86_400 {
+            return Ok(format!(
+                "meta_refresh: cooling down — last complete pass {} day(s) ago, cooldown {cooldown_days} day(s)",
+                (elapsed + 86_399) / 86_400
+            ));
+        }
+    }
+
     // Load the file list for this library. group_step copies scan.indexed.*
     // to scan.meta_files.* and deletes the original, so prefer the meta copy
     // and fall back to indexed (mid-pipeline resume, pre-group state).
@@ -4041,6 +4082,11 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
         Ok(format!("meta_refresh: {processed} files processed, {refreshed} refreshed ({art_written} artwork, {nfo_written} nfo), {}/{}/{} remaining", cursor, file_list.len(), file_list.len()))
     } else {
         let _ = crate::store::kv().delete(&cursor_key);
+        // Stamp the cooldown clock — only a COMPLETE pass starts it.
+        let _ = crate::store::kv().set(
+            &format!("meta_refresh.last_done.{library_id}"),
+            crate::state::now_ts().to_string().into_bytes(),
+        );
         crate::wasm::log_info(&format!(
             "meta_refresh: library={} complete, processed={}, refreshed={}, art={}, nfo={}",
             library_id, processed, refreshed, art_written, nfo_written
@@ -4197,6 +4243,16 @@ fn group_report(plan: &crate::organizer::GroupPlan, dry: bool) -> String {
             ));
         }
     }
+    if !plan.leftovers.is_empty() {
+        s.push_str(&format!(
+            "  Leftovers — not on the release tracklist, {} to the artist's Singles folder ({}):\n",
+            verb,
+            plan.leftovers.len()
+        ));
+        for f in &plan.leftovers {
+            s.push_str(&format!("    - {f}\n"));
+        }
+    }
     if !plan.fillers.is_empty() {
         s.push_str(&format!(
             "  Filler tracks {flag_verb} (dropped by the filter proxy, files kept) ({}):\n",
@@ -4237,6 +4293,19 @@ fn write_group_nfo(
     fin: &std::collections::HashMap<String, std::path::PathBuf>,
     target_abs: &std::path::Path,
 ) {
+    // Rerouted leftovers aren't part of this album: their tags must not leak
+    // into the album's artist/genre aggregation.
+    let had_files = !files.is_empty();
+    let kept: Vec<(String, TrackTags)> = files
+        .iter()
+        .filter(|(r, _)| !plan.leftovers.contains(r))
+        .cloned()
+        .collect();
+    let files: &[(String, TrackTags)] = &kept;
+    if files.is_empty() && had_files {
+        // Every file was rerouted — there is no album left to describe.
+        return;
+    }
     let info = crate::organizer::album_info_from_tags(files);
     let genre = if info.genre.is_empty() {
         vec![]

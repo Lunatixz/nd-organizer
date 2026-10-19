@@ -287,6 +287,7 @@ sync and scrobble will retry automatically via the circuit breaker.
 | `verifyAcoustic` | false | Verify acoustic performance via the sidecar's voice/instrumental classifier + vocal-energy ratio |
 | `metaRefreshEnabled` | false | Enable background metadata refresh when pipeline is idle |
 | `metaRefreshCron` | `*/30 * * * *` | Cron schedule for metadata refresh checks |
+| `metaRefreshCooldownDays` | 30 | Skip the full-library refresh sweep until N days after the last complete pass (0 = off) |
 
 ### Conflict resolution
 
