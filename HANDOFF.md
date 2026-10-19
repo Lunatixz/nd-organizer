@@ -1,10 +1,31 @@
-# HANDOFF - nd-organizer session state (2026-10-19, v3.1.5 cooldown + tracklist leftovers)
+# HANDOFF - nd-organizer session state (2026-10-19, v3.1.6 placeholder re-fingerprint gate)
 
 Read `AGENTS.md` first (repo rules: scope = this repo + 5 sidecar dirs only
 `acoustid/ webhook/ proxy/ mysql/ essentia/`; Navidrome = logs + plugin config
 edits only, NEVER Navidrome's own code).
 
-## Deployed (2026-10-19) - v3.1.5, meta_refresh cooldown + MB tracklist leftovers
+## Deployed (2026-10-19) - v3.1.6, placeholder artist re-fingerprint gating
+
+- **Rule**: artist/album_artist placeholder titles (Unknown..., `????`,
+  Various-markers, BRACKETED forms like `[????]`/`[Various Artists]`) are not
+  acceptable — the file keeps re-fingerprinting while
+  `forceRefingerprintUnknownArtist` is on, unless MusicBrainz says otherwise.
+- `trim_tag_wrappers()` (tags.rs) strips `[...]`/`(...)`/`{...}` wrappers;
+  used by `is_unknown_artist` AND `is_various_marker` — live data showed
+  `artist=[????]`, which the old exact/all-`?` checks missed entirely.
+- Verify force-gate (`load_unverified`): now `is_placeholder_album_artist`
+  on BOTH fields (catches VA variants `VA`/`v/a`/`diverse`/international
+  that plain `is_unknown_artist` never matched) AND the MB exemption:
+  any recording/release/artist mbid on the file stops the forced loop
+  ("unless MB match says it is" — same sidecar result would come back
+  cached; artist fill already ran). Previously a placeholder album_artist
+  looped forever because verify never fills album_artist (only
+  `collapse_album_artist` at group time, unifying-artist case only).
+- Unverified-list cache is wiped by init on re-enable (lib.rs:321) so the
+  new gate applies on the first pass after deploy.
+- Tests 108/108.
+
+## v3.1.5 (2026-10-19, commit `e962c79` + tag pushed) - cooldown + tracklist leftovers
 
 - **meta_refresh cooldown**: new config key `metaRefreshCooldownDays`
   (default 30, 0 = off). KV `meta_refresh.last_done.{library_id}` is stamped

@@ -898,19 +898,35 @@ fn load_unverified(
                         if let Ok(val) = serde_json::from_slice::<Value>(&v) {
                             if let Some(tags) = val.get("tags") {
                                 if !tags.is_null() {
-                                    // Re-fingerprint when either artist or
-                                    // album_artist has no meta or contains
-                                    // "Unknown" (missing tag counts as no meta).
+                                    let t = serde_json::from_value::<TrackTags>(tags.clone()).ok();
+                                    // Placeholder artist/album_artist (missing, Unknown...,
+                                    // ????-style, VA markers, bracketed forms of any of
+                                    // those) → keep re-fingerprinting until MusicBrainz
+                                    // identifies the file. Any recording/release/artist
+                                    // mbid on it means the match already happened — that
+                                    // is the "unless MB says it is" exemption: more
+                                    // fingerprints would just return the same cached
+                                    // result, and the artist fill that could happen from
+                                    // it already ran. Unparseable KV entries count as
+                                    // placeholder (same as the old missing-field default).
+                                    let (placeholder, mbid_seen) = match &t {
+                                        Some(t) => (
+                                            crate::organizer::is_placeholder_album_artist(&t.artist)
+                                                || crate::organizer::is_placeholder_album_artist(&t.album_artist),
+                                            !t.mbid_recording.trim().is_empty()
+                                                || !t.mbid_album.trim().is_empty()
+                                                || !t.mbid_artist.trim().is_empty(),
+                                        ),
+                                        None => (true, false),
+                                    };
                                     let force_unknown = cfg.force_refingerprint_unknown_artist
-                                        && (tags.get("artist").and_then(|a| a.as_str()).map(crate::tags::is_unknown_artist).unwrap_or(true)
-                                            || tags.get("album_artist").and_then(|a| a.as_str()).map(crate::tags::is_unknown_artist).unwrap_or(true));
+                                        && placeholder
+                                        && !mbid_seen;
 
                                     if !force_unknown && !cfg.force_fingerprint {
-                                        if let Ok(t) = serde_json::from_value::<TrackTags>(tags.clone()) {
-                                            if !t.mbid_album.is_empty() {
-                                                verified_set.insert(k);
-                                                continue;
-                                            }
+                                        if t.as_ref().is_some_and(|t| !t.mbid_album.is_empty()) {
+                                            verified_set.insert(k);
+                                            continue;
                                         }
                                     }
                                     if !force_unknown && tags.get("_acoustid_checked").and_then(|v| v.as_bool()).unwrap_or(false) {

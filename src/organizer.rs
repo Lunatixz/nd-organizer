@@ -411,7 +411,7 @@ fn folder_name(rel: &str) -> String {
 
 /// The Various-Artists markers classify() recognizes (lowercase compare).
 pub fn is_various_marker(s: &str) -> bool {
-    let aa = s.trim().to_ascii_lowercase();
+    let aa = crate::tags::trim_tag_wrappers(s).to_ascii_lowercase();
     aa == "various"
         || aa == "various artists"
         || aa == "va"
@@ -3091,6 +3091,16 @@ mod tests {
         assert_eq!(plan.moves.len(), 1);
         assert_eq!(plan.skipped.len(), 1);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn various_marker_accepts_wrapped_forms() {
+        assert!(is_various_marker("Various Artists"));
+        assert!(is_various_marker("[Various Artists]"));
+        assert!(is_various_marker("(VA)"));
+        assert!(is_various_marker("{v/a}"));
+        assert!(!is_various_marker("Radiohead"));
+        assert!(!is_various_marker("[Radiohead]"));
     }
 
     #[test]

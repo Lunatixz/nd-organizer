@@ -553,12 +553,21 @@ pub fn strip_acoustic(title: &str) -> String {
     result.trim().to_string()
 }
 
+/// Strip enclosing tagger wrappers — "[Unknown Artist]", "(????)", "{VA}" —
+/// so bracketed placeholders hit the same checks as bare ones. Live data has
+/// artist="[????]"; without this the bracket forms slip past every check.
+pub fn trim_tag_wrappers(s: &str) -> &str {
+    s.trim()
+        .trim_matches(|c| matches!(c, '[' | ']' | '(' | ')' | '{' | '}'))
+        .trim()
+}
+
 /// Check if an artist tag is a placeholder: no meta at all, or the string
 /// contains "Unknown" (case-insensitive). "Various Artists"/"Various" also
 /// count. Used by forceRefingerprintUnknownArtist to identify tracks that
 /// need AcoustID lookup.
 pub fn is_unknown_artist(artist: &str) -> bool {
-    let a = artist.trim().to_ascii_lowercase();
+    let a = trim_tag_wrappers(artist).to_ascii_lowercase();
     a.is_empty()
         // "????" / "?" placeholders from taggers with no metadata — never a
         // real artist name, so they flow through the same resolve/refingerprint
@@ -657,7 +666,13 @@ mod unknown_artist_tests {
         assert!(is_unknown_artist("????"));
         assert!(is_unknown_artist("  ? ? ?  "));
         assert!(is_unknown_artist("?"));
+        assert!(is_unknown_artist("[????]"));
+        assert!(is_unknown_artist("[Unknown Artist]"));
+        assert!(is_unknown_artist("[Various Artists]"));
+        assert!(is_unknown_artist("(unknown)"));
         assert!(!is_unknown_artist("Radiohead"));
+        assert!(!is_unknown_artist("[Radiohead]"));
+        assert!(!is_unknown_artist("KISS (remastered)"));
         assert!(!is_unknown_artist("?dios"));
         assert!(!is_unknown_artist("Unknowingly"));
     }
