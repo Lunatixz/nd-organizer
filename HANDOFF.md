@@ -1,8 +1,34 @@
-# HANDOFF - nd-organizer session state (2026-10-19, v3.1.6 placeholder re-fingerprint gate)
+# HANDOFF - nd-organizer session state (2026-10-20, v3.1.7 sidecar cache + Top Picks dedupe + NFO rating)
 
 Read `AGENTS.md` first (repo rules: scope = this repo + 5 sidecar dirs only
 `acoustid/ webhook/ proxy/ mysql/ essentia/`; Navidrome = logs + plugin config
 edits only, NEVER Navidrome's own code).
+
+## Deployed (2026-10-20) - v3.1.7, three live-bug fixes
+
+- **AcoustID sidecar cache poisoning** (`acoustid/server.py`): the sidecar
+  cached failed lookups keyed `path:mtime`, so a bad API key (invalid client,
+  `code 4`) or a rate-limit (429) was served from cache forever — the plugin's
+  verify loop spun on the same unverified files with no backoff. Now only
+  *permanent* errors (bad fingerprint `code 3`, no match `code 2`) are cached;
+  `code 4` (invalid key) and 429/network errors are marked `transient` and
+  retried on the next batch. Clears when a valid key is saved + sidecar
+  restarted (`POST /containers/{id}/restart`).
+- **Top Picks duplicate playlist** (`stats.rs:refresh_top_picks`): when the KV
+  key `stat.playlist.id` was lost/reset (storage wipe, re-enable before the
+  first playlist write), `createPlaylist` ran blind and minted a *second*
+  "Top Picks". Now: if the KV id is missing, resolve the existing playlist by
+  name via `getPlaylists` first (adopting it) before creating — same recovery
+  the stale-id path already had, just moved up so it runs on the create path.
+- **NFO album rating as external source** (`stats.rs` + `nfo.rs`): the Lidarr
+  album push called `album_rating_for(&dir, None)` — always `None` external, so
+  the README's "external ratings take priority" claim was not true for NFO.
+  `NfoAlbum` now parses (`<rating>`/`<userrating>`, clamped 0-5) and serializes
+  `<rating>`; the Lidarr album push passes the album's NFO rating (when
+  `readNfo` is on) as the external source. README wording corrected: NFO is the
+  only real external *input* source (Lidarr is a push target, MusicBrainz has
+  no ratings API).
+- Tests 109/109 (new `parses_and_serializes_rating`).
 
 ## Deployed (2026-10-19) - v3.1.6, placeholder artist re-fingerprint gating
 

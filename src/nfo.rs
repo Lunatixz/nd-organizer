@@ -31,6 +31,7 @@ pub struct NfoAlbum {
     pub description: String,
     pub bpm: Option<f64>,
     pub key: String,
+    pub rating: Option<f64>,
     pub chords: Vec<String>,
     pub structure: Vec<String>,
     pub credits: Vec<NfoCredit>,
@@ -162,6 +163,11 @@ pub fn parse_album_nfo(xml: &str) -> Option<NfoAlbum> {
                         "description" if !value.is_empty() => nfo.description = value,
                         "bpm" => nfo.bpm = value.parse().ok(),
                         "key" if !value.is_empty() => nfo.key = value,
+                        "rating" | "userrating" => {
+                            if let Ok(v) = value.parse::<f64>() {
+                                nfo.rating = Some(v.clamp(0.0, 5.0));
+                            }
+                        }
                         "chord" if !value.is_empty() => nfo.chords.push(value),
                         "structure" if !value.is_empty() => nfo.structure.push(value),
                         _ => {}
@@ -276,6 +282,9 @@ pub fn serialize_album(nfo: &NfoAlbum) -> String {
     if !nfo.key.is_empty() {
         out.push_str(&format!("  <key>{}</key>\n", esc(&nfo.key)));
     }
+    if let Some(rating) = nfo.rating {
+        out.push_str(&format!("  <rating>{:.1}</rating>\n", rating.clamp(0.0, 5.0)));
+    }
     for c in &nfo.chords {
         out.push_str(&format!("  <chord>{}</chord>\n", esc(c)));
     }
@@ -374,6 +383,22 @@ mod tests {
         // Nothing usable.
         let nfo = parse_album_nfo("<album><title>T</title></album>").unwrap();
         assert_eq!(nfo.effective_year(), None);
+    }
+
+    #[test]
+    fn parses_and_serializes_rating() {
+        // <rating> parse, clamped to 0-5.
+        let nfo = parse_album_nfo("<album><title>T</title><rating>4.5</rating></album>").unwrap();
+        assert_eq!(nfo.rating, Some(4.5));
+        // Out-of-range clamps high and low; <userrating> also accepted.
+        let nfo = parse_album_nfo("<album><title>T</title><rating>9</rating></album>").unwrap();
+        assert_eq!(nfo.rating, Some(5.0));
+        let nfo = parse_album_nfo("<album><title>T</title><userrating>2.5</userrating></album>").unwrap();
+        assert_eq!(nfo.rating, Some(2.5));
+        // Round-trip through serialize.
+        let xml = serialize_album(&NfoAlbum { title: "T".into(), rating: Some(3.0), ..Default::default() });
+        assert!(xml.contains("<rating>3.0</rating>"));
+        assert_eq!(parse_album_nfo(&xml).unwrap().rating, Some(3.0));
     }
 
     #[test]

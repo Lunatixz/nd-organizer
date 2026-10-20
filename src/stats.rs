@@ -764,7 +764,15 @@ pub mod host_stats {
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
                         if !album_name.is_empty() {
-                            if let Some(album_stars) = album_rating_for(&album_dir, None) {
+                            // External album rating (from album.nfo) takes priority
+                            // over the calculated track average when present.
+                            let nfo_rating = if cfg.read_nfo {
+                                crate::nfo::read_album_nfo(std::path::Path::new(&album_dir))
+                                    .and_then(|n| n.rating)
+                            } else {
+                                None
+                            };
+                            if let Some(album_stars) = album_rating_for(&album_dir, nfo_rating) {
                                 if let Some(album) = crate::lidarr::host_lidarr::find_album(
                                     cfg, &album_name, &t.artist,
                                 ) {
@@ -1097,13 +1105,22 @@ pub mod host_stats {
             }
             q
         };
-        // Update an existing playlist if we've created one before.
+        // Update an existing playlist if we've created one before. If the KV key
+        // was lost/reset (fresh DB, storage wipe), look one up by name first so we
+        // adopt it instead of silently creating a duplicate "Top Picks".
         let stored = crate::store::kv()
             .get("stat.playlist.id")
             .ok()
             .flatten()
             .and_then(|v| String::from_utf8(v).ok())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                // KV id is missing — resolve an existing "Top Picks" by name.
+                let listed = host::subsonicapi::call(&format!("getPlaylists?u={user}")).ok()?;
+                let id = playlist_id_named(&listed, "Top Picks")?;
+                let _ = crate::store::kv().set("stat.playlist.id", id.clone().into_bytes());
+                Some(id)
+            });
         // subsonicapi::call returns Ok(body) even for {"status":"failed"}
         // (HTTP 200) — treat that as an error so the stale-id recovery below
         // actually runs instead of silently keeping the dead id forever.

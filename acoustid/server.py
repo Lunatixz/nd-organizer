@@ -153,11 +153,22 @@ def _process_job_file(job_id, entry, apikey):
         # Distinguish transient (rate limit, network) from permanent errors
         transient = "429" in err or "timeout" in err.lower() or "connection" in err.lower()
         result = {"path": path, "ok": False, "error": err, "transient": transient}
+        # Don't cache lookup errors (invalid API key, rate limit): the cause
+        # (bad key, network) may be fixed and we must retry, not serve a stale
+        # failure. Fingerprint/file errors are cached to avoid re-fpcalc.
+        if transient or "api key" in err.lower() or "invalid client" in err.lower():
+            return result
         _results_cache[cache_key] = result
         return result
     if not res or res.get("status") != "ok":
         msg = res.get("error", {}).get("message", "lookup failed") if res else "no response"
         STATS["errors"] += 1
+        # Only code 4 (invalid API key) and rate limits are config-dependent and
+        # must be retryable; codes 2 (invalid fp) and 3 (no match) are real
+        # lookups whose fingerprint won't change, so cache them to avoid re-fpcalc.
+        ecode = (res.get("error", {}) or {}).get("code") if res else None
+        if ecode == 4 or "api key" in msg.lower() or "429" in msg:
+            return {"path": path, "ok": False, "error": msg, "transient": True}
         result = {"path": path, "ok": False, "error": msg}
         _results_cache[cache_key] = result
         return result

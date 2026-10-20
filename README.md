@@ -179,8 +179,10 @@ granularity:
 - **Loved** = rating ≥ `lovedThresholdStars` (default 3). Loved tracks are
   starred in Navidrome and, with `writePlaycount` on, tagged with `LOVED` status; beloved tracks ≥ 3 stars
   start at that baseline when first observed.
-- **Album ratings** average the album's track star ratings. External ratings
-  (NFO / MusicBrainz / Lidarr) take priority over the calculated average.
+- **Album ratings** average the album's track star ratings. A rating in the
+  album's `album.nfo` (`<rating>` / `<userrating>`) takes priority over the
+  calculated average when present. (Lidarr is a push target, not an input;
+  MusicBrainz exposes no ratings, so NFO is the external input source.)
 - **Initial rating** seeds from the strongest signal: Lidarr track/album rating
   (directly used), or Last.fm playcount (higher playcount → more stars, up to
   4.5 ceiling) + Last.fm loved (floors at 3 stars).
