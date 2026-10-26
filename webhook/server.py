@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("webhook")
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8099
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8099
 LOGFILE = sys.argv[2] if len(sys.argv) > 2 else "webhook.log"
 STARTED = time.time()
 
@@ -1626,6 +1626,80 @@ def artists_html():
             "</table>") % (len(agg), rows)
 
 
+def _rollback_detail_html(recs, rolled_back, hist=None):
+    """Details body for one run: what the run changed (folder moves, file
+    renames, album.nfo writes) and exactly what a rollback restores from it.
+    Pure (decoded records in, html out) so --self-check can exercise it."""
+    dirs = []
+    nfo = {}
+    renames = []
+    for r in recs:
+        d = "%s &rarr; %s" % (esc(str(r.get("from_dir", ""))), esc(str(r.get("to_dir", ""))))
+        if d not in dirs:
+            dirs.append(d)
+        for fr in (r.get("file_renames") or []):
+            renames.append("%s &rarr; %s" % (
+                esc(str(fr.get("from", ""))), esc(str(fr.get("to", "")))))
+        w = r.get("nfo_written")
+        if w:
+            nfo[str(w)] = bool(r.get("nfo_backup"))
+
+    # What changed: folder moves, nfo writes, file renames.
+    parts = []
+    shown_dirs = dirs[:6]
+    if shown_dirs:
+        parts.append("<div><b>Changed &mdash; folders</b></div>"
+                     + "".join("<div class='dim'>%s</div>" % d for d in shown_dirs))
+        if len(dirs) > len(shown_dirs):
+            parts.append("<div class='dim'>&hellip; and %d more folder move(s)</div>"
+                         % (len(dirs) - len(shown_dirs)))
+    nfo_backed = nfo_unbacked = 0
+    for w, backed in nfo.items():
+        if backed:
+            nfo_backed += 1
+            parts.append("<div class='dim'>%s rewritten &mdash; original content backed up</div>"
+                         % esc(w))
+        else:
+            nfo_unbacked += 1
+            parts.append("<div class='dim'>%s touched without a backup</div>" % esc(w))
+    shown_ren = renames[:40]
+    if shown_ren:
+        parts.append("<div><b>Changed &mdash; file names</b></div>"
+                     + "".join("<div class='dim'>%s</div>" % r for r in shown_ren))
+    if len(renames) > len(shown_ren):
+        parts.append("<div class='dim'>&hellip; and %d more rename(s)</div>"
+                     % (len(renames) - len(shown_ren)))
+
+    # What rollback restores: explicit, honest list of the undo actions.
+    restore = []
+    if renames:
+        restore.append("%d file rename(s) reverted to their original names" % len(renames))
+    n_moves = len({
+        (str(r.get("from_dir", "")).lower(), str(r.get("to_dir", "")).lower())
+        for r in recs
+        if str(r.get("from_dir", "")).lower() != str(r.get("to_dir", "")).lower()
+    })
+    if n_moves:
+        restore.append("%d folder move(s) reversed (files return to their original folders)"
+                       % n_moves)
+    if nfo_backed:
+        restore.append("%d album.nfo file(s) restored from their backups" % nfo_backed)
+    if nfo_unbacked:
+        restore.append("%d album.nfo file(s) left as-is (no backup was taken)" % nfo_unbacked)
+    restore.append("audio tag contents are not reverted")
+    if recs:
+        lead = "Rollback restored:" if rolled_back else "Rollback will restore:"
+        parts.insert(0, "<div class='rollback'><b>%s</b> %s.</div>"
+                     % (lead, "; ".join(restore)))
+
+    if not recs and hist:
+        parts.insert(0, "<div class='dim'>library %s &middot; mode %s</div>"
+                     % (esc(str(hist.get("libraryId", "?"))), esc(str(hist.get("mode", "?")))))
+        parts.append("<div class='dim'>Undo data expired &mdash; this run can no longer "
+                     "be rolled back.</div>")
+    return "".join(parts)
+
+
 def rollback_runs_html():
     """Every apply run ever recorded: run ID, when, what it changed, whether it
     was rolled back, and whether its undo data is still present. Run listings
@@ -1684,11 +1758,6 @@ def rollback_runs_html():
         )
         n_files = sum(len(r.get("file_renames") or []) for r in recs) or int(h.get("files") or 0)
         n_albums = len(recs) or int(h.get("albums") or 0)
-        dirs = []
-        for r in recs:
-            d = "%s &rarr; %s" % (esc(str(r.get("from_dir", ""))), esc(str(r.get("to_dir", ""))))
-            if d not in dirs:
-                dirs.append(d)
         try:
             when = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
         except Exception:
@@ -1708,24 +1777,11 @@ def rollback_runs_html():
                     "warn" if left <= 3 else "dim", left)
             else:
                 expires = "<span class='tag bad'>expired</span>"
-        renames = ""
-        shown = 0
-        for r in recs:
-            for fr in (r.get("file_renames") or []):
-                if shown >= 40:
-                    break
-                shown += 1
-                renames += "<div class='dim'>%s &rarr; %s</div>" % (
-                    esc(str(fr.get("from", ""))), esc(str(fr.get("to", ""))))
-        more = n_files - shown
-        if more > 0:
-            renames += "<div class='dim'>&hellip; and %d more</div>" % more
         out += ("<details class='collapse'><summary><code>%s</code> "
                 "<span class='dim'>%s</span> &middot; %d album(s) &middot; %d file(s) &middot; "
-                "%s %s</summary><div class='collapse-body'>%s%s</div></details>") % (
+                "%s %s</summary><div class='collapse-body'>%s</div></details>") % (
             esc(run), when, n_albums, n_files, tags, expires,
-            ("<div>" + "".join("<div class='dim'>%s</div>" % d for d in dirs[:6]) + "</div>") if dirs else "",
-            renames)
+            _rollback_detail_html(recs, run in done, h))
     if not out:
         return ("<div class='note'>No apply runs yet - rollback data appears here "
                 "as soon as a run moves files.</div>")
@@ -3258,6 +3314,29 @@ def _do_starred_pull():
 
 
 if __name__ == "__main__":
+    if "--self-check" in sys.argv:
+        rec = {"seq": 1, "from_dir": "Album", "to_dir": "Artist/Album (2020)",
+               "file_renames": [{"from": "01 - Old.flac", "to": "01 - New.flac"}],
+               "nfo_written": "Artist/Album (2020)/album.nfo",
+               "nfo_backup": "backup:run-1:1"}
+        html = _rollback_detail_html([rec], False)
+        assert "Rollback will restore:" in html
+        assert "1 file rename(s) reverted" in html
+        assert "1 folder move(s) reversed" in html
+        assert "1 album.nfo file(s) restored from their backups" in html
+        assert "audio tag contents are not reverted" in html
+        assert "01 - Old.flac" in html and "01 - New.flac" in html
+        assert "Original content backed up" in html or "original content backed up" in html
+        done_html = _rollback_detail_html([rec], True)
+        assert "Rollback restored:" in done_html and "will restore" not in done_html
+        nb = dict(rec, nfo_backup=None)
+        nb_html = _rollback_detail_html([nb], False)
+        assert "touched without a backup" in nb_html
+        assert "left as-is (no backup was taken)" in nb_html
+        exp = _rollback_detail_html([], False, {"libraryId": 2, "mode": "apply"})
+        assert "library 2" in exp and "can no longer" in exp
+        print("ok")
+        sys.exit(0)
     load_log()
     log.info("=" * 60)
     log.info("nd-organizer-webhook starting")

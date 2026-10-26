@@ -1077,7 +1077,15 @@ pub fn verify_step(
         .and_then(|v| String::from_utf8(v).ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let safe_cursor = cursor.min(unverified.len());
+    let mut safe_cursor = cursor.min(unverified.len());
+    // ponytail: stale cursor at/past the end (list was recomputed shorter, or
+    // a completion didn't reset it) → skip() yields nothing → we'd "send" a
+    // 0-file job that 404s on poll, forever. Reset to the front; the sidecar
+    // dedups already-processed files anyway. (unverified is nonempty here —
+    // the empty case returns Done above.)
+    if safe_cursor >= unverified.len() {
+        safe_cursor = 0;
+    }
     let files_to_send: Vec<(String, i64)> = unverified.iter().skip(safe_cursor).take(max_per_task).cloned().collect();
     let total_batches = (files_to_send.len() + batch_size - 1) / batch_size;
     crate::wasm::log_info(&format!(
@@ -1296,6 +1304,9 @@ fn _complete_verify_job(
         .collect();
     if remaining.is_empty() {
         let _ = crate::store::kv().delete(unverified_key);
+        // Completion ends the verify run — a stale cursor here would poison
+        // the next run (skip() past the end of the recomputed list).
+        let _ = crate::store::kv().delete(&format!("verify_cursor.{}", library_id));
     } else {
         // Keep mtimes — the sidecar validates them before fingerprinting.
         let _ = crate::store::kv().set(unverified_key, serde_json::to_vec(&remaining).unwrap_or_default());

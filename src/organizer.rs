@@ -485,7 +485,7 @@ pub fn classify(info: &AlbumInfo, cfg: &Config) -> Bucket {
     // ponytail: "ost" must match a whole genre token — plain contains() hits
     // "Post-Rock"/"Post-Punk"/"Post-Grunge" and files whole albums as soundtracks.
     let genre_is_ost = genre
-        .split(|c: char| c == ';' || c == ',' || c == '/' || c == '|')
+        .split([';', ',', '/', '|'])
         .any(|g| g.trim() == "ost");
     let is_soundtrack = genre.contains("soundtrack")
         || genre_is_ost
@@ -1240,6 +1240,7 @@ fn adopt_year_variant(root: &Path, files: &[(String, TrackTags)], target: &str) 
 
 /// Build a change plan for a whole album group. `folder_hint` names the album
 /// when it has no metadata at all.
+#[allow(clippy::too_many_arguments)]
 pub fn build_group_plan(
     root: &Path,
     cfg: &Config,
@@ -1723,7 +1724,7 @@ pub(crate) fn dir_has_audio(dir: &Path) -> bool {
 /// Normalize a folder name for twin matching: lowercase, unify quotes, drop
 /// punctuation and parenthesised groups ("(2011)", "(Deluxe)").
 fn norm_name(s: &str) -> String {
-    let s = s.to_lowercase().replace('’', "'").replace('‘', "'");
+    let s = s.to_lowercase().replace(['’', '‘'], "'");
     let mut out = String::new();
     let mut depth = 0usize;
     for c in s.chars() {
@@ -1797,7 +1798,7 @@ pub fn merge_sidecar_twin(orphan: &Path, dry: bool) -> Option<(usize, PathBuf)> 
     let mut moved = 0usize;
     for f in &files {
         let fname = f.file_name()?;
-        let dst = target.join(&fname);
+        let dst = target.join(fname);
         if dry {
             moved += 1;
         } else if dst.exists() {
@@ -2461,11 +2462,13 @@ mod tests {
         fs::write(root.join("Old Dir/folder.jpg"), b"j").unwrap();
         fs::write(root.join("Old Dir/album.sfv"), b"h").unwrap();
         fs::write(root.join("Old Dir/cd.png"), b"p").unwrap();
-        let mut tags = TrackTags::default();
-        tags.album = "New Album".into();
-        tags.album_artist = "Artist".into();
-        tags.title = "Song".into();
-        tags.track = Some(1);
+        let tags = TrackTags {
+            album: "New Album".into(),
+            album_artist: "Artist".into(),
+            title: "Song".into(),
+            track: Some(1),
+            ..Default::default()
+        };
         let files: Vec<(String, TrackTags)> =
             vec![("Old Dir/01 - Song.flac".into(), tags)];
         let plan = build_group_plan(&root, &Config::default(), &files, "Old Dir", "", None, "", None);
@@ -2752,8 +2755,10 @@ mod tests {
         let plan = build_group_plan(&root, &Config::default(), &files, "Renegades", "", None, "", None);
         assert!(plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
         // read_nfo off -> NFO ignored, no year.
-        let mut cfg = Config::default();
-        cfg.read_nfo = false;
+        let cfg = Config {
+            read_nfo: false,
+            ..Default::default()
+        };
         let plan = build_group_plan(&root, &cfg, &files, "Renegades", "", None, "", None);
         assert!(!plan.target_dir.contains("(2000)"), "{}", plan.target_dir);
         let _ = fs::remove_dir_all(&root);
@@ -3111,7 +3116,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("inbox")).unwrap();
         for n in ["01 - Alpha", "02 - Beta", "03 - Gamma", "10 - Delta"] {
-            fs::write(root.join(format!("inbox/{n}.flac")), n.to_string()).unwrap();
+            fs::write(root.join(format!("inbox/{n}.flac")), n).unwrap();
         }
         let mk = |track: Option<u32>, title: &str| TrackTags {
             album_artist: "Artist".into(),
@@ -3252,7 +3257,7 @@ mod tests {
         ];
         let plan = build_group_plan(&root, &Config::default(), &files, "A", "", None, "", Some(&tracks));
         assert_eq!(plan.leftovers.len(), 2, "{:?}", plan.leftovers);
-        assert_eq!(plan.duplicates.is_empty(), true, "different sizes");
+        assert!(plan.duplicates.is_empty(), "different sizes");
         let tos: Vec<&str> = plan
             .moves
             .iter()

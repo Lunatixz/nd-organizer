@@ -459,7 +459,7 @@ pub fn replaygain_present(path: &Path) -> bool {
     };
     tagged
         .primary_tag()
-        .map(|t| replaygain_in_tag(t))
+        .map(replaygain_in_tag)
         .unwrap_or(false)
 }
 

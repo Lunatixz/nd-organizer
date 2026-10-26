@@ -60,7 +60,7 @@ except Exception:
     pass
 logging.getLogger().addHandler(_mem)
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8097
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8097
 FPCALC_LENGTH = 120  # seconds; AcoustID recommends ~120s
 SERVICE = "nd-organizer-acoustid"
 CACHE_DIR = "/data/plugins/nd-organizer/sidecar-cache"
@@ -112,6 +112,15 @@ def _expire_jobs():
         del _jobs[jid]
 
 
+def _is_transient(err):
+    """True when a lookup error is worth retrying. ponytail: urllib's timeout
+    message is 'timed out' (two words) — matching only 'timeout' cached those
+    as permanent failures and spun verify forever (6-file, 5-day incident)."""
+    e = err.lower()
+    return ("429" in err or "timeout" in e or "timed out" in e
+            or "connection" in e or "name resolution" in e)
+
+
 def _process_job_file(job_id, entry, apikey):
     """Process a single file: fpcalc + AcoustID lookup + replaygain.
     Returns a result dict. Checks idempotency cache first."""
@@ -132,7 +141,10 @@ def _process_job_file(job_id, entry, apikey):
         return result
     try:
         current_mtime = os.path.getmtime(path)
-        if abs(current_mtime - mtime) > 1:
+        # ponytail: the plugin stores int mtimes; getmtime is float, so a file
+        # exactly 1.0002s off failed `> 1` and spun verify forever (2-file,
+        # 5-day incident). Compare ints — real changes are seconds-to-days off.
+        if abs(int(current_mtime) - mtime) > 1:
             result = {"path": path, "ok": False, "error": f"mtime mismatch: expected {mtime}, got {current_mtime}", "transient": True}
             _results_cache[cache_key] = result
             return result
@@ -143,7 +155,12 @@ def _process_job_file(job_id, entry, apikey):
     data, err = fpcalc(path)
     if err or data is None:
         STATS["errors"] += 1
-        result = {"path": path, "ok": False, "error": err or "fingerprint failed"}
+        # ponytail: an unreadable file never becomes readable by retrying, and
+        # ok:false keeps it in the plugin's verify list forever -> verify never
+        # completes -> nothing moves. Report ok with no matches instead; the
+        # error string stays visible on the entry.
+        result = {"path": path, "ok": True, "matches": [],
+                  "fingerprint_error": err or "fingerprint failed"}
         _results_cache[cache_key] = result
         return result
 
@@ -151,7 +168,7 @@ def _process_job_file(job_id, entry, apikey):
     if err:
         STATS["errors"] += 1
         # Distinguish transient (rate limit, network) from permanent errors
-        transient = "429" in err or "timeout" in err.lower() or "connection" in err.lower()
+        transient = _is_transient(err)
         result = {"path": path, "ok": False, "error": err, "transient": transient}
         # Don't cache lookup errors (invalid API key, rate limit): the cause
         # (bad key, network) may be fixed and we must retry, not serve a stale
@@ -297,20 +314,34 @@ def fpcalc(path):
         return None, "bad fpcalc output: %s" % e
 
 
+def _int_duration(duration):
+    """AcoustID HTTP 400s on float durations (fpcalc emits e.g. 183.45)."""
+    try:
+        return int(round(float(duration)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def acoustid_lookup(apikey, duration, fingerprint):
+    # ponytail: urlencode percent-encodes meta's '+' separators (%2B) and the
+    # AcoustID API then silently drops the whole meta param (bare results with
+    # no recordings -> top_matches always empty). Append meta with literal '+'.
     q = urllib.parse.urlencode({
         "client": apikey,
-        "duration": duration,
+        "duration": _int_duration(duration),
         "fingerprint": fingerprint,
-        "meta": "recordings+releasegroups+sources+isrcs",
         "format": "json",
-    })
+    }) + "&meta=" + "+".join(("recordings", "releasegroups", "sources", "isrcs"))
     t0 = time.time()
     try:
         with urllib.request.urlopen("https://api.acoustid.org/v2/lookup?" + q, timeout=30) as r:
             data = json.loads(r.read().decode())
         log.info("AcoustID lookup ok (%.2fs, status=%s)", time.time() - t0, data.get("status"))
         return data, None
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:300]
+        log.warning("AcoustID lookup HTTP %s (%.2fs): %s", e.code, time.time() - t0, body)
+        return {"status": "error", "error": {"code": getattr(e, "code", 0), "message": body}}, None
     except Exception as e:
         log.warning("AcoustID lookup failed (%.2fs): %s", time.time() - t0, e)
         return None, str(e)
@@ -603,7 +634,7 @@ class Handler(BaseHTTPRequestHandler):
             # Submit to AcoustID
             submit_data = urllib.parse.urlencode({
                 "client": apikey,
-                "duration": data.get("duration", 0),
+                "duration": _int_duration(data.get("duration", 0)),
                 "fingerprint": data.get("fingerprint", ""),
                 "recordingid": recording_id,
             }).encode()
@@ -723,6 +754,23 @@ def start_heartbeat():
 
 
 if __name__ == "__main__":
+    if "--self-check" in sys.argv:
+        assert _int_duration(183.45) == 183
+        assert _int_duration(0) == 0
+        assert _int_duration("x") == 0
+        # meta must go on the query literally: urlencode's %2B separator makes
+        # the API drop meta entirely (bare results, matches always 0).
+        q = urllib.parse.urlencode({"fingerprint": "A+B"}) + "&meta=" + "+".join(("recordings", "releasegroups"))
+        assert "meta=recordings+releasegroups" in q and "A%2B" in q
+        # transient classification: urllib says "timed out", not "timeout"
+        assert _is_transient("The read operation timed out")
+        assert _is_transient("HTTP Error 429: Too Many Requests")
+        assert _is_transient("Temporary failure in name resolution")
+        assert not _is_transient("HTTP Error 400: Bad Request")
+        # mtime check compares ints: 1.0002s float drift must pass
+        assert abs(int(1778593820.000262) - 1778593819) <= 1
+        print("ok")
+        sys.exit(0)
     start_heartbeat()
     startup_banner()
     _load_jobs_from_disk()
