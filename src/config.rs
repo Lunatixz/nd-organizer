@@ -496,7 +496,7 @@ impl Default for Config {
             preserve_recording_type: true,
             singles_under_artist: true,
             singles_enabled: true,
-            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke,comedy".into(),
+            filler_keywords: "intro,outro,interlude,transition,prelude,postlude,christmas,commercial,skit,instrumental,interview,classical,karaoke,comedy,introduction".into(),
             exclude_paths: Vec::new(),
             move_destination_library: String::new(), // empty = disabled
             enable_library_rename: false,
