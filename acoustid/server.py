@@ -115,10 +115,13 @@ def _expire_jobs():
 def _is_transient(err):
     """True when a lookup error is worth retrying. ponytail: urllib's timeout
     message is 'timed out' (two words) — matching only 'timeout' cached those
-    as permanent failures and spun verify forever (6-file, 5-day incident)."""
+    as permanent failures and spun verify forever (6-file, 5-day incident).
+    '[Errno 101] Network is unreachable' was the next instance of the same
+    class; transport errors are transient by nature, list what we've seen."""
     e = err.lower()
     return ("429" in err or "timeout" in e or "timed out" in e
-            or "connection" in e or "name resolution" in e)
+            or "connection" in e or "name resolution" in e
+            or "unreachable" in e or "[errno" in e)
 
 
 def _process_job_file(job_id, entry, apikey):
@@ -766,6 +769,7 @@ if __name__ == "__main__":
         assert _is_transient("The read operation timed out")
         assert _is_transient("HTTP Error 429: Too Many Requests")
         assert _is_transient("Temporary failure in name resolution")
+        assert _is_transient("[Errno 101] Network is unreachable")
         assert not _is_transient("HTTP Error 400: Bad Request")
         # mtime check compares ints: 1.0002s float drift must pass
         assert abs(int(1778593820.000262) - 1778593819) <= 1

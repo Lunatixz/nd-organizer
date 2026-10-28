@@ -42,17 +42,13 @@ pub enum Kv {
     Mysql { url: String, db: MysqlDb },
 }
 
-/// Track whether we're in MySQL fallback mode (MySQL was down, using Host KV).
-/// When MySQL comes back, re-migrate Host data to MySQL.
-static MYSQL_FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// Session-side circuit for the mysql sidecar: after an error or a slow
-/// response, bypass the sidecar (host KV fallback) for
-/// `state::SIDECAR_COOLDOWN_SECS` instead of letting every op burn seconds
-/// against a dead/hung sidecar. One slow call used to blow the 30s task
-/// deadline and Navidrome's init deadline, killing the whole organize queue.
-/// ponytail: session-scoped, no probe; re-arm = let the window expire and try
-/// one op again. Decision logic is the pure `state::sidecar_cooldown_until`.
+/// response, fail every kv op for `state::SIDECAR_COOLDOWN_SECS` instead of
+/// letting every op burn seconds against a dead/hung sidecar. One slow call
+/// used to blow the 30s task deadline and Navidrome's init deadline, killing
+/// the whole organize queue. ponytail: session-scoped, no probe; re-arm = let
+/// the window expire and try one op again. Decision logic is the pure
+/// `state::sidecar_cooldown_until`.
 static SIDE_COOLDOWN_UNTIL: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 static SIDE_TRIPPED_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const SIDE_COOLDOWN: &str = "sidecar cooldown";
@@ -117,10 +113,9 @@ impl Kv {
             crate::state::now_ts() + crate::state::SIDECAR_COOLDOWN_SECS,
             std::sync::atomic::Ordering::Relaxed,
         );
-        MYSQL_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
         if !SIDE_TRIPPED_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
             crate::wasm::log_warn(&format!(
-                "mysql sidecar degraded ({why}); bypassing sidecar for {}s",
+                "mysql sidecar degraded ({why}); kv ops fail for {}s (tasks retry)",
                 crate::state::SIDECAR_COOLDOWN_SECS
             ));
         }
@@ -135,7 +130,7 @@ impl Kv {
 
     /// POST an op to the mysql sidecar and return its `result` object. Failures
     /// and slow responses arm the session cooldown so the remaining ops in this
-    /// task/init hit host KV instantly.
+    /// task fail instantly (retry next pass) instead of burning the 30s budget.
     fn mysql_op(&self, op: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
         Self::sidecar_gate(crate::state::now_ts())?;
         let t0 = std::time::Instant::now();
@@ -199,14 +194,14 @@ impl Kv {
         match self {
             Kv::Host => host::kvstore::get(key).map_err(|e| e.to_string()),
             Kv::Mysql { .. } => {
-                // Try MySQL first; fall back to Host if MySQL fails.
+                // ponytail: NO host-KV fallback on the mysql backend — writes
+                // during a sidecar cooldown landed in host KV while reads came
+                // from mysql, forking verify state across two stores (the
+                // frozen 15k-unverified-list incident: every shrunk list went
+                // to host, mysql kept serving the stale one forever). One
+                // store only: fail the op, the task retries after cooldown.
                 match self.mysql_op("get", json!({ "key": key })) {
                     Ok(r) => {
-                        // MySQL is back — re-migrate if we were in fallback mode.
-                        if MYSQL_FALLBACK.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                            crate::wasm::log_info("mysql: reconnected, re-seeding from local store");
-                            let _ = reseed_mysql();
-                        }
                         let v = r.get("value").cloned().unwrap_or_default();
                         if let Some(b64) = v.as_str() {
                             Ok(Some(BASE64.decode(b64).map_err(|e| e.to_string())?))
@@ -216,18 +211,9 @@ impl Kv {
                     }
                     Err(e) => {
                         if e != SIDE_COOLDOWN {
-                            crate::wasm::log_warn(&format!("mysql get failed ({e}), falling back to host"));
+                            crate::wasm::log_warn(&format!("mysql get failed ({e})"));
                         }
-                        MYSQL_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
-                        // ponytail: a miss in the fallback store is NOT proof the key
-                        // is absent — mysql may hold it while the sidecar is down.
-                        // Callers that treat Ok(None) as "empty" (index completion!)
-                        // corrupt state during an outage, so surface an error they
-                        // retry instead; after reconnect the real read succeeds.
-                        match host::kvstore::get(key).map_err(|e| e.to_string())? {
-                            Some(v) => Ok(Some(v)),
-                            None => Err(format!("mysql down and no host fallback for key {key}")),
-                        }
+                        Err(e)
                     }
                 }
             }
@@ -241,9 +227,9 @@ impl Kv {
                 Ok(r) => Ok(r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false)),
                 Err(e) => {
                     if e != SIDE_COOLDOWN {
-                        crate::wasm::log_warn(&format!("mysql has failed ({e}), falling back to host"));
+                        crate::wasm::log_warn(&format!("mysql has failed ({e})"));
                     }
-                    host::kvstore::has(key).map_err(|e| e.to_string())
+                    Err(e)
                 }
             },
         }
@@ -253,15 +239,10 @@ impl Kv {
         match self {
             Kv::Host => host::kvstore::set(key, value).map_err(|e| e.to_string()),
             Kv::Mysql { .. } => {
-                match self.mysql_op("set", json!({ "key": key, "value": BASE64.encode(&value), "ttlSeconds": 0 })) {
-                    Ok(_) => Ok(()),
-                    Err(e) => {
-                        if e != SIDE_COOLDOWN {
-                            crate::wasm::log_warn(&format!("mysql set failed ({e}), falling back to host"));
-                        }
-                        host::kvstore::set(key, value).map_err(|e| e.to_string())
-                    }
-                }
+                // ponytail: no host fallback — a cooldown-window write to host
+                // while reads come from mysql forks state across two stores.
+                self.mysql_op("set", json!({ "key": key, "value": BASE64.encode(&value), "ttlSeconds": 0 }))
+                    .map(|_| ())
             }
         }
     }
@@ -269,37 +250,21 @@ impl Kv {
     pub fn set_with_ttl(&self, key: &str, value: Vec<u8>, ttl_seconds: i64) -> Result<(), String> {
         match self {
             Kv::Host => host::kvstore::set_with_ttl(key, value, ttl_seconds).map_err(|e| e.to_string()),
-            Kv::Mysql { .. } => {
-                match self.mysql_op(
+            Kv::Mysql { .. } => self
+                .mysql_op(
                     "set",
                     json!({ "key": key, "value": BASE64.encode(&value), "ttlSeconds": ttl_seconds }),
-                ) {
-                    Ok(_) => Ok(()),
-                    Err(e) => {
-                        if e != SIDE_COOLDOWN {
-                            crate::wasm::log_warn(&format!("mysql set failed ({e}), falling back to host"));
-                        }
-                        host::kvstore::set_with_ttl(key, value, ttl_seconds).map_err(|e| e.to_string())
-                    }
-                }
-            }
+                )
+                .map(|_| ()),
         }
     }
 
     pub fn delete(&self, key: &str) -> Result<(), String> {
         match self {
             Kv::Host => host::kvstore::delete(key).map_err(|e| e.to_string()),
-            Kv::Mysql { .. } => {
-                match self.mysql_op("delete", json!({ "key": key })) {
-                    Ok(_) => Ok(()),
-                    Err(e) => {
-                        if e != SIDE_COOLDOWN {
-                            crate::wasm::log_warn(&format!("mysql delete failed ({e}), falling back to host"));
-                        }
-                        host::kvstore::delete(key).map_err(|e| e.to_string())
-                    }
-                }
-            }
+            Kv::Mysql { .. } => self
+                .mysql_op("delete", json!({ "key": key }))
+                .map(|_| ()),
         }
     }
 
@@ -319,9 +284,9 @@ impl Kv {
                         .unwrap_or_default()),
                     Err(e) => {
                         if e != SIDE_COOLDOWN {
-                            crate::wasm::log_warn(&format!("mysql list failed ({e}), falling back to host"));
+                            crate::wasm::log_warn(&format!("mysql list failed ({e})"));
                         }
-                        host::kvstore::list(prefix).map_err(|e| e.to_string())
+                        Err(e)
                     }
                 }
             }
@@ -332,17 +297,15 @@ impl Kv {
         match self {
             Kv::Host => host::kvstore::get_many(keys).map_err(|e| e.to_string()),
             Kv::Mysql { .. } => {
-                // ponytail: same host fallback as get/set/delete — a bare `?`
-                // here let SIDE_COOLDOWN escape as a fatal error and killed the
-                // group task (4 retries, pipeline stalled). Host may be stale
-                // for keys written after a reconnect; a later pass re-reads them.
+                // ponytail: no host fallback (see get) — fail during cooldown,
+                // the task retries; a stale host read corrupts group state.
                 let r = match self.mysql_op("get_many", json!({ "keys": keys.clone() })) {
                     Ok(r) => r,
                     Err(e) => {
                         if e != SIDE_COOLDOWN {
-                            crate::wasm::log_warn(&format!("mysql get_many failed ({e}), falling back to host"));
+                            crate::wasm::log_warn(&format!("mysql get_many failed ({e})"));
                         }
-                        return host::kvstore::get_many(keys).map_err(|e| e.to_string());
+                        return Err(e);
                     }
                 };
                 let mut out = HashMap::new();
@@ -466,38 +429,6 @@ pub fn mysql_migration_needed(cfg: &crate::config::Config) -> bool {
     match kv.mysql_op("has", json!({ "key": MIGRATED_MARKER })) {
         Ok(r) => !r.get("exists").and_then(|e| e.as_bool()).unwrap_or(false),
         Err(_) => false, // sidecar unreachable - don't loop forever
-    }
-}
-
-/// Re-seed MySQL with data from Host KV after a fallback period.
-/// Copies all keys from Host to MySQL, preserving existing MySQL data.
-fn reseed_mysql() -> Result<(), String> {
-    let cfg = crate::config::Config::load().map_err(|e| e.to_string())?;
-    let kv = build_backend(&cfg);
-    match kv {
-        Kv::Mysql { .. } => {
-            // List all keys in Host KVStore.
-            let keys = host::kvstore::list("").map_err(|e| e.to_string())?;
-            let mut migrated = 0usize;
-            for key in &keys {
-                // Skip the migrated marker itself.
-                if key == MIGRATED_MARKER {
-                    continue;
-                }
-                // Read from Host.
-                if let Ok(Some(value)) = host::kvstore::get(key) {
-                    // Write to MySQL.
-                    if kv.mysql_op("set", json!({ "key": key, "value": BASE64.encode(&value), "ttlSeconds": 0 })).is_ok() {
-                        migrated += 1;
-                    }
-                }
-            }
-            // Mark migration complete.
-            let _ = kv.mysql_op("set", json!({ "key": MIGRATED_MARKER, "value": BASE64.encode(b"1"), "ttlSeconds": 0 }));
-            crate::wasm::log_info(&format!("reseed: migrated {} keys from local store to MySQL", migrated));
-            Ok(())
-        }
-        _ => Ok(()),
     }
 }
 
