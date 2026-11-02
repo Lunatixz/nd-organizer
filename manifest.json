@@ -72,6 +72,13 @@
           "default": "",
           "description": "Cron expression for recurring runs, e.g. \"0 3 * * 1\" (weekly). Empty disables recurring runs - then only the 'Run on plugin start' run (if enabled) runs automatically."
         },
+        "minHoursBetweenPasses": {
+          "type": "integer",
+          "title": "Cooldown between runs (hours)",
+          "minimum": 0,
+          "default": 12,
+          "description": "Minimum hours between automatic pass starts. A plugin restart or scheduled tick inside this window skips its run instead of stacking a new pass on top of one that just started (0 = no cooldown). A pass already in progress is always resumed, never restarted."
+        },
         "maxAlbumsPerRun": {
           "type": "integer",
           "title": "Max albums per run",
@@ -1213,6 +1220,10 @@
             {
               "type": "Control",
               "scope": "#/properties/scheduleCron"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/minHoursBetweenPasses"
             },
             {
               "type": "Control",

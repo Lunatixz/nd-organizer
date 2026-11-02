@@ -303,7 +303,23 @@ pub(crate) mod wasm {
                 Ok(_) => {}
                 Err(e) => log_warn(&format!("init: clear_queue failed: {e}")),
             }
-            if cfg.run_on_startup {
+            // Restart semantics: the queue was cleared above, so a mid-pass
+            // restart must resume its phase (never wipe + restart from walk —
+            // that silently threw away days of progress on every redeploy).
+            // A fresh startup run additionally respects the
+            // minHoursBetweenPasses cooldown so restarts never stack passes.
+            let resumed = resume_pipeline(&cfg);
+            if cfg.run_on_startup && !resumed.is_empty() {
+                log_info(&format!(
+                    "init: pass already running (libraries {:?}) - resuming, not restarting",
+                    resumed
+                ));
+            } else if cfg.run_on_startup && !pass_cooldown_over(&cfg) {
+                log_info(&format!(
+                    "init: startup run skipped - minHoursBetweenPasses ({}h) since last pass start",
+                    cfg.min_hours_between_passes
+                ));
+            } else if cfg.run_on_startup {
                 // Clear stale scan state so old tasks from previous runs
                 // find no data and exit immediately instead of timing out.
                 // Preserve scan.donev2 if the pipeline already completed —
@@ -356,42 +372,11 @@ pub(crate) mod wasm {
                         }
                     }
                     log_info(&format!("init: enqueued {} walk tasks", target_libs.len()));
+                    stamp_pass_start();
                 }
             }
-            // Enable-time pipeline resume: a mid-pass re-enable with intact
-            // scan state (run_on_startup off) would otherwise stall — nothing
-            // re-enqueues group after its task dies. Fires only at the group
-            // phase: walk/index/verify chain on their own, plan/apply tasks
-            // are queued by group itself. Normal restarts wipe these keys
-            // above, so this stays silent on a fresh start.
-            for &library_id in &walk_libraries(&cfg) {
-                let present = |p: &str| {
-                    crate::store::kv()
-                        .get(&format!("{p}{library_id}"))
-                        .ok()
-                        .flatten()
-                        .is_some()
-                };
-                if present("scan.group_paths.")
-                    && present("scan.indexed.")
-                    && !present("scan.unverified.")
-                    && !present("scan.index_cursor.")
-                    && !present("scan.walkv2.")
-                {
-                    // indexed + group_paths both exist from index-time until
-                    // group completion deletes them (donev2 is set at every
-                    // phase transition — it cannot mark the group phase;
-                    // run.current is a lazily-created run id, not liveness).
-                    match enqueue_group_task(library_id) {
-                        Ok(()) => log_info(&format!(
-                            "init: resuming pipeline at group for library {library_id}"
-                        )),
-                        Err(e) => log_warn(&format!(
-                            "init: resume group enqueue failed for {library_id}: {e}"
-                        )),
-                    }
-                }
-            }
+            // (Group-phase resume folded into resume_pipeline above — it now
+            // resumes every phase, not just group.)
             if !cfg.schedule_cron.trim().is_empty() {
                 if let Err(e) = host::scheduler::schedule_recurring(
                     &cfg.schedule_cron,
@@ -602,10 +587,21 @@ pub(crate) mod wasm {
                     Err(e) => Err(e),
                 },
                 "verify" => match super::scan::verify_step(&cfg, payload.library_id) {
-                    Ok((outcome, n)) => Ok(match outcome {
-                        super::scan::ScanOutcome::More => format!("verify: {n} files verified, more remain"),
-                        super::scan::ScanOutcome::Done => format!("verify: complete, {n} files verified"),
-                        super::scan::ScanOutcome::Paused => format!("verify: paused, {n} this chunk"),
+                    Ok((outcome, n, phase)) => Ok(match (outcome, phase) {
+                        (super::scan::ScanOutcome::Done, "empty") =>
+                            "verify: complete, all files verified".into(),
+                        (super::scan::ScanOutcome::Done, _) =>
+                            format!("verify: complete, {n} files verified"),
+                        (super::scan::ScanOutcome::Paused, _) =>
+                            format!("verify: paused, {n} this chunk"),
+                        (super::scan::ScanOutcome::More, "work") =>
+                            format!("verify: {n} files verified, more remain"),
+                        (super::scan::ScanOutcome::More, "sent") =>
+                            format!("verify: sent {n} files, waiting for sidecar"),
+                        (super::scan::ScanOutcome::More, "polling") =>
+                            format!("verify: sidecar processing ({n} files done), waiting"),
+                        (super::scan::ScanOutcome::More, _) =>
+                            "verify: sidecar not responding, retrying".into(),
                     }),
                     Err(e) => Err(e),
                 },
@@ -965,6 +961,84 @@ pub(crate) mod wasm {
             }
         }
         false
+    }
+
+    /// True when `minHoursBetweenPasses` allows a new pass to start (0 = always).
+    /// Measured from the last stamp — fresh pass starts only; resumes don't count.
+    fn pass_cooldown_over(cfg: &Config) -> bool {
+        if cfg.min_hours_between_passes <= 0 {
+            return true;
+        }
+        let last = crate::store::kv()
+            .get("scan.last_pass_start")
+            .ok()
+            .flatten()
+            .and_then(|v| String::from_utf8(v).ok())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        state::now_ts() - last >= i64::from(cfg.min_hours_between_passes) * 3600
+    }
+
+    fn stamp_pass_start() {
+        let _ = crate::store::kv().set(
+            "scan.last_pass_start",
+            state::now_ts().to_string().into_bytes(),
+        );
+    }
+
+    /// Re-enqueue the phase each mid-pass library was in when the plugin
+    /// restarted (init clears the task queue, so nothing would continue
+    /// otherwise). Runs regardless of runOnStartup — a restart must never
+    /// orphan a running pass. Phase key invariants (set by one phase, deleted
+    /// at its completion): walkv2 = mid-walk, walkfiles = walk done/index not,
+    /// unverified/verify_job = verify not done, group_cursor = mid-group,
+    /// group_paths+indexed = past index, group not done. Returns resumed libs.
+    fn resume_pipeline(cfg: &Config) -> Vec<i32> {
+        let mut resumed = Vec::new();
+        for &library_id in &walk_libraries(cfg) {
+            let present = |p: &str| {
+                crate::store::kv()
+                    .get(&format!("{p}{library_id}"))
+                    .ok()
+                    .flatten()
+                    .is_some()
+            };
+            let phase: Option<&str> = if present("scan.walkv2.") {
+                Some("walk")
+            } else if present("scan.walkfiles.") {
+                Some("index")
+            } else if present("scan.unverified.") || present("scan.verify_job.") {
+                Some("verify")
+            } else if present("scan.group_cursor.") {
+                Some("group")
+            } else if present("scan.group_paths.") && present("scan.indexed.") {
+                // Past index (verify may even be done): verify self-checks the
+                // list and chains to group — jumping to group directly could
+                // skip identity verification entirely.
+                Some("verify")
+            } else {
+                None
+            };
+            let Some(phase) = phase else { continue };
+            let r = match phase {
+                "walk" => enqueue_walk_task(library_id),
+                "index" => enqueue_index_task(library_id),
+                "group" => enqueue_group_task(library_id),
+                _ => enqueue_verify_task(library_id),
+            };
+            match r {
+                Ok(()) => {
+                    log_info(&format!(
+                        "init: resuming pass at {phase} for library {library_id}"
+                    ));
+                    resumed.push(library_id);
+                }
+                Err(e) => log_warn(&format!(
+                    "init: resume {phase} for library {library_id}: {e}"
+                )),
+            }
+        }
+        resumed
     }
 
     /// the Subsonic getNowPlaying API. Paused/stopped players count as idle -
@@ -1681,6 +1755,17 @@ pub(crate) mod wasm {
             ));
             return do_rollback(cfg);
         }
+        // Pass cooldown: automatic runs (cron / idle-retry ticks) inside the
+        // window skip so restarts and frequent ticks never stack passes.
+        // A pending rollback above is never gated; manual triggers (webhook
+        // rescan) don't route through run_pass.
+        if !pass_cooldown_over(cfg) {
+            log_info(&format!(
+                "run skipped: minHoursBetweenPasses ({}h) since last pass start",
+                cfg.min_hours_between_passes
+            ));
+            return Ok(());
+        }
         log_library_inventory();
         // If Navidrome's DB changed under us (fresh install / restored DB), the
         // cached scan index + star tallies + play/skip stats are stale - clear
@@ -1787,6 +1872,9 @@ pub(crate) mod wasm {
             }
         }
         log_info(&format!("run pass: enqueued {enqueued} walk tasks"));
+        if enqueued > 0 {
+            stamp_pass_start();
+        }
         Ok(())
     }
 

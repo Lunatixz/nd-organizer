@@ -954,7 +954,12 @@ fn load_unverified(
 pub fn verify_step(
     cfg: &Config,
     library_id: i32,
-) -> Result<(ScanOutcome, usize), String> {
+) -> Result<(ScanOutcome, usize, &'static str), String> {
+    // Third element labels what `n` means for the task message:
+    // "work" = files verified this call, "sent" = files queued this call,
+    // "polling" = sidecar job progress, "retry" = sidecar trouble, "empty" =
+    // list already complete. Kill the misleading "0 files verified" spam from
+    // poll/send ticks (they report n=0 by design, nothing was verified yet).
     let root = lib_root(library_id)?;
     post_phase_status(cfg, library_id, "verify");
 
@@ -1004,7 +1009,7 @@ pub fn verify_step(
                     post_scan_status(cfg, library_id, done, &format!(
                         "verifying... {}/{} files", done, total
                     ));
-                    return Ok((ScanOutcome::More, done));
+                    return Ok((ScanOutcome::More, done, "polling"));
                 }
 
                 // Job completed — load unverified list and process results
@@ -1023,14 +1028,15 @@ pub fn verify_step(
                         let result: serde_json::Value = serde_json::from_slice(&resp.body)
                             .map_err(|e| format!("bad results response: {e}"))?;
                         crate::net::circuit_clear("acoustid");
-                        return _complete_verify_job(cfg, library_id, acoustid_url, existing_id, &result, &unverified, &unverified_key, &job_id_key);
+                        return _complete_verify_job(cfg, library_id, acoustid_url, existing_id, &result, &unverified, &unverified_key, &job_id_key)
+                            .map(|(o, n)| (o, n, "work"));
                     }
                     _ => {
                         crate::wasm::log_warn("verify_step: failed to read job results, retrying");
                         crate::net::circuit_mark_failed("acoustid");
                         let _ = crate::store::kv().delete(&job_id_key);
                         crate::wasm::enqueue_verify_task(library_id)?;
-                        return Ok((ScanOutcome::More, 0));
+                        return Ok((ScanOutcome::More, 0, "retry"));
                     }
                 }
             }
@@ -1042,7 +1048,7 @@ pub fn verify_step(
                 // Re-enqueue without loading the 40K unverified list.
                 // Next call will find no job and take the send-batches path.
                 crate::wasm::enqueue_verify_task(library_id)?;
-                return Ok((ScanOutcome::More, 0));
+                return Ok((ScanOutcome::More, 0, "retry"));
             }
         }
     }
@@ -1060,7 +1066,7 @@ pub fn verify_step(
         let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
         crate::wasm::enqueue_group_task(library_id)?;
         post_scan_status(cfg, library_id, 0, "verification complete");
-        return Ok((ScanOutcome::Done, 0));
+        return Ok((ScanOutcome::Done, 0, "empty"));
     }
 
     // Send batches to sidecar. Use cursor to send only the next batch (500 files)
@@ -1145,11 +1151,11 @@ pub fn verify_step(
         post_scan_status(cfg, library_id, 0, &format!(
             "verifying... {}/{} files", new_cursor, unverified.len()
         ));
-        Ok((ScanOutcome::More, 0))
+        Ok((ScanOutcome::More, files_to_send.len(), "sent"))
     } else {
         // Some batches failed — retry
         crate::wasm::enqueue_verify_task(library_id)?;
-        Ok((ScanOutcome::More, 0))
+        Ok((ScanOutcome::More, 0, "retry"))
     }
 }
 
@@ -1254,6 +1260,10 @@ fn _process_verify_results(
                         t.insert("_acoustid_checked".into(), serde_json::Value::Bool(true));
                     }
                 }
+                // A3: artist-fill wrote the file above — sync the entry's mtime
+                // to disk truth so the next index pass keeps _acoustid_checked
+                // instead of dropping it (mtime-changed) and re-verifying forever.
+                val["mtime"] = serde_json::json!(file_mtime(&root.join(&rel)));
                 let _ = crate::store::kv().set(&key, val.to_string().into_bytes());
             }
         }

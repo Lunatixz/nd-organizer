@@ -219,6 +219,14 @@ pub fn embed(path: &Path, bytes: Vec<u8>, kind: ArtKind) -> Result<(), String> {
     let mime = sniff_mime(&bytes);
     let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
     let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    // ponytail: an identical re-embed rewrites the file (mtime++), which makes
+    // the next pass re-verify it — with overwriteArt on that was a perpetual
+    // whole-library verify loop. Skip no-op writes; differing bytes still land.
+    if let Some(p) = tag.pictures().first() {
+        if p.data() == bytes.as_slice() {
+            return Ok(());
+        }
+    }
     let pic = Picture::new_unchecked(kind.pic_type(), Some(mime), None, bytes);
     if tag.pictures().is_empty() {
         tag.push_picture(pic);

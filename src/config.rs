@@ -97,6 +97,10 @@ pub struct Config {
     /// that schedule; an empty cron makes this startup run the only automatic run.
     pub run_on_startup: bool,
     pub schedule_cron: String,
+    /// Minimum hours between automatic pass starts (startup run + cron).
+    /// Restarts/redeploys inside the window skip their run so passes never
+    /// stack or wipe a pass that just started. 0 = no gate.
+    pub min_hours_between_passes: i32,
     /// Max albums to process per scheduled run (0 = unlimited).
     pub max_albums_per_run: usize,
     /// Max directory entries a single pass scans before giving up (0 = unlimited).
@@ -419,6 +423,7 @@ impl Default for Config {
             libraries: Vec::new(),
             run_on_startup: false,
             schedule_cron: String::new(),
+            min_hours_between_passes: 12,
             max_albums_per_run: 100,
             max_scan_entries: 0, // 0 = unlimited (opt-in per-pass cap)
             albums_per_task: 5,
@@ -574,6 +579,7 @@ impl Default for Config {
 /// All config key names, used by `Config::load()` for batch KV reads.
 const CONFIG_KEYS: &[&str] = &[
     "mode", "libraryId", "libraries", "runOnStartup", "scheduleCron",
+    "minHoursBetweenPasses",
     "maxAlbumsPerRun", "maxScanEntries", "albumsPerTask", "filesPerScanTask",
     "runOnlyWhenIdle", "favoritesSyncLastfm", "favoritesSyncMax",
     "playbackStatsEnabled", "statsPollMinutes", "topPicksCount",
@@ -669,6 +675,10 @@ impl Config {
         if let Some(v) = map.get("scheduleCron") {
             c.schedule_cron = v.clone();
         }
+        c.min_hours_between_passes = map
+            .get("minHoursBetweenPasses")
+            .map(|v| v.trim().parse().unwrap_or(c.min_hours_between_passes))
+            .unwrap_or(c.min_hours_between_passes);
         if let Some(v) = map.get("rollbackRunId") {
             c.rollback_run_id = v.clone();
         }
@@ -1120,6 +1130,18 @@ mod tests {
         assert_eq!(c.meta_refresh_cooldown_days, 7);
         let c = Config::from_map(&map(&[("metaRefreshCooldownDays", "later")]));
         assert_eq!(c.meta_refresh_cooldown_days, 30, "invalid keeps the default");
+    }
+
+    #[test]
+    fn min_hours_between_passes_parse() {
+        let c = Config::from_map(&map(&[("minHoursBetweenPasses", "6")]));
+        assert_eq!(c.min_hours_between_passes, 6);
+        let c = Config::from_map(&map(&[("minHoursBetweenPasses", "0")]));
+        assert_eq!(c.min_hours_between_passes, 0, "0 disables the gate");
+        let c = Config::from_map(&map(&[("minHoursBetweenPasses", "later")]));
+        assert_eq!(c.min_hours_between_passes, 12, "invalid keeps the default");
+        let c = Config::from_map(&HashMap::new());
+        assert_eq!(c.min_hours_between_passes, 12, "absent key uses the default");
     }
 
     #[test]
