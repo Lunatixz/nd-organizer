@@ -1337,6 +1337,12 @@ pub mod host_stats {
         let total = files.len();
         for (rel, _ft) in files {
             let Some(abs) = fin.get(rel) else { continue };
+            // Per-track meta: essentia analysis ran on this track — never
+            // again. The 7-day KV TTL existed only because the cache was the
+            // sole record; the file-resident flag outlives it (and renames).
+            if crate::tags::is_checked(abs, crate::tags::FLAG_ESSENTIA) {
+                continue;
+            }
             let path_str = abs.to_string_lossy().to_string();
             let cache_key = format!("essentia:{}", path_str);
             // Check cache first (7-day TTL).
@@ -1346,6 +1352,9 @@ pub mod host_stats {
                         written += 1;
                         crate::wasm::log_debug(&format!("essentia: cached genre for {}", abs.file_name().unwrap_or_default().to_string_lossy()));
                     }
+                    // Migration: the analysis exists (cache hit) — persist the
+                    // flag so the TTL can never trigger a re-analysis.
+                    let _ = crate::tags::mark_checked(abs, crate::tags::FLAG_ESSENTIA);
                 }
                 continue;
             }
@@ -1379,6 +1388,8 @@ pub mod host_stats {
                             written += 1;
                             crate::wasm::log_debug(&format!("essentia: analyzed {}", abs.file_name().unwrap_or_default().to_string_lossy()));
                         }
+                        // Analysis succeeded — record it on the track.
+                        let _ = crate::tags::mark_checked(abs, crate::tags::FLAG_ESSENTIA);
                     }
                 }
                 Ok(Some(resp)) => {

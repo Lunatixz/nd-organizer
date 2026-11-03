@@ -415,6 +415,14 @@ pub fn write_replaygain(path: &Path, gain: f64, peak: Option<f64>, overwrite: bo
             changed |= insert_text_any(&mut tag, &[ItemKey::ReplayGainTrackPeak], &peak_str);
         }
     }
+    // Per-track meta: the ReplayGain analysis ran — recorded in the same save
+    // as the tags (no extra IO). Later enrich passes gate their sidecar
+    // lookup on this even when the RG keys are unmapped (MP4) or stripped.
+    if !checked_in_tag(&tag, FLAG_REPLAYGAIN)
+        && insert_text_any(&mut tag, &[ItemKey::Unknown(FLAG_REPLAYGAIN.into())], "1")
+    {
+        changed = true;
+    }
     if !changed {
         return Ok(false);
     }
@@ -648,6 +656,18 @@ pub fn write_title(path: &Path, new_title: &str) -> Result<bool, String> {
     save_tagged_atomic(&tagged, path)?;
     Ok(true)
 }
+
+// Per-track analysis flags (freeform custom tags): the FILE records which
+// pipelines have run on it, so later passes bypass those lookups. File-
+// resident on purpose — the KV index is re-keyed on rename, so a moved track
+// used to lose every gate and re-run the lookup. Forces still win: the
+// verify-side gates honor forceFingerprint / forceRefingerprintUnknownArtist
+// (see scan.rs), and a flag is only written when the analysis really ran.
+pub const FLAG_ACOUSTID: &str = "ND_ACOUSTID_CHECKED";
+pub const FLAG_INSTRUMENTAL: &str = "ND_INSTRUMENTAL_CHECKED";
+pub const FLAG_ACOUSTIC: &str = "ND_ACOUSTIC_CHECKED";
+pub const FLAG_ESSENTIA: &str = "ND_ESSENTIA_CHECKED";
+pub const FLAG_REPLAYGAIN: &str = "ND_REPLAYGAIN_CHECKED";
 
 /// True when the file already carries a check flag (freeform custom field,
 /// e.g. ND_INSTRUMENTAL_CHECKED) written after a successful evaluation.

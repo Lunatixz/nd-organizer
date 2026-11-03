@@ -909,19 +909,7 @@ fn load_unverified(
                                     // result, and the artist fill that could happen from
                                     // it already ran. Unparseable KV entries count as
                                     // placeholder (same as the old missing-field default).
-                                    let (placeholder, mbid_seen) = match &t {
-                                        Some(t) => (
-                                            crate::organizer::is_placeholder_album_artist(&t.artist)
-                                                || crate::organizer::is_placeholder_album_artist(&t.album_artist),
-                                            !t.mbid_recording.trim().is_empty()
-                                                || !t.mbid_album.trim().is_empty()
-                                                || !t.mbid_artist.trim().is_empty(),
-                                        ),
-                                        None => (true, false),
-                                    };
-                                    let force_unknown = cfg.force_refingerprint_unknown_artist
-                                        && placeholder
-                                        && !mbid_seen;
+                                    let force_unknown = crate::organizer::force_unknown_artist(cfg, t.as_ref());
 
                                     if !force_unknown && !cfg.force_fingerprint {
                                         if t.as_ref().is_some_and(|t| !t.mbid_album.is_empty()) {
@@ -1055,7 +1043,7 @@ pub fn verify_step(
 
     // No active job — load unverified list and send batches.
     // Use cursor to send only the next 500 entries, avoiding loading the full list.
-    let unverified = load_unverified(cfg, library_id, &indexed_key, &unverified_key);
+    let mut unverified = load_unverified(cfg, library_id, &indexed_key, &unverified_key);
 
     // Set total for ETA calculation.
     let _ = crate::store::kv().set(&format!("scan.verify_total.{library_id}"), unverified.len().to_string().into_bytes());
@@ -1092,7 +1080,57 @@ pub fn verify_step(
     if safe_cursor >= unverified.len() {
         safe_cursor = 0;
     }
-    let files_to_send: Vec<(String, i64)> = unverified.iter().skip(safe_cursor).take(max_per_task).cloned().collect();
+    let mut files_to_send: Vec<(String, i64)> = unverified.iter().skip(safe_cursor).take(max_per_task).cloned().collect();
+    // Per-track meta gate: ND_ACOUSTID_CHECKED lives in the FILE, so a moved
+    // track (fresh KV entry, no _acoustid_checked) still bypasses the sidecar
+    // lookup — the flag travels with the file. forceFingerprint sends
+    // everything regardless: the global force must defeat every exemption.
+    if !cfg.force_fingerprint && !files_to_send.is_empty() {
+        let flagged: Vec<String> = files_to_send
+            .iter()
+            .filter(|(rel, _)| crate::tags::is_checked(&root.join(rel), crate::tags::FLAG_ACOUSTID))
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        if !flagged.is_empty() {
+            // Mark the KV entries too, so the next recompute drops them from
+            // the stored list instead of re-adding them every pass.
+            let keys: Vec<String> = flagged.iter().map(|rel| file_key(library_id, rel)).collect();
+            if let Ok(entries) = crate::store::kv().get_many(keys) {
+                for (k, v) in entries {
+                    if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
+                        if let Some(t) = val.get_mut("tags").and_then(|t| t.as_object_mut()) {
+                            t.insert("_acoustid_checked".into(), Value::Bool(true));
+                        }
+                        let _ = crate::store::kv().set(&k, val.to_string().into_bytes());
+                    }
+                }
+            }
+            unverified.retain(|(rel, _)| !flagged.contains(rel));
+            if unverified.is_empty() {
+                // Everything left was flag-gated — same completion as an empty
+                // list: the verify phase is done for this library.
+                let _ = crate::store::kv().delete(&unverified_key);
+                let _ = crate::store::kv().delete(&verify_cursor_key);
+                let _ = crate::store::kv().set(&format!("scan.donev2.{library_id}"), b"1".to_vec());
+                crate::wasm::enqueue_group_task(library_id)?;
+                post_scan_status(cfg, library_id, 0, "verification complete");
+                return Ok((ScanOutcome::Done, 0, "empty"));
+            }
+            // Persist the shrunk list so completion/recompute agree, then
+            // refill the window from it (flagged files are gone).
+            let _ = crate::store::kv().set(&unverified_key, serde_json::to_vec(&unverified).unwrap_or_default());
+            files_to_send = unverified
+                .iter()
+                .skip(safe_cursor.min(unverified.len()))
+                .take(max_per_task)
+                .cloned()
+                .collect();
+            crate::wasm::log_info(&format!(
+                "verify_step: {} flagged file(s) dropped from the send window (ND_ACOUSTID_CHECKED)",
+                flagged.len()
+            ));
+        }
+    }
     let total_batches = (files_to_send.len() + batch_size - 1) / batch_size;
     crate::wasm::log_info(&format!(
         "verify_step: sending {} files to acoustid sidecar ({} batches of {}, unverified={})",
@@ -1205,6 +1243,7 @@ fn _process_verify_results(
             .unwrap_or(idx);
         let rel = sidecar_result_rel(library_id, path);
         let key = file_key(library_id, &rel);
+        let mut entry_tags: Option<TrackTags> = None;
         if let Ok(Some(v)) = crate::store::kv().get(&key) {
             if let Ok(mut val) = serde_json::from_slice::<Value>(&v) {
                 if let Some(tags) = val.get_mut("tags") {
@@ -1264,7 +1303,23 @@ fn _process_verify_results(
                 // to disk truth so the next index pass keeps _acoustid_checked
                 // instead of dropping it (mtime-changed) and re-verifying forever.
                 val["mtime"] = serde_json::json!(file_mtime(&root.join(&rel)));
+                entry_tags = val
+                    .get("tags")
+                    .and_then(|tg| serde_json::from_value::<TrackTags>(tg.clone()).ok());
                 let _ = crate::store::kv().set(&key, val.to_string().into_bytes());
+            }
+        }
+        // Per-track meta: AcoustID ran on this track. File-resident on purpose
+        // — a rename mints a fresh KV entry (no _acoustid_checked) and the
+        // send-gate drops flagged files instead of re-looking them up. Shares
+        // the artist-fill write budget; skipped for force-refingerprint
+        // candidates so that force gate keeps winning, and in dry-run.
+        if mode_apply
+            && !past(write_start, write_budget)
+            && !crate::organizer::force_unknown_artist(cfg, entry_tags.as_ref())
+        {
+            if let Err(e) = crate::tags::mark_checked(&root.join(&rel), crate::tags::FLAG_ACOUSTID) {
+                crate::wasm::log_warn(&format!("verify: acoustid flag {rel}: {e}"));
             }
         }
         processed += 1;
@@ -2875,6 +2930,14 @@ pub fn plan_enrich_step(
                 for (rel, _) in &files {
                     if past(enrich_start, enrich_budget) { break; }
                     let abs = abs_of(rel);
+                    // Per-track meta gate: the ReplayGain analysis ran once —
+                    // never re-fetch. Also covers MP4, where the RG keys never
+                    // map and the tag-presence gate can never fire.
+                    if crate::tags::replaygain_present(&abs)
+                        || crate::tags::is_checked(&abs, crate::tags::FLAG_REPLAYGAIN)
+                    {
+                        continue;
+                    }
                     if let Some((gain, peak)) = replaygain_for(cfg, &sidecar_path(library_id, &abs)) {
                         if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
                             .unwrap_or(false)
@@ -3216,7 +3279,7 @@ pub fn plan_enrich_step(
                     // so organizer renames/moves can't lose it — the path-keyed
                     // KV cache missed after every move and re-ran Essentia on
                     // the same track every pass.
-                    if crate::tags::is_checked(&abs, "ND_INSTRUMENTAL_CHECKED") {
+                    if crate::tags::is_checked(&abs, crate::tags::FLAG_INSTRUMENTAL) {
                         continue;
                     }
                     // Gate: Lidarr-tracked artists stay Lidarr's business.
@@ -3300,7 +3363,7 @@ pub fn plan_enrich_step(
                     }
                     // Check succeeded and the label is reconciled — persist
                     // the flag so this track never evaluates again.
-                    if let Err(e) = crate::tags::mark_checked(&abs, "ND_INSTRUMENTAL_CHECKED") {
+                    if let Err(e) = crate::tags::mark_checked(&abs, crate::tags::FLAG_INSTRUMENTAL) {
                         crate::wasm::log_warn(&format!("instrumental: mark checked {rel}: {e}"));
                     }
                     }
@@ -3316,7 +3379,7 @@ pub fn plan_enrich_step(
                     let title = tags.title.clone();
                     let abs = abs_of(rel);
                     // Custom meta flag: checked once, ever (see instrumental).
-                    if crate::tags::is_checked(&abs, "ND_ACOUSTIC_CHECKED") {
+                    if crate::tags::is_checked(&abs, crate::tags::FLAG_ACOUSTIC) {
                         continue;
                     }
                     // Gate: Lidarr-tracked artists stay Lidarr's business.
@@ -3408,7 +3471,7 @@ pub fn plan_enrich_step(
                     }
                     // Check succeeded and the label is reconciled — persist
                     // the flag so this track never evaluates again.
-                    if let Err(e) = crate::tags::mark_checked(&abs, "ND_ACOUSTIC_CHECKED") {
+                    if let Err(e) = crate::tags::mark_checked(&abs, crate::tags::FLAG_ACOUSTIC) {
                         crate::wasm::log_warn(&format!("acoustic: mark checked {rel}: {e}"));
                     }
                     }
@@ -3890,10 +3953,12 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
             let mut changed = false;
             let mut cur_title = cur.title.clone();
 
-            // ReplayGain: only when the track gain tag is missing.
+            // ReplayGain: only when the track gain tag is missing AND the
+            // per-track meta flag says the analysis never ran.
             if cfg.write_replaygain
                 && !past(start, budget)
                 && !crate::tags::replaygain_present(&abs)
+                && !crate::tags::is_checked(&abs, crate::tags::FLAG_REPLAYGAIN)
             {
                 if let Some((gain, peak)) = replaygain_for(cfg, &sidecar_path(library_id, &abs)) {
                     if crate::tags::write_replaygain(&abs, gain, peak, cfg.overwrite_existing_tags)
@@ -4013,7 +4078,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 && !past(start, budget)
                 // Custom meta flag: checked once, ever (file-resident, survives
                 // moves) + Lidarr gate — never touch tracked artists.
-                && !crate::tags::is_checked(&abs, "ND_INSTRUMENTAL_CHECKED")
+                && !crate::tags::is_checked(&abs, crate::tags::FLAG_INSTRUMENTAL)
                 && crate::wasm::should_write_tags(cfg, &cur.album_artist)
             {
                 let path_str = abs.to_string_lossy().to_string();
@@ -4063,7 +4128,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 }
                 // Check succeeded and the label is reconciled — persist the
                 // flag so this track never evaluates again.
-                if let Err(e) = crate::tags::mark_checked(&abs, "ND_INSTRUMENTAL_CHECKED") {
+                if let Err(e) = crate::tags::mark_checked(&abs, crate::tags::FLAG_INSTRUMENTAL) {
                     crate::wasm::log_warn(&format!("instrumental: mark checked {rel}: {e}"));
                 }
                 }
@@ -4077,7 +4142,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 && !past(start, budget)
                 // Custom meta flag: checked once, ever (file-resident, survives
                 // moves) + Lidarr gate — never touch tracked artists.
-                && !crate::tags::is_checked(&abs, "ND_ACOUSTIC_CHECKED")
+                && !crate::tags::is_checked(&abs, crate::tags::FLAG_ACOUSTIC)
                 && crate::wasm::should_write_tags(cfg, &cur.album_artist)
             {
                 let path_str = abs.to_string_lossy().to_string();
@@ -4132,7 +4197,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 }
                 // Check succeeded and the label is reconciled — persist the
                 // flag so this track never evaluates again.
-                if let Err(e) = crate::tags::mark_checked(&abs, "ND_ACOUSTIC_CHECKED") {
+                if let Err(e) = crate::tags::mark_checked(&abs, crate::tags::FLAG_ACOUSTIC) {
                     crate::wasm::log_warn(&format!("acoustic: mark checked {rel}: {e}"));
                 }
                 }

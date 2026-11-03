@@ -432,6 +432,27 @@ pub fn is_placeholder_album_artist(s: &str) -> bool {
     crate::tags::is_unknown_artist(s) || is_various_marker(s)
 }
 
+/// The force-refingerprint gate (used by verify recompute and the verify
+/// result writer): keep a track in the verify list despite the mbid /
+/// `_acoustid_checked` exemptions while its artist is a placeholder and no
+/// mbid identifies it — re-fingerprint until MusicBrainz answers. Unparseable
+/// entries count as placeholder. The global `forceFingerprint` defeats the
+/// exemptions separately at each gate.
+pub fn force_unknown_artist(cfg: &crate::config::Config, t: Option<&crate::tags::TrackTags>) -> bool {
+    if !cfg.force_refingerprint_unknown_artist {
+        return false;
+    }
+    let Some(t) = t else {
+        return true;
+    };
+    let placeholder = is_placeholder_album_artist(&t.artist)
+        || is_placeholder_album_artist(&t.album_artist);
+    let mbid_seen = !t.mbid_recording.trim().is_empty()
+        || !t.mbid_album.trim().is_empty()
+        || !t.mbid_artist.trim().is_empty();
+    placeholder && !mbid_seen
+}
+
 /// Force-fingerprint fixup: when the album artist is a placeholder (missing,
 /// Unknown..., or a VA marker) but every track resolves to one and the same
 /// real artist, return that artist so the folder/file names can be corrected.
@@ -2645,6 +2666,39 @@ mod tests {
         );
         assert!(root.join("Artist/Hidden Junk/.keep").exists(), "skip_hidden keeps it");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn force_unknown_artist_gate() {
+        use crate::config::Config;
+        use crate::tags::TrackTags;
+        let mut cfg = Config {
+            force_refingerprint_unknown_artist: true,
+            ..Default::default()
+        };
+        // Unparseable entry counts as placeholder (same as recompute).
+        assert!(force_unknown_artist(&cfg, None));
+        // Placeholder artist + no mbid -> kept in the verify list.
+        let ph = TrackTags {
+            artist: "Unknown Artist".into(),
+            ..Default::default()
+        };
+        assert!(force_unknown_artist(&cfg, Some(&ph)));
+        // "Unless MB says it is": any mbid exempts the track.
+        let mut with_mbid = ph.clone();
+        with_mbid.mbid_recording = "rec-id".into();
+        assert!(!force_unknown_artist(&cfg, Some(&with_mbid)));
+        // Resolved artist on both fields -> never forced (an empty album_artist
+        // counts as placeholder — production OR semantics, unchanged here).
+        let real = TrackTags {
+            artist: "Massive Attack".into(),
+            album_artist: "Massive Attack".into(),
+            ..Default::default()
+        };
+        assert!(!force_unknown_artist(&cfg, Some(&real)));
+        // Gate off -> never forced.
+        cfg.force_refingerprint_unknown_artist = false;
+        assert!(!force_unknown_artist(&cfg, None));
     }
 
     #[test]

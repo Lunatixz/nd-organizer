@@ -405,6 +405,24 @@ All external metadata providers cache results in the plugin's KV store:
 
 Circuit breakers protect all providers: Retry (5min) → Cooldown (30min) → Degraded (proceed without). Auto-recovery via throttled health probes.
 
+#### Per-track analysis flags (file-resident gates)
+
+Five freeform tags written **into the track itself** record which analyses have
+run. The gate travels with the file, so organizer renames/moves can't lose it —
+the KV index is re-keyed on rename and used to forget everything:
+
+| Flag | Set when | Bypasses | Force re-run |
+|------|----------|----------|--------------|
+| `ND_ACOUSTID_CHECKED` | AcoustID verify processed the track | sidecar fingerprint lookup for moved tracks (fresh KV entry) | `forceFingerprint` for all; `forceRefingerprintUnknownArtist` tracks are never flagged |
+| `ND_INSTRUMENTAL_CHECKED` | Essentia voice-classifier verdict reconciled with the title label | instrumental-check lookup | — |
+| `ND_ACOUSTIC_CHECKED` | Librosa HPSS vocal ratio computed + label reconciled | acoustic-check lookup | — |
+| `ND_ESSENTIA_CHECKED` | Essentia genre/mood analysis written | `/analyze` (previously re-ran every 7 days) | — |
+| `ND_REPLAYGAIN_CHECKED` | ReplayGain analysis written (same save as the RG tags) | sidecar `/replaygain` fetch — also covers MP4, where RG keys never map and the tag gate can never fire | — |
+
+A flag is written only when the analysis actually succeeded; failed checks
+retry next pass. The KV-side `_acoustid_checked` flag + MBID exemptions remain
+the fast path for tracks that never move.
+
 ### Community vs personal ratings
 
 By default, ratings are **personal** — based on your own play/skip behavior and
