@@ -1914,7 +1914,7 @@ pub fn cleanup_walk(
                 if dry {
                     lines.push(format!("cleanup: would delete {rel} (no audio)"));
                     deleted += 1;
-                } else if std::fs::remove_dir(&dir_path).is_ok() {
+                } else if wipe_no_audio_dir(&dir_path, skip_hidden) {
                     lines.push(format!("cleanup: deleted {rel} (no audio)"));
                     deleted += 1;
                 }
@@ -1923,6 +1923,38 @@ pub fn cleanup_walk(
         }
     }
     (lines, merged, deleted, stack.is_empty())
+}
+
+/// Delete a leaf folder whose files are all non-audio (stale sidecar
+/// leftovers — cover.jpg/artist.nfo/... — after the audio moved away).
+/// ponytail: remove_dir alone only deletes EMPTY folders, so no-audio
+/// folders with leftover sidecars failed silently every pass and survived
+/// forever (4.8k of them). Bails when a subdirectory exists (it either
+/// holds audio or was already swept bottom-up — never touch it) and when
+/// hidden files remain under skip_hidden.
+fn wipe_no_audio_dir(dir: &Path, skip_hidden: bool) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    // Scan everything BEFORE deleting anything: bailing mid-delete after
+    // removing files would leave the folder half-wiped.
+    let mut files = Vec::new();
+    for e in rd.flatten() {
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            return false;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        if skip_hidden && name.starts_with('.') {
+            return false;
+        }
+        files.push(e.path());
+    }
+    for p in files {
+        if std::fs::remove_file(p).is_err() {
+            return false;
+        }
+    }
+    std::fs::remove_dir(dir).is_ok()
 }
 
 /// Apply a plan: create target dirs, move files and sidecars, optionally prune
@@ -2563,6 +2595,55 @@ mod tests {
         assert!(!root.join("A Artist/Album (2000) Deluxe").exists());
         assert!(!root.join("Z Artist/Album (2011) Deluxe").exists());
         assert!(root.join("M Artist/Plain (1999)/01.flac").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cleanup_walk_wipes_leaf_junk_folders_but_never_touches_audio_trees() {
+        let root = std::env::temp_dir().join(format!(
+            "nd-organizer-wipe-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        // Leaf junk: audio moved away, stale sidecar left behind.
+        fs::create_dir_all(root.join("Artist/Old Album (1990)")).unwrap();
+        fs::write(root.join("Artist/Old Album (1990)/cover.jpg"), b"c").unwrap();
+        // Truly empty folder.
+        fs::create_dir_all(root.join("Artist/Empty Band")).unwrap();
+        // Live album: must survive.
+        fs::create_dir_all(root.join("Artist/Kept (2000)")).unwrap();
+        fs::write(root.join("Artist/Kept (2000)/01.flac"), b"x").unwrap();
+        // No direct audio but an audio-bearing subdir: the wipe must bail —
+        // wiping here would destroy the subtree (this is the inbox/2 case).
+        fs::create_dir_all(root.join("Artist/Parent Junk/Kid (1995)")).unwrap();
+        fs::write(root.join("Artist/Parent Junk/artist.nfo"), b"<a/>").unwrap();
+        fs::write(root.join("Artist/Parent Junk/Kid (1995)/02.flac"), b"x").unwrap();
+        // Hidden file + skip_hidden: folder stays.
+        fs::create_dir_all(root.join("Artist/Hidden Junk")).unwrap();
+        fs::write(root.join("Artist/Hidden Junk/.keep"), b"k").unwrap();
+
+        let mut stack = vec![(String::new(), false)];
+        let (lines, merged, deleted, done) = cleanup_walk(
+            &root,
+            &mut stack,
+            false,
+            true,
+            true,
+            &[],
+            std::time::Duration::from_secs(60),
+        );
+        assert!(done, "{lines:?}");
+        assert_eq!(merged, 0, "{lines:?}");
+        assert_eq!(deleted, 2, "leaf junk + empty folder: {lines:?}");
+        assert!(!root.join("Artist/Old Album (1990)").exists(), "leaf junk wiped");
+        assert!(!root.join("Artist/Empty Band").exists(), "empty wiped");
+        assert!(root.join("Artist/Kept (2000)/01.flac").exists());
+        assert!(
+            root.join("Artist/Parent Junk/artist.nfo").exists()
+                && root.join("Artist/Parent Junk/Kid (1995)/02.flac").exists(),
+            "dirs with subdirs are never wiped: {lines:?}"
+        );
+        assert!(root.join("Artist/Hidden Junk/.keep").exists(), "skip_hidden keeps it");
         let _ = fs::remove_dir_all(&root);
     }
 
