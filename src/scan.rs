@@ -3212,6 +3212,17 @@ pub fn plan_enrich_step(
                     if past(enrich_start, enrich_budget) { break; }
                     let title = tags.title.clone();
                     let abs = abs_of(rel);
+                    // Custom meta flag: checked once, ever. Lives in the FILE
+                    // so organizer renames/moves can't lose it — the path-keyed
+                    // KV cache missed after every move and re-ran Essentia on
+                    // the same track every pass.
+                    if crate::tags::is_checked(&abs, "ND_INSTRUMENTAL_CHECKED") {
+                        continue;
+                    }
+                    // Gate: Lidarr-tracked artists stay Lidarr's business.
+                    if !crate::wasm::should_write_tags(cfg, tags.album_artist.as_str()) {
+                        continue;
+                    }
                     let path_str = abs.to_string_lossy().to_string();
                     let cache_key = format!("instrumental:{}", path_str);
 
@@ -3232,7 +3243,7 @@ pub fn plan_enrich_step(
                             headers: std::collections::HashMap::new(),
                             no_follow_redirects: false,
                             body: body.to_string().into_bytes(),
-                            timeout_ms: cap_ms(enrich_start, task_budget, 8_000),
+                            timeout_ms: cap_ms(enrich_start, task_budget, 25_000),
                         };
                         match nd_pdk::host::http::send(req) {
                             Ok(Some(resp)) if resp.status_code == 200 => {
@@ -3287,6 +3298,11 @@ pub fn plan_enrich_step(
                             let _ = crate::wasm::trigger_navidrome_scan(cfg);
                         }
                     }
+                    // Check succeeded and the label is reconciled — persist
+                    // the flag so this track never evaluates again.
+                    if let Err(e) = crate::tags::mark_checked(&abs, "ND_INSTRUMENTAL_CHECKED") {
+                        crate::wasm::log_warn(&format!("instrumental: mark checked {rel}: {e}"));
+                    }
                     }
                 }
             }
@@ -3299,6 +3315,14 @@ pub fn plan_enrich_step(
                     if past(enrich_start, enrich_budget) { break; }
                     let title = tags.title.clone();
                     let abs = abs_of(rel);
+                    // Custom meta flag: checked once, ever (see instrumental).
+                    if crate::tags::is_checked(&abs, "ND_ACOUSTIC_CHECKED") {
+                        continue;
+                    }
+                    // Gate: Lidarr-tracked artists stay Lidarr's business.
+                    if !crate::wasm::should_write_tags(cfg, tags.album_artist.as_str()) {
+                        continue;
+                    }
                     let path_str = abs.to_string_lossy().to_string();
                     let cache_key = format!("acoustic:{}", path_str);
 
@@ -3312,14 +3336,14 @@ pub fn plan_enrich_step(
                         // Use librosa HPSS to detect acoustic character:
                         // High harmonic ratio relative to percussive = acoustic.
                         let base = cfg.essentia_url.trim().trim_end_matches('/');
-                        let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false});
+                        let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false, "vocalRatio": true});
                         let req = nd_pdk::host::http::HTTPRequest {
                             method: "POST".into(),
                             url: format!("{}/instrumental-check", base),
                             headers: std::collections::HashMap::new(),
                             no_follow_redirects: false,
                             body: body.to_string().into_bytes(),
-                            timeout_ms: cap_ms(enrich_start, task_budget, 8_000),
+                            timeout_ms: cap_ms(enrich_start, task_budget, 25_000),
                         };
                         match nd_pdk::host::http::send(req) {
                             Ok(Some(resp)) if resp.status_code == 200 => {
@@ -3381,6 +3405,11 @@ pub fn plan_enrich_step(
                         if cfg.scan_after_tag_write {
                             let _ = crate::wasm::trigger_navidrome_scan(cfg);
                         }
+                    }
+                    // Check succeeded and the label is reconciled — persist
+                    // the flag so this track never evaluates again.
+                    if let Err(e) = crate::tags::mark_checked(&abs, "ND_ACOUSTIC_CHECKED") {
+                        crate::wasm::log_warn(&format!("acoustic: mark checked {rel}: {e}"));
                     }
                     }
                 }
@@ -3982,6 +4011,10 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 && !cfg.essentia_url.trim().is_empty()
                 && !cur_title.trim().is_empty()
                 && !past(start, budget)
+                // Custom meta flag: checked once, ever (file-resident, survives
+                // moves) + Lidarr gate — never touch tracked artists.
+                && !crate::tags::is_checked(&abs, "ND_INSTRUMENTAL_CHECKED")
+                && crate::wasm::should_write_tags(cfg, &cur.album_artist)
             {
                 let path_str = abs.to_string_lossy().to_string();
                 let cache_key = format!("instrumental:{}", path_str);
@@ -4000,7 +4033,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         headers: std::collections::HashMap::new(),
                         no_follow_redirects: false,
                         body: body.to_string().into_bytes(),
-                        timeout_ms: cap_ms(start, budget, 8_000),
+                        timeout_ms: cap_ms(start, budget, 25_000),
                     };
                     match nd_pdk::host::http::send(req) {
                         Ok(Some(resp)) if resp.status_code == 200 => {
@@ -4028,6 +4061,11 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                     }
                     cur_title = new_title;
                 }
+                // Check succeeded and the label is reconciled — persist the
+                // flag so this track never evaluates again.
+                if let Err(e) = crate::tags::mark_checked(&abs, "ND_INSTRUMENTAL_CHECKED") {
+                    crate::wasm::log_warn(&format!("instrumental: mark checked {rel}: {e}"));
+                }
                 }
             }
 
@@ -4037,6 +4075,10 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 && !cfg.essentia_url.trim().is_empty()
                 && !cur_title.trim().is_empty()
                 && !past(start, budget)
+                // Custom meta flag: checked once, ever (file-resident, survives
+                // moves) + Lidarr gate — never touch tracked artists.
+                && !crate::tags::is_checked(&abs, "ND_ACOUSTIC_CHECKED")
+                && crate::wasm::should_write_tags(cfg, &cur.album_artist)
             {
                 let path_str = abs.to_string_lossy().to_string();
                 let cache_key = format!("acoustic:{}", path_str);
@@ -4048,14 +4090,14 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         .and_then(|v| v.get("isAcoustic").and_then(|v| v.as_bool()))
                 } else {
                     let base = cfg.essentia_url.trim().trim_end_matches('/');
-                    let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false});
+                    let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false, "vocalRatio": true});
                     let req = nd_pdk::host::http::HTTPRequest {
                         method: "POST".into(),
                         url: format!("{}/instrumental-check", base),
                         headers: std::collections::HashMap::new(),
                         no_follow_redirects: false,
                         body: body.to_string().into_bytes(),
-                        timeout_ms: cap_ms(start, budget, 8_000),
+                        timeout_ms: cap_ms(start, budget, 25_000),
                     };
                     match nd_pdk::host::http::send(req) {
                         Ok(Some(resp)) if resp.status_code == 200 => {
@@ -4087,6 +4129,11 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         changed = true;
                     }
                     cur_title = new_title;
+                }
+                // Check succeeded and the label is reconciled — persist the
+                // flag so this track never evaluates again.
+                if let Err(e) = crate::tags::mark_checked(&abs, "ND_ACOUSTIC_CHECKED") {
+                    crate::wasm::log_warn(&format!("acoustic: mark checked {rel}: {e}"));
                 }
                 }
             }

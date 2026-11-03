@@ -649,6 +649,38 @@ pub fn write_title(path: &Path, new_title: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// True when the file already carries a check flag (freeform custom field,
+/// e.g. ND_INSTRUMENTAL_CHECKED) written after a successful evaluation.
+pub fn is_checked(path: &Path, flag: &str) -> bool {
+    lofty::read_from_path(path)
+        .ok()
+        .and_then(|t| t.primary_tag().map(|tg| checked_in_tag(tg, flag)))
+        .unwrap_or(false)
+}
+
+/// True when the tag carries a non-empty check flag.
+pub fn checked_in_tag(tag: &Tag, flag: &str) -> bool {
+    tag.get_string(&ItemKey::Unknown(flag.into()))
+        .is_some_and(|v| !v.trim().is_empty())
+}
+
+/// Persist a check flag after a successful evaluation. The flag lives in the
+/// FILE, so organizer renames/moves can't lose it — unlike the KV cache which
+/// is keyed by absolute path and missed after every move, forcing a re-eval
+/// of the same track on every pass.
+pub fn mark_checked(path: &Path, flag: &str) -> Result<(), String> {
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
+    if checked_in_tag(&tag, flag) {
+        return Ok(());
+    }
+    if !insert_text_any(&mut tag, &[ItemKey::Unknown(flag.into())], "1") {
+        return Err(format!("cannot write {flag}"));
+    }
+    let _ = tagged.insert_tag(tag);
+    save_tagged_atomic(&tagged, path)
+}
+
 #[cfg(test)]
 mod unknown_artist_tests {
     use super::is_unknown_artist;
@@ -753,5 +785,24 @@ mod verify_gate_tests {
         // Unknown keys go through insert_unchecked (checked insert rejects them).
         assert!(insert_text_any(&mut t, &[ItemKey::Unknown("ENERGY".into())], "0.7"));
         assert!(!acoustic_missing_in_tag(&t));
+    }
+
+    #[test]
+    fn check_flag_roundtrips_and_ignores_empty() {
+        let mut t = Tag::new(TagType::Id3v2);
+        // Not checked yet.
+        assert!(!super::checked_in_tag(&t, "ND_INSTRUMENTAL_CHECKED"));
+        // Written as a freeform custom field -> checked.
+        assert!(insert_text_any(
+            &mut t,
+            &[ItemKey::Unknown("ND_INSTRUMENTAL_CHECKED".into())],
+            "1"
+        ));
+        assert!(super::checked_in_tag(&t, "ND_INSTRUMENTAL_CHECKED"));
+        // Independent flags don't cross-contaminate.
+        assert!(!super::checked_in_tag(&t, "ND_ACOUSTIC_CHECKED"));
+        // An empty value is not a check.
+        assert!(insert_text_any(&mut t, &[ItemKey::Unknown("EMPTY_FLAG".into())], ""));
+        assert!(!super::checked_in_tag(&t, "EMPTY_FLAG"));
     }
 }

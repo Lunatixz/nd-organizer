@@ -209,7 +209,7 @@ def load_models():
         try:
             import essentia.standard as es
             MOOD_MODEL = {
-                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/Placeholder"),
+                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/dropout_1/Identity"),
                 "classifier": es.TensorflowPredict2D(graphFilename=mood_path, input="serving_default_model_Placeholder", output="PartitionedCall:0"),
             }
             log.info("Mood model loaded (MusiCNN + Moods MIREX classifier)")
@@ -227,7 +227,7 @@ def load_models():
         try:
             import essentia.standard as es
             VOICE_MODEL = {
-                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/Placeholder"),
+                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/dropout_1/Identity"),
                 "classifier": es.TensorflowPredict2D(graphFilename=voice_path, input="model/Placeholder", output="model/Softmax"),
             }
             log.info("Voice model loaded (MusiCNN + voice/instrumental classifier)")
@@ -274,7 +274,7 @@ def load_models():
         try:
             import essentia.standard as es
             DEAM_MODEL = {
-                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/Placeholder"),
+                "embedding": es.TensorflowPredictMusiCNN(graphFilename=musicnn_path, output="model/dropout_1/Identity"),
                 "classifier": es.TensorflowPredict2D(graphFilename=deam_path, input="model/Placeholder", output="model/Identity"),
             }
             log.info("Arousal/valence model loaded (DEAM)")
@@ -946,7 +946,7 @@ def compare_fingerprints(fp_a, fp_b):
     return round(intersection / union, 4)
 
 
-def check_instrumental(path):
+def check_instrumental(path, need_vocal_ratio=False):
     """Check if a track is truly instrumental using voice/instrumental classifier + librosa vocal separation.
     Returns: {isInstrumental: bool, confidence: float, vocalRatio: float, voicePrediction: str}
     """
@@ -962,18 +962,28 @@ def check_instrumental(path):
             import essentia.standard as es
             audio_16k = es.Resample(inputSampleRate=44100, outputSampleRate=16000)(audio)
             embeddings = VOICE_MODEL["embedding"](audio_16k)
-            preds = VOICE_MODEL["classifier"](embeddings)[0]
+            preds = VOICE_MODEL["classifier"](embeddings)
             voice_labels = ["instrumental", "voice"]
-            top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
-            if top:
-                voice_prediction = voice_labels[top[0][0]]
-                voice_score = float(top[0][1])
+            # Mean over frames: frame 0 is usually intro/silence and flips the
+            # verdict on its own (checked against labeled test tracks).
+            rows = [list(p) for p in preds]
+            if rows:
+                mean_p = [sum(col) / len(col) for col in zip(*rows)]
+                top = sorted(enumerate(mean_p), key=lambda x: x[1], reverse=True)[:2]
+                if top:
+                    voice_prediction = voice_labels[top[0][0]]
+                    voice_score = float(top[0][1])
         except Exception as e:
             log.warning("voice check failed for %s: %s", path, e)
 
-    # 2. Librosa vocal separation — calculate vocal energy ratio
+    # 2. Librosa vocal ratio - only when the classifier didn't answer, or the
+    # caller explicitly asked for vocalRatio (the acoustic check derives its
+    # verdict from the HPSS ratio). It used to run unconditionally: HPSS costs
+    # seconds on top of the classifier and every check outlived the plugin's
+    # request timeout, so results never came back and nothing was ever cached
+    # or labeled.
     vocal_ratio = 0.0
-    if LIBROSA_AVAILABLE:
+    if (voice_prediction is None or need_vocal_ratio) and LIBROSA_AVAILABLE:
         try:
             import librosa
             import numpy as np
@@ -1196,7 +1206,7 @@ class Handler(BaseHTTPRequestHandler):
             audio_path = req.get("path", "")
             if not audio_path:
                 return self._send(400, {"error": "path required"})
-            result, err = check_instrumental(audio_path)
+            result, err = check_instrumental(audio_path, need_vocal_ratio=bool(req.get("vocalRatio")))
             if err:
                 ERRORS += 1
                 log.warning("instrumental-check %s failed: %s", audio_path, err)
