@@ -427,6 +427,25 @@
           "default": 30,
           "description": "How long apply records + file/nfo backups are kept so a run can be rolled back. After this, old runs are pruned to keep the database lean. 0 = keep forever."
         },
+        "backupEnabled": {
+          "type": "boolean",
+          "title": "Automatic backups",
+          "default": false,
+          "description": "Periodically back up project state (scan progress, task log, rollback records, analysis flags) plus the plugin config to one compressed zip. Runs in the webhook sidecar; requires persistenceBackend = mysql."
+        },
+        "backupPath": {
+          "type": "string",
+          "title": "Backup folder",
+          "default": "",
+          "description": "Folder where backup zips are written, as seen by the webhook sidecar - e.g. /music/nd-organizer-backups (on your music share) or /data/nd/plugins/nd-organizer/backups (in Navidrome's data dir). Created automatically; each run writes one timestamped zip."
+        },
+        "backupEveryDays": {
+          "type": "integer",
+          "title": "Backup every (days)",
+          "minimum": 1,
+          "default": 7,
+          "description": "Minimum days between backups. The first backup runs as soon as backups are enabled and a folder is set; later runs happen on the next status report after the interval elapses."
+        },
         "folderSchema": {
           "type": "string",
           "title": "Album folder schema",
@@ -2148,6 +2167,28 @@
             {
               "type": "Control",
               "scope": "#/properties/metaGateEnabled"
+            }
+          ]
+        },
+        {
+          "type": "Group",
+          "label": "Backup & restore",
+          "elements": [
+            {
+              "type": "Control",
+              "scope": "#/properties/backupEnabled"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/backupPath"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/backupEveryDays"
+            },
+            {
+              "type": "Label",
+              "text": "Restore by POSTing {\"path\": \"<zip>\", \"confirm\": \"RESTORE\"} to the webhook's /restore endpoint. The zip contains manifest.json, config.json and kv.jsonl; disabling the plugin first gives a consistent snapshot, and config changes apply after a plugin reload."
             }
           ]
         },

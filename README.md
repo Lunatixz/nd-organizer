@@ -801,6 +801,50 @@ The `webhook` sidecar renders a self-refreshing dashboard at
 The plugin also posts a **stats heartbeat** every stats poll (30 min) so the
 dashboard stays fresh between runs.
 
+## Backups & restore
+
+The webhook sidecar can periodically zip up the whole project state — plugin
+config plus every mysql KV row (scan progress, cursors, task log, rollback
+records, analysis flags, stats weights) — as disaster-recovery insurance.
+Requires `persistenceBackend = mysql`.
+
+Settings (plugin config):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `backupEnabled` | `false` | Turn automatic backups on. |
+| `backupPath` | `""` | Folder **as seen by the webhook sidecar**, e.g. `/music/nd-organizer-backups` (your share) or `/data/nd/plugins/nd-organizer/backups`. Created automatically. |
+| `backupEveryDays` | `7` | Minimum days between backups. The first backup runs as soon as enabled + path set; later runs happen on the next status report after the interval elapses (checked at most once an hour). |
+
+Each run writes one timestamped `nd-organizer-backup-<ts>.zip` containing:
+
+- `manifest.json` — format version, creation time, config key count.
+- `config.json` — the plugin config exactly as stored in `navidrome.db`.
+- `kv.jsonl` — newline-delimited `{k, v, t}` rows (base64 value, TTL seconds)
+  streamed from the mysql sidecar's `/export`, so a multi-GB dump never sits
+  in memory.
+
+Backups are written to a `.part` file first and renamed on success — a failed
+backup never leaves a half zip. To restore, point the endpoint at a zip:
+
+```bash
+curl -X POST http://<host>:8099/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/music/nd-organizer-backups/nd-organizer-backup-20261109-120000.zip",
+       "confirm": "RESTORE"}'
+```
+
+Restore semantics:
+
+- **KV** is replaced wholesale (the table is wiped on the first batch, then the
+  zip's rows are imported in ~6 MB batches). **Disable the plugin first** —
+  live writes would race the import; an interrupted restore leaves a partial
+  table, just rerun it.
+- **Config** is applied as typed `json_set`/`json()` patches per key: keys
+  present in the zip are overwritten with their backup values (real booleans/
+  numbers, never strings), keys added since the backup are kept. Config
+  changes take effect after a plugin reload (disable → enable).
+
 ## Playback filtering (no file moves)
 
 Nothing is ever moved into `_filler/` or `_skipped/` folders — albums stay

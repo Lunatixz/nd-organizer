@@ -101,6 +101,12 @@ pub struct Config {
     /// Restarts/redeploys inside the window skip their run so passes never
     /// stack or wipe a pass that just started. 0 = no gate.
     pub min_hours_between_passes: i32,
+    /// Automatic backup settings - executed by the webhook sidecar (the plugin
+    /// can't stream its KV inside the task budget), loaded here so the
+    /// manifest toggles are real config keys.
+    pub backup_enabled: bool,
+    pub backup_path: String,
+    pub backup_every_days: i32,
     /// Max albums to process per scheduled run (0 = unlimited).
     pub max_albums_per_run: usize,
     /// Max directory entries a single pass scans before giving up (0 = unlimited).
@@ -424,6 +430,9 @@ impl Default for Config {
             run_on_startup: false,
             schedule_cron: String::new(),
             min_hours_between_passes: 12,
+            backup_enabled: false,
+            backup_path: String::new(),
+            backup_every_days: 7,
             max_albums_per_run: 100,
             max_scan_entries: 0, // 0 = unlimited (opt-in per-pass cap)
             albums_per_task: 5,
@@ -580,6 +589,7 @@ impl Default for Config {
 const CONFIG_KEYS: &[&str] = &[
     "mode", "libraryId", "libraries", "runOnStartup", "scheduleCron",
     "minHoursBetweenPasses",
+    "backupEnabled", "backupPath", "backupEveryDays",
     "maxAlbumsPerRun", "maxScanEntries", "albumsPerTask", "filesPerScanTask",
     "runOnlyWhenIdle", "favoritesSyncLastfm", "favoritesSyncMax",
     "playbackStatsEnabled", "statsPollMinutes", "topPicksCount",
@@ -679,6 +689,14 @@ impl Config {
             .get("minHoursBetweenPasses")
             .map(|v| v.trim().parse().unwrap_or(c.min_hours_between_passes))
             .unwrap_or(c.min_hours_between_passes);
+        c.backup_enabled = bool(map, "backupEnabled", c.backup_enabled);
+        if let Some(v) = map.get("backupPath") {
+            c.backup_path = v.trim().to_string();
+        }
+        c.backup_every_days = map
+            .get("backupEveryDays")
+            .map(|v| v.trim().parse().unwrap_or(c.backup_every_days))
+            .unwrap_or(c.backup_every_days);
         if let Some(v) = map.get("rollbackRunId") {
             c.rollback_run_id = v.clone();
         }
@@ -1142,6 +1160,24 @@ mod tests {
         assert_eq!(c.min_hours_between_passes, 12, "invalid keeps the default");
         let c = Config::from_map(&HashMap::new());
         assert_eq!(c.min_hours_between_passes, 12, "absent key uses the default");
+    }
+
+    #[test]
+    fn backup_settings_parse() {
+        let c = Config::from_map(&map(&[
+            ("backupEnabled", "true"),
+            ("backupPath", "/music/backups"),
+            ("backupEveryDays", "3"),
+        ]));
+        assert!(c.backup_enabled, "string true parses");
+        assert_eq!(c.backup_path, "/music/backups");
+        assert_eq!(c.backup_every_days, 3);
+        let c = Config::from_map(&map(&[("backupEveryDays", "soon")]));
+        assert_eq!(c.backup_every_days, 7, "invalid keeps the default");
+        let c = Config::from_map(&HashMap::new());
+        assert!(!c.backup_enabled, "absent key defaults to off");
+        assert_eq!(c.backup_path, "");
+        assert_eq!(c.backup_every_days, 7, "absent key uses the default");
     }
 
     #[test]

@@ -174,6 +174,45 @@ def handle(db, op, body):
             if op == "delete":
                 cur.execute("DELETE FROM kvstore WHERE `key`=%s", (body["key"],))
                 return {"deleted": cur.rowcount > 0}
+            if op == "import":
+                # Bulk restore: replace=True wipes the table first (first batch
+                # of a restore), later batches just upsert. One transaction per
+                # batch - an interrupted restore leaves a partial table, rerun it.
+                rows = body.get("rows") or []
+                replace = bool(body.get("replace"))
+                conn.autocommit(False)
+                try:
+                    if replace:
+                        cur.execute("DELETE FROM kvstore")
+                    with_ttl, without = [], []
+                    for r in rows:
+                        v = base64.b64decode(r["v"]) if r.get("v") else b""
+                        t = int(r.get("t") or 0)
+                        rec = (r["k"], v, len(v), t)
+                        (with_ttl if t > 0 else without).append(rec)
+                    if without:
+                        cur.executemany(
+                            """INSERT INTO kvstore (`key`, value, size, expires_at)
+                               VALUES (%s, %s, %s, NULL)
+                               ON DUPLICATE KEY UPDATE value=VALUES(value), size=VALUES(size),
+                                   updated_at=NOW(), expires_at=NULL""",
+                            [x[:3] for x in without],
+                        )
+                    if with_ttl:
+                        cur.executemany(
+                            """INSERT INTO kvstore (`key`, value, size, expires_at)
+                               VALUES (%s, %s, %s, DATE_ADD(NOW(), INTERVAL %s SECOND))
+                               ON DUPLICATE KEY UPDATE value=VALUES(value), size=VALUES(size),
+                                   updated_at=NOW(), expires_at=VALUES(expires_at)""",
+                            with_ttl,
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.autocommit(True)
+                return {"ok": True, "n": len(rows), "replaced": replace}
             if op == "list":
                 prefix = body.get("prefix", "")
                 cur.execute(
@@ -212,6 +251,66 @@ class Handler(BaseHTTPRequestHandler):
         if t0:
             msg += " (%dms)" % int((time.time() - t0) * 1000)
         log.info("http %s", msg)
+
+    def _stream_export(self, db):
+        """POST /export {"db": ...} -> one NDJSON line per kvstore row
+        ({"k": key, "v": base64, "t": ttl-seconds}) streamed straight from an
+        unbuffered cursor, close-delimited (no Content-Length) so a multi-GB
+        dump never sits in memory. Used by the webhook's backup."""
+        global OPS, READS, ERRORS, LAST_OP, LAST_OP_TS, _LAST_DB
+        OPS += 1
+        READS += 1
+        LAST_OP = "export"
+        LAST_OP_TS = int(time.time())
+        t0 = time.time()
+
+        def _fail(msg):
+            global ERRORS
+            ERRORS += 1
+            log.error("export failed: %s", msg)
+            out = json.dumps({"result": {"error": "mysql: %s" % msg}}).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self._wfile_write(out)
+
+        if pymysql is None:
+            return _fail("pymysql not installed")
+        try:
+            conn = connect(db)
+            ensure_schema(conn)
+            _LAST_DB = db
+        except Exception as e:
+            return _fail(str(e))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        self.close_connection = True
+        n = 0
+        try:
+            cur = conn.cursor(pymysql.cursors.SSCursor)  # unbuffered: rows stream from MySQL
+            cur.execute(
+                "SELECT `key`, value, TIMESTAMPDIFF(SECOND, NOW(), expires_at) "
+                "FROM kvstore"
+            )
+            for key, value, ttl in cur:
+                line = json.dumps({
+                    "k": key,
+                    "v": base64.b64encode(value).decode(),
+                    "t": int(ttl) if ttl and ttl > 0 else 0,
+                }) + "\n"
+                self.wfile.write(line.encode("utf-8"))
+                n += 1
+                if n % 512 == 0:
+                    self.wfile.flush()
+            self.wfile.flush()
+            cur.close()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            log.warning("export: client disconnected after %d rows", n)
+        finally:
+            conn.close()
+        log.info("export streamed %d rows (%dms)", n, int((time.time() - t0) * 1000))
 
     def do_GET(self):
         self._t0 = time.time()
@@ -283,7 +382,12 @@ class Handler(BaseHTTPRequestHandler):
         OPS += 1
         LAST_OP = str(op)
         LAST_OP_TS = int(time.time())
-        mutating = op in ("set", "delete")
+        # Bulk export streams NDJSON rows instead of one JSON envelope - see
+        # _stream_export; it can be multi-GB, so it never buffers in memory.
+        if op == "export":
+            self._stream_export(db)
+            return
+        mutating = op in ("set", "delete", "import")
         detail = body.get("key") or body.get("prefix") or ""
         if op == "get_many":
             detail = "%d keys" % len(body.get("keys") or [])

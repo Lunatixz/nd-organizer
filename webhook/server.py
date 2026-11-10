@@ -13,6 +13,7 @@
 
 import base64
 import http.server
+import io
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 
 logging.basicConfig(
@@ -994,6 +996,22 @@ def plugin_config():
     return cfg
 
 
+def _mysql_cfg(cfg):
+    """(sidecar_base_url, db_dict) for the mysql KV sidecar, or (None, None)
+    when persistenceBackend isn't mysql (backups need the real table)."""
+    if not cfg or str(cfg.get("persistenceBackend", "")).lower() != "mysql":
+        return None, None
+    url = (cfg.get("persistenceUrl") or "http://nd-organizer-mysql:8098").rstrip("/")
+    db = {
+        "host": cfg.get("mysqlHost", ""),
+        "port": int(cfg.get("mysqlPort") or 3306),
+        "name": cfg.get("mysqlName", ""),
+        "user": cfg.get("mysqlUser", ""),
+        "password": cfg.get("mysqlPassword", ""),
+    }
+    return url, db
+
+
 def kv_op(op, **kw):
     """One read against the mysql KV sidecar; returns the response dict or
     None (plugin not on mysql / sidecar down / no config). 15s cache."""
@@ -1003,17 +1021,12 @@ def kv_op(op, **kw):
         return c[1]
     out = None
     cfg = plugin_config()
-    if cfg and str(cfg.get("persistenceBackend", "")).lower() == "mysql":
+    url_base, db = _mysql_cfg(cfg)
+    if url_base:
         body = {"op": op}
         body.update(kw)
-        body["db"] = {
-            "host": cfg.get("mysqlHost", ""),
-            "port": int(cfg.get("mysqlPort") or 3306),
-            "name": cfg.get("mysqlName", ""),
-            "user": cfg.get("mysqlUser", ""),
-            "password": cfg.get("mysqlPassword", ""),
-        }
-        url = (cfg.get("persistenceUrl") or "http://nd-organizer-mysql:8098").rstrip("/") + "/kv"
+        body["db"] = db
+        url = url_base + "/kv"
         try:
             req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json"})
@@ -1046,6 +1059,258 @@ def kv_get_json(key):
         return json.loads(base64.b64decode(r["value"]))
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------- backups & restore
+#
+# Project state (scan progress, task log, rollback records, analysis flags...)
+# and every mysql KV row live in the sidecar's kvstore table; the plugin can't
+# stream them (30s task budget), so the webhook drives backup/restore: config
+# JSON from navidrome.db + NDJSON rows from the sidecar's /export, zipped to
+# the user's backupPath. Restore posts back through /kv op=import.
+
+BACKUP_VERSION = 1
+_BACKUP_LOCK = threading.Lock()
+_BACKUP_STATE = {"running": False, "last_check": 0.0}
+
+
+def _config_json():
+    """(config.json text, key count) - the plugin config exactly as stored in
+    navidrome.db. Refuses to back up an unreadable/empty config rather than
+    silently writing a config.json a restore would wipe keys with."""
+    rows = db_query("SELECT config FROM plugin WHERE id='nd-organizer'", ttl=300)
+    text = rows[0].get("config") if rows and rows[0].get("config") else None
+    if not text:
+        raise RuntimeError("plugin config unreadable - not backing up")
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, str):
+            obj = json.loads(obj)
+        if not isinstance(obj, dict) or not obj:
+            raise ValueError("config is not a non-empty object")
+        return json.dumps(obj, indent=1, ensure_ascii=False, sort_keys=True), len(obj)
+    except Exception as e:
+        raise RuntimeError("plugin config unreadable (%s) - not backing up" % e)
+
+
+def run_backup():
+    """Write backupPath/nd-organizer-backup-<ts>.zip = manifest.json +
+    config.json + kv.jsonl (every mysql row, streamed). Atomic: writes .part
+    then renames, so a failed backup never leaves a half zip behind."""
+    cfg = plugin_config() or {}
+    url_base, db = _mysql_cfg(cfg)
+    if not url_base:
+        raise RuntimeError("persistenceBackend is not mysql - nothing to back up")
+    path = str(cfg.get("backupPath") or "").strip()
+    if not path:
+        raise RuntimeError("backupPath is not set")
+    os.makedirs(path, exist_ok=True)
+    final = os.path.join(path, "nd-organizer-backup-%s.zip" % time.strftime("%Y%m%d-%H%M%S"))
+    part = final + ".part"
+    t0 = time.time()
+    rows = 0
+    try:
+        cfg_text, cfg_keys = _config_json()
+        with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+            zf.writestr("manifest.json", json.dumps({
+                "version": BACKUP_VERSION,
+                "service": "nd-organizer-backup",
+                "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "config_keys": cfg_keys,
+            }, indent=1))
+            zf.writestr("config.json", cfg_text)
+            req = urllib.request.Request(
+                url_base + "/export",
+                data=json.dumps({"op": "export", "db": db}).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=1800) as r:
+                # kv.jsonl streams past the 4GB ZIP32 entry limit (364k rows
+                # of b64 JSON), and an open-for-write entry can't grow into
+                # zip64 on its own - force it upfront.
+                with zf.open("kv.jsonl", "w", force_zip64=True) as out:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        rows += chunk.count(b"\n")
+        os.replace(part, final)
+    except Exception:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    size = os.path.getsize(final)
+    now_s = str(int(time.time()))
+    kv_op("set", key="backup.last_ts",
+          value=base64.b64encode(now_s.encode()).decode())
+    kv_op("set", key="backup.last_file",
+          value=base64.b64encode(final.encode()).decode())
+    info = {"file": final, "bytes": size, "kv_rows": rows, "config_keys": cfg_keys,
+            "seconds": round(time.time() - t0, 1)}
+    log.info("backup wrote %s (%d bytes, %d kv rows, %ss)",
+             final, size, rows, info["seconds"])
+    return info
+
+
+def maybe_backup():
+    """Cheap cadence check on every plugin status POST (dict lookups only,
+    KV read at most once an hour); the backup itself runs in a daemon thread
+    so the dashboard and status ingestion never block."""
+    cfg = plugin_config() or {}
+    if cfg.get("backupEnabled") not in (True, "true", "1", "on"):
+        return
+    try:
+        days = int(cfg.get("backupEveryDays") or 0)
+    except (TypeError, ValueError):
+        days = 0
+    if days <= 0 or not str(cfg.get("backupPath") or "").strip():
+        return
+    now = time.time()
+    with _BACKUP_LOCK:
+        if _BACKUP_STATE["running"] or now - _BACKUP_STATE["last_check"] < 3600:
+            return
+        _BACKUP_STATE["last_check"] = now
+    last = kv_get_int("backup.last_ts") or 0
+    if now - last < days * 86400:
+        return
+    with _BACKUP_LOCK:
+        if _BACKUP_STATE["running"]:
+            return
+        _BACKUP_STATE["running"] = True
+
+    def _run():
+        try:
+            run_backup()
+        except Exception as e:
+            log.error("automatic backup failed: %s", e)
+        finally:
+            with _BACKUP_LOCK:
+                _BACKUP_STATE["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _config_restore_plan(current_text, backup_cfg, chunk=60):
+    """[(sql, params), ...] applying every backup key on top of the live config
+    with json_set + json(): typed JSON values (json.dumps(False) -> 'false',
+    never the string '"false"' that failed Navidrome's schema) and never a
+    wholesale config write - AGENTS forbids clobbering the column. Keys added
+    since the backup are kept; keys with unsafe names are skipped. Empty
+    current config -> the backup config is written outright. Chunked because
+    sqlite caps function args at SQLITE_MAX_FUNCTION_ARG=127 and json_set
+    needs 1 + 2*n (156 keys = 313 args)."""
+    keys = [str(k) for k in backup_cfg
+            if str(k).replace("_", "").isalnum() and not str(k)[0].isdigit()]
+    if not keys:
+        return []
+    # WHERE matters: the plugin table holds other plugins too, and json_set on
+    # a non-JSON config column fails (or would clobber it without the filter).
+    if not current_text or not str(current_text).strip():
+        return [("UPDATE plugin SET config = ? WHERE id = 'nd-organizer'",
+                 [json.dumps(backup_cfg)])]
+    stmts = []
+    for i in range(0, len(keys), chunk):
+        part = keys[i:i + chunk]
+        stmts.append((
+            "UPDATE plugin SET config = json_set(config, %s)"
+            " WHERE id = 'nd-organizer'" % ", ".join(
+                "'$.%s', json(?)" % k for k in part),
+            [json.dumps(backup_cfg[k]) for k in part]))
+    return stmts
+
+
+def _iter_kv_lines(fh):
+    """Yield {k, v, t} dicts from a kv.jsonl stream (backup format)."""
+    buf = b""
+    while True:
+        chunk = fh.read(1 << 20)
+        if not chunk:
+            break
+        buf += chunk
+        parts = buf.split(b"\n")
+        buf = parts.pop()
+        for ln in parts:
+            if ln.strip():
+                yield json.loads(ln)
+    if buf.strip():
+        yield json.loads(buf)
+
+
+def run_restore(path):
+    """Restore config (typed json_set patches) + replace every mysql KV row
+    from a backup zip. Disable the plugin first: kvstore is replaced
+    wholesale and live plugin writes would race the import."""
+    if not os.path.isfile(path):
+        raise RuntimeError("backup zip not found: %s" % path)
+    t0 = time.time()
+    with zipfile.ZipFile(path, "r") as zf:
+        names = set(zf.namelist())
+        for needed in ("manifest.json", "config.json", "kv.jsonl"):
+            if needed not in names:
+                raise RuntimeError("not an nd-organizer backup (missing %s)" % needed)
+        manifest = json.loads(zf.read("manifest.json"))
+        if manifest.get("version") != BACKUP_VERSION:
+            raise RuntimeError("unsupported backup version %r" % manifest.get("version"))
+        try:
+            backup_cfg = json.loads(zf.read("config.json").decode("utf-8", "replace"))
+            if isinstance(backup_cfg, str):
+                backup_cfg = json.loads(backup_cfg)
+        except Exception as e:
+            raise RuntimeError("config.json unreadable: %s" % e)
+        if not isinstance(backup_cfg, dict) or not backup_cfg:
+            raise RuntimeError("config.json is not a non-empty object")
+        # --- config: typed json_set patches on the live column
+        conn = radio_db_connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT config FROM plugin WHERE id='nd-organizer'")
+            row = cur.fetchone()
+            current = row["config"] if row else None
+            stmts = _config_restore_plan(current, backup_cfg)
+            for sql, params in stmts:
+                cur.execute(sql, params)
+            if stmts:
+                conn.commit()
+        finally:
+            conn.close()
+        # --- KV: stream kv.jsonl back through the sidecar in ~6MB batches
+        url_base, db = _mysql_cfg(plugin_config() or {})
+        if not url_base:
+            raise RuntimeError("persistenceBackend is not mysql")
+        state = {"n": 0, "replace": True}
+
+        def flush(rows_):
+            body = json.dumps({"op": "import", "db": db, "rows": rows_,
+                               "replace": state["replace"]}).encode()
+            req = urllib.request.Request(url_base + "/kv", data=body,
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                res = json.load(r)
+            res = res.get("result", res) if isinstance(res, dict) else res
+            if isinstance(res, dict) and res.get("error"):
+                raise RuntimeError("kv import: %s" % res["error"])
+            state["replace"] = False
+            state["n"] += len(rows_)
+
+        batch, batch_bytes = [], 0
+        with zf.open("kv.jsonl") as fh:
+            for row in _iter_kv_lines(fh):
+                batch.append({"k": row["k"], "v": row["v"],
+                              "t": int(row.get("t") or 0)})
+                batch_bytes += len(row.get("v") or "")
+                if batch_bytes >= 6 * 1024 * 1024:
+                    flush(batch)
+                    batch, batch_bytes = [], 0
+            if batch:
+                flush(batch)
+    info = {"config_keys": len(backup_cfg), "kv_rows": state["n"], "path": path,
+            "seconds": round(time.time() - t0, 1),
+            "backup_created": manifest.get("created")}
+    log.info("restore %s -> %d config keys, %d kv rows (%ss)",
+             path, len(backup_cfg), state["n"], info["seconds"])
+    return info
 
 
 def _fmt_secs(s):
@@ -2376,6 +2641,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._t0 = time.time()
         body = self._read_body()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Automatic backups ride along on plugin status posts (cheap checks;
+        # the backup itself runs in a background thread).
+        maybe_backup()
         # Internet radio: add a station directly to Navidrome radio table.
         if self.path.rstrip("/").endswith("/radio-add"):
             log.info("radio-add: handler entered, body=%d bytes", len(body))
@@ -2538,6 +2806,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 log.exception("playlist-delete failed")
                 self._send(500, {"error": str(e)})
+            return
+        # Backup restore: replace config + mysql KV from a zip the user points
+        # at. Destructive, so it demands an explicit confirm token.
+        if self.path.rstrip("/").endswith("/restore"):
+            try:
+                req = json.loads(body) if body else {}
+            except Exception:
+                req = {}
+            if req.get("confirm") != "RESTORE":
+                self._send(400, {"ok": False, "error":
+                                 'confirm must be exactly "RESTORE" (this replaces all KV data)'})
+                return
+            zip_path = str(req.get("path") or "").strip()
+            if not zip_path:
+                self._send(400, {"ok": False, "error": "path to a backup zip is required"})
+                return
+            try:
+                info = run_restore(zip_path)
+                entries.append((ts, "/restore", json.dumps({"restored": info})))
+                self._send(200, {"ok": True, **info, "note":
+                                 "disable/enable the plugin to apply config changes; "
+                                 "keep the plugin disabled while restoring"})
+            except Exception as e:
+                log.exception("restore failed: %s", zip_path)
+                self._send(502, {"ok": False, "error": str(e)})
             return
         # Sidecar heartbeat? Body is {"service": "...", "ts": ...} with no "mode".
         try:
@@ -3335,6 +3628,44 @@ if __name__ == "__main__":
         assert "left as-is (no backup was taken)" in nb_html
         exp = _rollback_detail_html([], False, {"libraryId": 2, "mode": "apply"})
         assert "library 2" in exp and "can no longer" in exp
+        # backup format roundtrip: build a zip, read it back through the same
+        # helpers the restore path uses
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("manifest.json", json.dumps({"version": BACKUP_VERSION}))
+            zf.writestr("config.json", json.dumps(
+                {"mode": "Apply", "overwriteArt": False, "backupEveryDays": 7}))
+            # same call shape as run_backup (force_zip64 streaming write)
+            with zf.open("kv.jsonl", "w", force_zip64=True) as out:
+                out.write((json.dumps({"k": "scan.unverified.1", "v": "YQ==", "t": 60}) + "\n").encode())
+                out.write((json.dumps({"k": "tasklog", "v": "", "t": 0}) + "\n").encode())
+        buf.seek(0)
+        with zipfile.ZipFile(buf) as zf:
+            m = json.loads(zf.read("manifest.json"))
+            assert m["version"] == BACKUP_VERSION
+            cfg = json.loads(zf.read("config.json"))
+            assert cfg["overwriteArt"] is False and cfg["backupEveryDays"] == 7
+            rows = list(_iter_kv_lines(zf.open("kv.jsonl")))
+            assert rows == [{"k": "scan.unverified.1", "v": "YQ==", "t": 60},
+                            {"k": "tasklog", "v": "", "t": 0}], rows
+        # config restore plan: json() params keep real JSON types (the string
+        # '"false"' failed Navidrome schema validation once already)
+        stmts = _config_restore_plan('{"mode": "DryRun"}',
+                                     {"mode": "Apply", "overwriteArt": False})
+        assert len(stmts) == 1 and "json_set" in stmts[0][0]
+        assert stmts[0][0].count("json(?)") == 2
+        assert stmts[0][1] == ['"Apply"', "false"], stmts[0][1]
+        assert _config_restore_plan(None, {"mode": "Apply"}) == [
+            ("UPDATE plugin SET config = ? WHERE id = 'nd-organizer'",
+             ['{"mode": "Apply"}'])]
+        assert _config_restore_plan('{"a":1}', {}) == []
+        # >60 keys must split: sqlite caps json_set at 127 function args, and
+        # every statement must stay scoped to our plugin row
+        big = {("key%03d" % i): i for i in range(156)}
+        stmts3 = _config_restore_plan('{"x":1}', big)
+        assert len(stmts3) == 3, len(stmts3)
+        assert all(s.count("json(?)") <= 60 and s.endswith("WHERE id = 'nd-organizer'")
+                   for s, _ in stmts3)
         print("ok")
         sys.exit(0)
     load_log()
