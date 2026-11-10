@@ -845,6 +845,15 @@ Restore semantics:
   numbers, never strings), keys added since the backup are kept. Config
   changes take effect after a plugin reload (disable → enable).
 
+Restore **from the plugin UI**: set *Restore from backup zip*
+(`restoreFromZip`) in the plugin settings to the zip's path while the plugin
+is **disabled**, then save. The webhook picks the field up within ~a minute
+(sidecar heartbeats keep it checking even while the plugin is off), refuses
+to run while the plugin is enabled, performs the restore, then clears the
+field so it can't re-fire. The outcome lands in the webhook dashboard's
+**Activity** section (and KV key `restore.last_result`); re-enable the plugin
+afterwards to load the restored config.
+
 ## Playback filtering (no file moves)
 
 Nothing is ever moved into `_filler/` or `_skipped/` folders — albums stay

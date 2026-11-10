@@ -446,6 +446,12 @@
           "default": 7,
           "description": "Minimum days between backups. The first backup runs as soon as backups are enabled and a folder is set; later runs happen on the next status report after the interval elapses."
         },
+        "restoreFromZip": {
+          "type": "string",
+          "title": "Restore from backup zip",
+          "default": "",
+          "description": "Path to a backup zip as seen by the webhook sidecar (e.g. /music/nd-organizer-backups/nd-organizer-backup-20261109-234005.zip). To restore: disable this plugin, set the path, save - the restore starts within a minute, replaces KV and config from the zip, then clears this field. The result appears in the webhook dashboard's Activity; re-enable the plugin afterwards."
+        },
         "folderSchema": {
           "type": "string",
           "title": "Album folder schema",
@@ -2187,8 +2193,12 @@
               "scope": "#/properties/backupEveryDays"
             },
             {
+              "type": "Control",
+              "scope": "#/properties/restoreFromZip"
+            },
+            {
               "type": "Label",
-              "text": "Restore by POSTing {\"path\": \"<zip>\", \"confirm\": \"RESTORE\"} to the webhook's /restore endpoint. The zip contains manifest.json, config.json and kv.jsonl; disabling the plugin first gives a consistent snapshot, and config changes apply after a plugin reload."
+              "text": "Restore by POSTing {\"path\": \"<zip>\", \"confirm\": \"RESTORE\"} to the webhook's /restore endpoint, or by setting 'Restore from backup zip' above while the plugin is disabled. The zip contains manifest.json, config.json and kv.jsonl; disabling the plugin first gives a consistent snapshot, and config changes apply after a plugin reload."
             }
           ]
         },

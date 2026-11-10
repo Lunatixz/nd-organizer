@@ -1072,6 +1072,13 @@ def kv_get_json(key):
 BACKUP_VERSION = 1
 _BACKUP_LOCK = threading.Lock()
 _BACKUP_STATE = {"running": False, "last_check": 0.0}
+_RESTORE_STATE = {"running": False, "done": "", "warned": ""}
+
+
+def valid_restore_path(p):
+    """UI trigger sanity: absolute path to a .zip, no traversal. run_restore
+    still validates the zip is actually an nd-organizer backup."""
+    return p.startswith("/") and p.endswith(".zip") and ".." not in p
 
 
 def _config_json():
@@ -1169,14 +1176,15 @@ def maybe_backup():
         return
     now = time.time()
     with _BACKUP_LOCK:
-        if _BACKUP_STATE["running"] or now - _BACKUP_STATE["last_check"] < 3600:
+        if (_BACKUP_STATE["running"] or _RESTORE_STATE["running"]
+                or now - _BACKUP_STATE["last_check"] < 3600):
             return
         _BACKUP_STATE["last_check"] = now
     last = kv_get_int("backup.last_ts") or 0
     if now - last < days * 86400:
         return
     with _BACKUP_LOCK:
-        if _BACKUP_STATE["running"]:
+        if _BACKUP_STATE["running"] or _RESTORE_STATE["running"]:
             return
         _BACKUP_STATE["running"] = True
 
@@ -1188,6 +1196,99 @@ def maybe_backup():
         finally:
             with _BACKUP_LOCK:
                 _BACKUP_STATE["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _finish_restore_request(path, info, error):
+    """Clear the restoreFromZip trigger (so it can't re-fire) and leave a
+    visible trail: KV result + a dashboard Activity entry + a log line."""
+    try:
+        conn = radio_db_connect()
+        try:
+            cur = conn.cursor()
+            # json.dumps("") -> '""': json() needs valid JSON text, a raw
+            # empty string raises "malformed JSON"
+            cur.execute(
+                "UPDATE plugin SET config = json_set(json(config),"
+                " '$.restoreFromZip', json(?)) WHERE id = 'nd-organizer'",
+                (json.dumps(""),))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.error("could not clear restoreFromZip: %s", e)
+    result = {"path": path, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "ok": error is None}
+    if info:
+        result.update(info)
+    if error:
+        result["error"] = error
+    kv_op("set", key="restore.last_result",
+          value=base64.b64encode(json.dumps(result).encode()).decode())
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entries.append((ts, "/restore", json.dumps(result)))
+    if len(entries) > MAX_ENTRIES:
+        del entries[: len(entries) - MAX_ENTRIES]
+    log.info("ui restore %s: %s", "ok" if error is None else "failed",
+             json.dumps(result)[:400])
+
+
+def maybe_restore():
+    """UI-triggered restore: the Navidrome plugin settings page has no
+    buttons, so the restoreFromZip config field IS the trigger - the user
+    disables the plugin, sets the path, saves; sidecar heartbeats keep
+    hitting this check (~60s) even while the plugin is off. Runs only while
+    the plugin is disabled (live writes would race the KV replace), clears
+    the field after every attempt, and records the result for the dashboard."""
+    with _BACKUP_LOCK:
+        if _RESTORE_STATE["running"] or _BACKUP_STATE["running"]:
+            return
+    # fresh-ish read: the user just saved this field, a 300s cache would feel
+    # like nothing happened
+    rows = db_query("SELECT config FROM plugin WHERE id='nd-organizer'", ttl=15)
+    path = ""
+    try:
+        cfg = json.loads(rows[0]["config"]) if rows and rows[0].get("config") else {}
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        path = str(cfg.get("restoreFromZip") or "").strip()
+    except Exception:
+        return
+    if not path:
+        _RESTORE_STATE["warned"] = ""
+        return
+    if not valid_restore_path(path):
+        _finish_restore_request(path, None,
+                                "not a backup zip path (need an absolute path ending in .zip)")
+        return
+    if path == _RESTORE_STATE.get("done"):
+        return
+    en = db_query("SELECT enabled FROM plugin WHERE id='nd-organizer'", ttl=15)
+    if en and en[0].get("enabled"):
+        with _BACKUP_LOCK:
+            first = _RESTORE_STATE["warned"] != path
+            _RESTORE_STATE["warned"] = path
+        if first:
+            log.warning("restore requested for %s but the plugin is enabled - "
+                        "disable it first; waiting", path)
+        return
+    with _BACKUP_LOCK:
+        if _RESTORE_STATE["running"] or _BACKUP_STATE["running"]:
+            return
+        _RESTORE_STATE["running"] = True
+        _RESTORE_STATE["done"] = path
+
+    def _run():
+        try:
+            info = run_restore(path)
+            _finish_restore_request(path, info, None)
+        except Exception as e:
+            log.exception("ui restore failed: %s", path)
+            _finish_restore_request(path, None, str(e))
+        finally:
+            with _BACKUP_LOCK:
+                _RESTORE_STATE["running"] = False
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -1213,8 +1314,10 @@ def _config_restore_plan(current_text, backup_cfg, chunk=60):
     stmts = []
     for i in range(0, len(keys), chunk):
         part = keys[i:i + chunk]
+        # json(config) instead of config: Navidrome can transiently store the
+        # column as a JSON *string*; json() normalizes either form.
         stmts.append((
-            "UPDATE plugin SET config = json_set(config, %s)"
+            "UPDATE plugin SET config = json_set(json(config), %s)"
             " WHERE id = 'nd-organizer'" % ", ".join(
                 "'$.%s', json(?)" % k for k in part),
             [json.dumps(backup_cfg[k]) for k in part]))
@@ -1265,14 +1368,27 @@ def run_restore(path):
         conn = radio_db_connect()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT config FROM plugin WHERE id='nd-organizer'")
-            row = cur.fetchone()
-            current = row["config"] if row else None
-            stmts = _config_restore_plan(current, backup_cfg)
-            for sql, params in stmts:
-                cur.execute(sql, params)
-            if stmts:
-                conn.commit()
+            # Navidrome can be mid-save on the config row (it briefly stores
+            # config as a JSON string) -> json_set sees a non-object and raises
+            # "malformed JSON". Settle-and-retry; the plugin is disabled during
+            # restore, so after the window it stays quiet.
+            stmts, current = [], None
+            for attempt in range(3):
+                cur.execute("SELECT config FROM plugin WHERE id='nd-organizer'")
+                row = cur.fetchone()
+                current = row["config"] if row else None
+                stmts = _config_restore_plan(current, backup_cfg)
+                try:
+                    for sql, params in stmts:
+                        cur.execute(sql, params)
+                    if stmts:
+                        conn.commit()
+                    break
+                except sqlite3.OperationalError as e:
+                    if attempt == 2 or "malformed JSON" not in str(e):
+                        raise
+                    conn.rollback()
+                    time.sleep(2)
         finally:
             conn.close()
         # --- KV: stream kv.jsonl back through the sidecar in ~6MB batches
@@ -2642,8 +2758,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = self._read_body()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Automatic backups ride along on plugin status posts (cheap checks;
-        # the backup itself runs in a background thread).
+        # the backup itself runs in a background thread). The UI restore
+        # trigger rides the same posts + sidecar heartbeats (fires even while
+        # the plugin is disabled).
         maybe_backup()
+        maybe_restore()
         # Internet radio: add a station directly to Navidrome radio table.
         if self.path.rstrip("/").endswith("/radio-add"):
             log.info("radio-add: handler entered, body=%d bytes", len(body))
@@ -3652,13 +3771,18 @@ if __name__ == "__main__":
         # '"false"' failed Navidrome schema validation once already)
         stmts = _config_restore_plan('{"mode": "DryRun"}',
                                      {"mode": "Apply", "overwriteArt": False})
-        assert len(stmts) == 1 and "json_set" in stmts[0][0]
+        assert len(stmts) == 1 and "json_set(json(config)" in stmts[0][0]
         assert stmts[0][0].count("json(?)") == 2
         assert stmts[0][1] == ['"Apply"', "false"], stmts[0][1]
         assert _config_restore_plan(None, {"mode": "Apply"}) == [
             ("UPDATE plugin SET config = ? WHERE id = 'nd-organizer'",
              ['{"mode": "Apply"}'])]
         assert _config_restore_plan('{"a":1}', {}) == []
+        # UI restore trigger sanity: absolute .zip path only
+        assert valid_restore_path("/music/backups/nd-organizer-backup-x.zip")
+        assert not valid_restore_path("backups/x.zip")
+        assert not valid_restore_path("/music/x.txt")
+        assert not valid_restore_path("/music/../etc/x.zip")
         # >60 keys must split: sqlite caps json_set at 127 function args, and
         # every statement must stay scoped to our plugin row
         big = {("key%03d" % i): i for i in range(156)}

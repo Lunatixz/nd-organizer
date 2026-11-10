@@ -107,6 +107,9 @@ pub struct Config {
     pub backup_enabled: bool,
     pub backup_path: String,
     pub backup_every_days: i32,
+    /// UI restore trigger: set to a backup zip path to run a restore (the
+    /// webhook clears the field after the attempt). Empty = no restore.
+    pub restore_from_zip: String,
     /// Max albums to process per scheduled run (0 = unlimited).
     pub max_albums_per_run: usize,
     /// Max directory entries a single pass scans before giving up (0 = unlimited).
@@ -433,6 +436,7 @@ impl Default for Config {
             backup_enabled: false,
             backup_path: String::new(),
             backup_every_days: 7,
+            restore_from_zip: String::new(),
             max_albums_per_run: 100,
             max_scan_entries: 0, // 0 = unlimited (opt-in per-pass cap)
             albums_per_task: 5,
@@ -589,7 +593,7 @@ impl Default for Config {
 const CONFIG_KEYS: &[&str] = &[
     "mode", "libraryId", "libraries", "runOnStartup", "scheduleCron",
     "minHoursBetweenPasses",
-    "backupEnabled", "backupPath", "backupEveryDays",
+    "backupEnabled", "backupPath", "backupEveryDays", "restoreFromZip",
     "maxAlbumsPerRun", "maxScanEntries", "albumsPerTask", "filesPerScanTask",
     "runOnlyWhenIdle", "favoritesSyncLastfm", "favoritesSyncMax",
     "playbackStatsEnabled", "statsPollMinutes", "topPicksCount",
@@ -697,6 +701,9 @@ impl Config {
             .get("backupEveryDays")
             .map(|v| v.trim().parse().unwrap_or(c.backup_every_days))
             .unwrap_or(c.backup_every_days);
+        if let Some(v) = map.get("restoreFromZip") {
+            c.restore_from_zip = v.trim().to_string();
+        }
         if let Some(v) = map.get("rollbackRunId") {
             c.rollback_run_id = v.clone();
         }
@@ -1168,16 +1175,19 @@ mod tests {
             ("backupEnabled", "true"),
             ("backupPath", "/music/backups"),
             ("backupEveryDays", "3"),
+            ("restoreFromZip", "/music/backups/nd-organizer-backup-x.zip"),
         ]));
         assert!(c.backup_enabled, "string true parses");
         assert_eq!(c.backup_path, "/music/backups");
         assert_eq!(c.backup_every_days, 3);
+        assert_eq!(c.restore_from_zip, "/music/backups/nd-organizer-backup-x.zip");
         let c = Config::from_map(&map(&[("backupEveryDays", "soon")]));
         assert_eq!(c.backup_every_days, 7, "invalid keeps the default");
         let c = Config::from_map(&HashMap::new());
         assert!(!c.backup_enabled, "absent key defaults to off");
         assert_eq!(c.backup_path, "");
         assert_eq!(c.backup_every_days, 7, "absent key uses the default");
+        assert_eq!(c.restore_from_zip, "", "absent key means no restore");
     }
 
     #[test]
