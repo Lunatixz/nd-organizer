@@ -1979,9 +1979,7 @@ pub fn plan_singles_step(cfg: &Config, library_id: i32) -> Result<(usize, usize)
         });
     }
     let moved = if cfg.mode == crate::config::Mode::Apply {
-        if let Err(e) =
-            crate::organizer::apply_group_plan_to(&root, &dest_root, &plan, cfg.prune_empty_dirs)
-        {
+        if let Err(e) = crate::organizer::apply_group_plan_to(&root, &dest_root, &plan, cfg) {
             crate::wasm::log_warn(&format!("plan_singles: {e}"));
         }
         plan.moves.len()
@@ -2551,7 +2549,7 @@ pub fn plan_move_step(
         }));
 
         if cfg.mode == Mode::Apply && !plan.moves.is_empty() {
-            crate::organizer::apply_group_plan(&root, &plan, cfg.prune_empty_dirs)?;
+            crate::organizer::apply_group_plan(&root, &plan, cfg)?;
             if !cfg.move_destination_library.is_empty() {
                 let dest_id = crate::wasm::resolve_library_id(&cfg.move_destination_library);
                 if let Some(dest_id) = dest_id {
@@ -3643,6 +3641,17 @@ pub fn plan_enrich_step(
             total_autotags + total_replaygains,
         ) {
             crate::wasm::log_warn(&format!("history write failed: {e}"));
+        }
+        // End of the full cycle: sweep again for folders this pass's moves
+        // emptied. The group-phase sweep runs BEFORE plan/apply, so anything
+        // a move leaves behind would otherwise survive until the next pass.
+        match crate::wasm::enqueue_cleanup_task(library_id) {
+            Ok(()) => crate::wasm::log_info(
+                "enrich: cycle complete, enqueued end-of-cycle cleanup sweep",
+            ),
+            Err(e) => crate::wasm::log_warn(&format!(
+                "end-of-cycle cleanup enqueue failed: {e}"
+            )),
         }
     }
     Ok(())

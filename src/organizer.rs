@@ -1572,8 +1572,8 @@ pub fn move_album_folder(
 
 /// Apply a group plan: move files + sidecars into the album target dir,
 /// handle duplicates per policy, prune now-empty source dirs.
-pub fn apply_group_plan(root: &Path, plan: &GroupPlan, prune: bool) -> Result<(), String> {
-    apply_group_plan_to(root, root, plan, prune)
+pub fn apply_group_plan(root: &Path, plan: &GroupPlan, cfg: &Config) -> Result<(), String> {
+    apply_group_plan_to(root, root, plan, cfg)
 }
 
 /// Cross-library variant: sources resolve against `root`, targets against
@@ -1582,8 +1582,9 @@ pub fn apply_group_plan_to(
     root: &Path,
     dest: &Path,
     plan: &GroupPlan,
-    prune: bool,
+    cfg: &Config,
 ) -> Result<(), String> {
+    let prune = cfg.prune_empty_dirs;
     let mut errors = Vec::new();
     for m in &plan.moves {
         let to_path = dest.join(&m.to);
@@ -1690,14 +1691,14 @@ pub fn apply_group_plan_to(
         for m in &plan.moves {
             if let Some(dir) = root.join(&m.from).parent() {
                 if seen.insert(dir.to_path_buf()) {
-                    prune_empty_dirs_abs(dir);
+                    wipe_empty_chain(root, dir, cfg.skip_hidden_files, &cfg.exclude_paths);
                 }
             }
         }
         for dup in &plan.duplicates {
             if let Some(dir) = root.join(&dup.loser).parent() {
                 if seen.insert(dir.to_path_buf()) {
-                    prune_empty_dirs_abs(dir);
+                    wipe_empty_chain(root, dir, cfg.skip_hidden_files, &cfg.exclude_paths);
                 }
             }
         }
@@ -1709,25 +1710,44 @@ pub fn apply_group_plan_to(
     }
 }
 
-/// Remove an empty directory and its empty ancestors (absolute path version).
-fn prune_empty_dirs_abs(dir: &Path) {
+/// After a move empties a folder: wipe it - leftover junk (cover.jpg,
+/// artist.nfo) goes with it - then keep walking up while ancestors become
+/// removable no-audio leaves, so an artist dir emptied by its last album
+/// move disappears in the same pass instead of waiting for the next
+/// group-phase sweep. Stops at the library root, excluded paths, anything
+/// still holding a subdirectory or audio, and (under skip_hidden) dirs with
+/// hidden files. Returns how many dirs were removed.
+pub fn wipe_empty_chain(
+    root: &Path,
+    dir: &Path,
+    skip_hidden: bool,
+    excludes: &[String],
+) -> usize {
+    let mut removed = 0usize;
     let mut cur = dir.to_path_buf();
     loop {
-        if !cur.is_dir() {
+        if cur.as_path() == root || !cur.starts_with(root) {
             break;
         }
-        let Ok(mut rd) = std::fs::read_dir(&cur) else {
+        let Ok(rel) = cur.strip_prefix(root) else {
             break;
         };
-        if rd.next().is_some() {
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if rel.is_empty() || is_excluded(&rel, excludes) {
             break;
         }
-        let _ = std::fs::remove_dir(&cur);
+        // Audio or a subdirectory means the folder is not emptied: stop.
+        if dir_has_audio(&cur) || !wipe_no_audio_dir(&cur, skip_hidden) {
+            break;
+        }
+        crate::log::debug(&format!("removed emptied folder {rel}"));
+        removed += 1;
         match cur.parent() {
             Some(p) => cur = p.to_path_buf(),
             None => break,
         }
     }
+    removed
 }
 
 /// True when the directory directly contains at least one audio file.
@@ -2526,7 +2546,7 @@ mod tests {
             vec![("Old Dir/01 - Song.flac".into(), tags)];
         let plan = build_group_plan(&root, &Config::default(), &files, "Old Dir", "", None, "", None);
         assert_ne!(plan.target_dir, "Old Dir");
-        apply_group_plan(&root, &plan, true).unwrap();
+        apply_group_plan(&root, &plan, &Config::default()).unwrap();
         let target = root.join(&plan.target_dir);
         // Default file schema is "{albumArtist} {album} {track:02} - {title}".
         assert!(target.join("Artist New Album 01 - Song.flac").exists());
@@ -3461,7 +3481,7 @@ mod tests {
             .moves
             .iter()
             .all(|m| m.to.starts_with(&plan.target_dir)));
-        apply_group_plan(&root, &plan, true).unwrap();
+        apply_group_plan(&root, &plan, &Config::default()).unwrap();
         let target = root.join(&plan.target_dir);
         let files_after = std::fs::read_dir(&target)
             .unwrap()
@@ -3491,7 +3511,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        apply_group_plan_to(&root, &dest, &plan, true).unwrap();
+        apply_group_plan_to(&root, &dest, &plan, &Config::default()).unwrap();
         assert!(
             dest.join("Artist/Singles/track.mp3").exists(),
             "file must land in the destination library"
@@ -3499,5 +3519,51 @@ mod tests {
         assert!(!root.join("Artist/Singles/track.mp3").exists());
         assert!(!root.join("inbox/track.mp3").exists(), "source gone");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn emptied_artist_folder_with_leftovers_is_wiped_after_the_move() {
+        // The "2 Chainz" case: the last album moves out, junk (cover.jpg)
+        // keeps the folder non-empty, and plain remove_dir never fires - the
+        // post-move chain must wipe the junk AND the emptied artist dir,
+        // while never touching the root or a sibling that still has audio.
+        let root =
+            std::env::temp_dir().join(format!("nd-organizer-chainwipe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Artist A/Album (2000)")).unwrap();
+        fs::write(root.join("Artist A/Album (2000)/01 - Song.flac"), b"x").unwrap();
+        fs::write(root.join("Artist A/cover.jpg"), b"j").unwrap();
+        fs::create_dir_all(root.join("Artist B")).unwrap();
+        fs::write(root.join("Artist B/keep.flac"), b"x").unwrap();
+        let tags = TrackTags {
+            album: "New Album".into(),
+            album_artist: "Other Artist".into(),
+            title: "Song".into(),
+            track: Some(1),
+            ..Default::default()
+        };
+        let files: Vec<(String, TrackTags)> =
+            vec![("Artist A/Album (2000)/01 - Song.flac".into(), tags)];
+        let plan = build_group_plan(
+            &root,
+            &Config::default(),
+            &files,
+            "Artist A/Album (2000)",
+            "",
+            None,
+            "",
+            None,
+        );
+        apply_group_plan(&root, &plan, &Config::default()).unwrap();
+        assert!(
+            !root.join("Artist A").exists(),
+            "emptied artist dir (junk included) must be wiped with the move"
+        );
+        assert!(root.exists(), "library root must never be wiped");
+        assert!(
+            root.join("Artist B/keep.flac").exists(),
+            "sibling with audio must survive"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
