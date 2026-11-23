@@ -13,6 +13,7 @@
 
 import base64
 import http.server
+import hashlib
 import io
 import json
 import logging
@@ -1034,6 +1035,15 @@ def kv_op(op, **kw):
                 out = json.load(r)
             if isinstance(out, dict) and "result" in out:
                 out = out["result"]  # sidecar wraps every response: {"result": ...}
+        except urllib.error.HTTPError as e:
+            # The sidecar puts the real error in the body ("mysql: ..."); the
+            # status line alone hid the actual failure for a whole cycle.
+            try:
+                detail = e.read().decode("utf-8", "replace")[:300]
+            except Exception:
+                detail = ""
+            log.info("kv %s unavailable: HTTP %s %s", op, e.code, detail)
+            out = None
         except Exception as e:
             log.info("kv %s unavailable: %s", op, e)
             out = None
@@ -1427,6 +1437,507 @@ def run_restore(path):
     log.info("restore %s -> %d config keys, %d kv rows (%ss)",
              path, len(backup_cfg), state["n"], info["seconds"])
     return info
+
+
+# ---------------------------------------------------------------- listen history sync
+#
+# The hub: pull every play the configured services know about (Last.fm,
+# Libre.fm, ListenBrainz) into the sidecar's listen_history table, refresh
+# per-service metrics snapshots, and mirror plays the push targets lack.
+# Runs in a dedicated daemon thread - full backfills paginate across cycles
+# (page cursors live in listen_source_state), never blocking the dashboard.
+
+HISTORY_SOURCES = ("lastfm", "librefm", "listenbrainz")
+HISTORY_METRICS_AGE = 86400     # refresh metrics at most once a day
+_HISTORY_PULL_BUDGET = 45       # seconds of pagination per source per cycle
+_HISTORY_PUSH_BATCH = 50        # plays per push request
+_HISTORY_PUSH_CYCLE_CAP = 500   # plays per target per cycle
+_as_sessions = {}               # provider -> scrobble session key (process-local)
+
+
+def history_settings():
+    cfg = plugin_config() or {}
+    enabled = cfg.get("historySyncEnabled") in (True, "true", "1", "on")
+
+    def _csv(key):
+        return [s.strip().lower() for s in str(cfg.get(key) or "").split(",") if s.strip()]
+
+    try:
+        minutes = max(15, int(cfg.get("historySyncMinutes") or 60))
+    except (TypeError, ValueError):
+        minutes = 60
+    return enabled, _csv("historySyncSources"), _csv("historySyncPush"), minutes
+
+
+def history_state_get(source):
+    r = kv_op("history_state_get", source=source)
+    return (r or {}).get("state") or {}
+
+
+def history_state_set(source, state):
+    kv_op("history_state_set", source=source, state=state)
+
+
+# ---- Audioscrobbler 2.0 (Last.fm and Libre.fm share every line of code) ----
+
+def _as_base(provider):
+    return "https://libre.fm" if provider == "librefm" else "https://ws.audioscrobbler.com"
+
+
+def as_api_sig(secret, params):
+    items = sorted((k, str(v)) for k, v in params.items() if k not in ("api_sig", "format"))
+    return hashlib.md5(("".join(k + v for k, v in items) + secret).encode("utf-8")).hexdigest()
+
+
+def _as_api_error(data):
+    """Audioscrobbler error payloads: {"error": <int>, "message": str} (Libre.fm
+    and Last.fm both use the int form; tolerate a nested dict too). Returns
+    (message, code) or None when data is not an error."""
+    if not isinstance(data, dict) or not data.get("error"):
+        return None
+    err = data["error"]
+    if isinstance(err, dict):
+        return err.get("message"), err.get("code")
+    return data.get("message"), err
+
+
+def _as_call(provider, method, params, sk=None, timeout=30):
+    cfg = plugin_config() or {}
+    api_key = str(cfg.get("lastfmApiKey") or "")
+    if sk is None:
+        q = {"method": method, "api_key": api_key, "format": "json"}
+        q.update({k: str(v) for k, v in params.items()})
+        url = _as_base(provider) + "/2.0/?" + urllib.parse.urlencode(q)
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            data = json.load(r)
+    else:
+        body = {"method": method, "api_key": api_key, "format": "json", "sk": sk}
+        body.update({k: str(v) for k, v in params.items()})
+        secret = str(cfg.get("lastfmApiSecret") or "")
+        body["api_sig"] = as_api_sig(secret, body)
+        req = urllib.request.Request(
+            _as_base(provider) + "/2.0/",
+            data=urllib.parse.urlencode(body).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.load(r)
+    if _as_api_error(data) is not None:
+        msg, code = _as_api_error(data)
+        raise RuntimeError("%s %s: %s (%s)" % (provider, method, msg, code))
+    return data
+
+
+def as_session(provider):
+    """auth.getMobileSession per provider. Libre.fm falls back to the last.fm
+    password when no dedicated one is set (same-account users)."""
+    if provider in _as_sessions:
+        return _as_sessions[provider]
+    cfg = plugin_config() or {}
+    user = str(cfg.get("librefmUser" if provider == "librefm" else "lastfmUser") or "") \
+        or str(cfg.get("lastfmUser") or "")
+    password = str(cfg.get("librefmPassword") or "") if provider == "librefm" else ""
+    if not password:
+        password = str(cfg.get("lastfmPassword") or "")
+    if not user or not password:
+        raise RuntimeError("%s session needs a username and password" % provider)
+    auth_token = hashlib.md5(
+        (user + hashlib.md5(password.encode("utf-8")).hexdigest()).encode("utf-8")
+    ).hexdigest()
+    data = _as_call(provider, "auth.getMobileSession",
+                    {"username": user, "authToken": auth_token})
+    sk = ((data.get("session") or {}).get("key")) or ""
+    if not sk:
+        raise RuntimeError("%s getMobileSession returned no key" % provider)
+    _as_sessions[provider] = sk
+    return sk
+
+
+def _as_recent_rows(data):
+    """getRecentTracks response -> history rows; now-playing rows (no date)
+    are skipped. Both Last.fm and Libre.fm return artist/album as
+    {"#text": ...} (extended mode adds `name` on some shapes - accept both)."""
+    rt = data.get("recenttracks") or {}
+    tracks = rt.get("track") or []
+    if isinstance(tracks, dict):
+        tracks = [tracks]
+    rows = []
+    for t in tracks:
+        if not isinstance(t, dict):
+            continue
+        date = t.get("date") or {}
+        uts = date.get("uts")
+        if not uts:
+            # Libre.fm-style date: {"#text": "11 Nov 2026 16:53 GMT"}
+            txt = date.get("#text")
+            if txt:
+                try:
+                    uts = str(int(time.mktime(time.strptime(str(txt), "%d %b %Y %H:%M %Z"))))
+                except Exception:
+                    uts = None
+        if not uts:
+            continue
+        artist = t.get("artist")
+        if isinstance(artist, dict):
+            artist_name = artist.get("name") or artist.get("#text") or ""
+            artist_mbid = artist.get("mbid") or None
+        else:
+            artist_name, artist_mbid = str(artist or ""), None
+        album = t.get("album")
+        if isinstance(album, dict):
+            album_name = album.get("name") or album.get("#text") or None
+            release_mbid = album.get("mbid") or None
+        else:
+            album_name, release_mbid = (str(album) if album else None), None
+        name = str(t.get("name") or "")
+        if not artist_name or not name:
+            continue
+        rows.append({
+            "listened_at": int(uts),
+            "artist": str(artist_name),
+            "track": name,
+            "album": str(album_name) if album_name else None,
+            "recording_mbid": t.get("mbid") or None,
+            "release_mbid": release_mbid,
+            "artist_mbid": artist_mbid,
+            "extra": None,
+        })
+    return rows
+
+
+def _lb_rows(listens):
+    rows = []
+    for ln in listens:
+        if not isinstance(ln, dict):
+            continue
+        ts = int(ln.get("listened_at") or 0)
+        meta = ln.get("track_metadata") or {}
+        artist = str(meta.get("artist_name") or "")
+        track = str(meta.get("track_name") or "")
+        if not ts or not artist or not track:
+            continue
+        info = meta.get("additional_info") or {}
+        extra = {k: v for k, v in info.items()
+                 if k not in ("recording_mbid", "release_mbid", "artist_mbid") and v is not None}
+        rows.append({
+            "listened_at": ts,
+            "artist": artist,
+            "track": track,
+            "album": str(meta.get("release_name") or "") or None,
+            "recording_mbid": info.get("recording_mbid") or None,
+            "release_mbid": info.get("release_mbid") or None,
+            "artist_mbid": info.get("artist_mbid") or None,
+            "extra": extra or None,
+        })
+    return rows
+
+
+def _history_note_state(state, rows):
+    if not rows:
+        return
+    ts = [r["listened_at"] for r in rows]
+    state["newest"] = max(int(state.get("newest") or 0), max(ts))
+    oldest = min(ts)
+    prev = int(state.get("oldest") or 0)
+    state["oldest"] = oldest if not prev else min(prev, oldest)
+
+
+def _history_pull_as(provider, cfg, state, budget_end):
+    user = str(cfg.get("librefmUser" if provider == "librefm" else "lastfmUser") or "") \
+        or str(cfg.get("lastfmUser") or "")
+    if not user:
+        state["last_error"] = "no username configured"
+        return state, 0
+    inserted = 0
+    while time.time() < budget_end:
+        page = int(state.get("page") or 1)
+        resp = _as_call(provider, "user.getRecentTracks",
+                        {"user": user, "limit": 200, "page": page, "extended": 1})
+        rows = _as_recent_rows(resp)
+        for r in rows:
+            r["source"] = provider
+        if rows:
+            r = kv_op("history_upsert", rows=rows)
+            inserted += int((r or {}).get("inserted") or 0)
+            _history_note_state(state, rows)
+        if state.get("backfill_done"):
+            break  # incremental cadence: newest page only, IGNORE dedupes
+        attr = (resp.get("recenttracks") or {}).get("@attr") or {}
+        try:
+            total_pages = int(attr.get("totalPages") or 0)
+        except (TypeError, ValueError):
+            total_pages = 0
+        if not rows or (total_pages and page >= total_pages):
+            if not state.get("first_pass_done"):
+                # One clean full sweep from page 1: earlier passes may have
+                # lost pages (interrupted budgets, failed upserts). IGNORE
+                # makes the re-sweep free of duplicates.
+                state["first_pass_done"] = True
+                state["page"] = 1
+                continue
+            state["backfill_done"] = True
+            state["page"] = 1
+            break
+        state["page"] = page + 1  # resume here next cycle if the budget hits
+    return state, inserted
+
+
+def _history_pull_lb(cfg, state, budget_end):
+    user = str(cfg.get("listenbrainzUser") or "") or str(cfg.get("lastfmUser") or "")
+    if not user:
+        state["last_error"] = "no username configured"
+        return state, 0
+    inserted = 0
+    base = "https://api.listenbrainz.org/1/user/%s/listens?count=1000" % urllib.parse.quote(user)
+    while time.time() < budget_end:
+        if state.get("backfill_done"):
+            url = base
+        elif state.get("max_ts"):
+            url = base + "&max_ts=%d" % int(state["max_ts"])
+        else:
+            url = base
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = json.load(r)
+        listens = (data.get("payload") or {}).get("listens") or []
+        rows = _lb_rows(listens)
+        for r in rows:
+            r["source"] = "listenbrainz"
+        if rows:
+            res = kv_op("history_upsert", rows=rows)
+            inserted += int((res or {}).get("inserted") or 0)
+            _history_note_state(state, rows)
+        if state.get("backfill_done"):
+            break
+        if not rows:
+            if not state.get("first_pass_done"):
+                state["first_pass_done"] = True
+                state.pop("max_ts", None)  # sweep again from the newest listen
+                continue
+            state["backfill_done"] = True
+            break
+        state["max_ts"] = min(r["listened_at"] for r in rows)
+        if len(listens) < 1000:
+            if not state.get("first_pass_done"):
+                state["first_pass_done"] = True
+                state.pop("max_ts", None)
+                continue
+            state["backfill_done"] = True
+            break
+    return state, inserted
+
+
+# ---- per-service metrics (every number the APIs expose, best-effort) ----
+
+def _history_metrics_as(provider, state):
+    cfg = plugin_config() or {}
+    user = str(cfg.get("librefmUser" if provider == "librefm" else "lastfmUser") or "") \
+        or str(cfg.get("lastfmUser") or "")
+    if not user:
+        return
+    m = {"refreshed_at": int(time.time())}
+    try:
+        m["profile"] = (_as_call(provider, "user.getInfo", {"user": user}).get("user") or {})
+    except Exception as e:
+        m["profile_error"] = str(e)[:200]
+    try:
+        loved = _as_call(provider, "user.getLovedTracks", {"user": user, "limit": 1})
+        m["loved_total"] = int(((loved.get("lovedtracks") or {}).get("@attr") or {}).get("total") or 0)
+    except Exception as e:
+        m["loved_error"] = str(e)[:200]
+    top = {}
+    for method in ("user.getTopTracks", "user.getTopArtists", "user.getTopAlbums"):
+        for period in ("overall", "12month", "6month", "3month", "1month"):
+            key = "%s.%s" % (method.replace("user.get", "").lower(), period)
+            try:
+                # Pace the burst: Libre.fm 429s and times out under rapid fire.
+                time.sleep(0.4)
+                resp = _as_call(provider, method,
+                                {"user": user, "period": period, "limit": 50}, timeout=15)
+                top[key] = resp
+            except Exception as e:
+                top[key] = {"error": str(e)[:200]}
+    m["top"] = top
+    state["metrics"] = m
+    state["metrics_at"] = int(time.time())
+
+
+def _history_metrics_lb(cfg, state):
+    user = str(cfg.get("listenbrainzUser") or "") or str(cfg.get("lastfmUser") or "")
+    if not user:
+        return
+    q = urllib.parse.quote(user)
+    m = {"refreshed_at": int(time.time())}
+
+    def get(path, timeout=30):
+        with urllib.request.urlopen("https://api.listenbrainz.org" + path, timeout=timeout) as r:
+            return json.load(r)
+
+    try:
+        m["listen_count"] = (get("/1/user/%s/listen-count" % q).get("payload") or {}).get("listens")
+    except Exception as e:
+        m["listen_count_error"] = str(e)[:200]
+    for score, key in ((1, "loved_total"), (-1, "hated_total")):
+        try:
+            fb = get("/1/feedback/user/%s/get-feedback?score=%d&count=1000" % (q, score))
+            m[key] = len(fb.get("feedback") or [])
+        except Exception as e:
+            m[key + "_error"] = str(e)[:200]
+    # Per-period listen counts. LB removed the user top-* stats API (410 Gone),
+    # so listening-activity is the richest metric they still expose.
+    try:
+        m["listening_activity"] = get("/1/stats/user/%s/listening-activity" % q)
+    except Exception as e:
+        m["listening_activity_error"] = str(e)[:200]
+    state["metrics"] = m
+    state["metrics_at"] = int(time.time())
+
+
+# ---- mirror pushes: plays our DB has that the target lacks ----
+
+def _as_scrobble_params(rows):
+    params = {}
+    for i, row in enumerate(rows):
+        params["artist[%d]" % i] = row["artist"]
+        params["track[%d]" % i] = row["track"]
+        params["timestamp[%d]" % i] = str(row["listened_at"])
+        if row.get("album"):
+            params["album[%d]" % i] = row["album"]
+        if row.get("recording_mbid"):
+            params["mbid[%d]" % i] = row["recording_mbid"]
+    return params
+
+
+def _history_mark_pushed(target, rows):
+    out = []
+    for row in rows:
+        extra = dict(row.get("extra") or {})
+        extra["pushed_from"] = row.get("source")
+        out.append({**row, "source": target, "extra": extra})
+    kv_op("history_upsert", rows=out)
+
+
+def _history_missing(target, limit):
+    r = kv_op("history_missing", target=target, limit=limit)
+    return (r or {}).get("rows") or []
+
+
+def _history_push_as(target, cfg):
+    sk = as_session(target)
+    pushed = 0
+    for _ in range(_HISTORY_PUSH_CYCLE_CAP // _HISTORY_PUSH_BATCH):
+        rows = _history_missing(target, _HISTORY_PUSH_BATCH)
+        if not rows:
+            break
+        _as_call(target, "track.scrobble", _as_scrobble_params(rows), sk=sk)
+        _history_mark_pushed(target, rows)
+        pushed += len(rows)
+        time.sleep(0.5)
+    return pushed
+
+
+def _history_push_lb(cfg):
+    token = str(cfg.get("musicbrainzToken") or "")
+    if not token:
+        return 0
+    pushed = 0
+    for _ in range(2):  # 2 x 500 per cycle
+        rows = _history_missing("listenbrainz", 500)
+        if not rows:
+            break
+        payload = []
+        for row in rows:
+            meta = {"artist_name": row["artist"], "track_name": row["track"]}
+            if row.get("album"):
+                meta["release_name"] = row["album"]
+            info = {}
+            for k in ("recording_mbid", "release_mbid", "artist_mbid"):
+                if row.get(k):
+                    info[k] = row[k]
+            if info:
+                meta["additional_info"] = info
+            payload.append({"listened_at": row["listened_at"], "track_metadata": meta})
+        body = json.dumps({"listen_type": "import", "payload": payload}).encode()
+        req = urllib.request.Request(
+            "https://api.listenbrainz.org/1/submit-listens", data=body,
+            headers={"Content-Type": "application/json", "Authorization": "Token " + token})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            resp = json.load(r)
+        if resp.get("status") not in (None, "ok"):
+            raise RuntimeError("listenbrainz submit: %s" % resp)
+        _history_mark_pushed("listenbrainz", rows)
+        pushed += len(rows)
+        time.sleep(1)
+    return pushed
+
+
+def _history_sync_cycle():
+    """One round: pull each source (time-boxed), refresh stale metrics, push
+    to each target. Returns (enabled, minutes, pending_backfill) - pending
+    tells the thread to come back soon and keep paginating instead of idling
+    for the full cadence."""
+    enabled, sources, pushes, minutes = history_settings()
+    if not enabled:
+        return False, minutes, False
+    if not _mysql_cfg(plugin_config() or {})[0]:
+        log.warning("history sync: persistenceBackend is not mysql - skipping")
+        return False, minutes, False
+    cfg = plugin_config() or {}
+    now = int(time.time())
+    pending = False
+    for src in sources:
+        if src not in HISTORY_SOURCES:
+            continue
+        state = history_state_get(src)
+        budget_end = time.time() + _HISTORY_PULL_BUDGET
+        pulled = 0
+        try:
+            if src in ("lastfm", "librefm"):
+                state, pulled = _history_pull_as(src, cfg, state, budget_end)
+            else:
+                state, pulled = _history_pull_lb(cfg, state, budget_end)
+            state["last_error"] = None
+        except Exception as e:
+            state["last_error"] = str(e)[:300]
+            log.warning("history pull %s failed: %s", src, e)
+        try:
+            if now - int(state.get("metrics_at") or 0) >= HISTORY_METRICS_AGE:
+                if src in ("lastfm", "librefm"):
+                    _history_metrics_as(src, state)
+                else:
+                    _history_metrics_lb(cfg, state)
+        except Exception as e:
+            log.warning("history metrics %s failed: %s", src, e)
+        state["last_pull"] = int(time.time())
+        state["total"] = int(state.get("total") or 0) + pulled
+        history_state_set(src, state)
+        if not state.get("backfill_done"):
+            pending = True
+        log.info("history pull %s: +%d plays (total %s, backfill=%s)",
+                 src, pulled, state.get("total"), bool(state.get("backfill_done")))
+    for tgt in pushes:
+        if tgt not in ("librefm", "listenbrainz"):
+            continue
+        try:
+            n = _history_push_as(tgt, cfg) if tgt == "librefm" else _history_push_lb(cfg)
+            if n:
+                log.info("history push %s: %d plays", tgt, n)
+        except Exception as e:
+            log.warning("history push %s failed: %s", tgt, e)
+    return True, minutes, pending
+
+
+def _history_sync_thread():
+    while True:
+        try:
+            enabled, minutes, pending = _history_sync_cycle()
+        except Exception as e:
+            log.error("history sync cycle failed: %s", e)
+            enabled, minutes, pending = True, 5, True
+        if not enabled:
+            time.sleep(60)  # re-check soon so enabling in the UI takes effect fast
+        elif pending:
+            time.sleep(300)  # backfill in flight: keep paginating every 5 min
+        else:
+            time.sleep(max(15, minutes) * 60)
 
 
 def _fmt_secs(s):
@@ -3151,6 +3662,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self._wfile_write(data)
             return
+        if self.path.startswith("/history"):
+            enabled, sources, pushes, minutes = history_settings()
+            counts = kv_op("history_counts") or {}
+            states = {}
+            for src in HISTORY_SOURCES:
+                st = history_state_get(src)
+                states[src] = {
+                    "enabled": src in sources,
+                    "backfill_done": st.get("backfill_done"),
+                    "total": st.get("total"),
+                    "newest": st.get("newest"),
+                    "oldest": st.get("oldest"),
+                    "last_pull": st.get("last_pull"),
+                    "last_error": st.get("last_error"),
+                    "metrics_at": st.get("metrics_at"),
+                    "metrics": st.get("metrics"),
+                }
+            data = json.dumps({
+                "ok": True,
+                "enabled": enabled,
+                "sources": sources,
+                "push": pushes,
+                "minutes": minutes,
+                "counts": counts.get("counts", counts),
+                "states": states,
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self._wfile_write(data)
+            return
         if self.path.startswith("/radio-list"):
             try:
                 stations = radio_list_stations()
@@ -3790,6 +4333,36 @@ if __name__ == "__main__":
         assert len(stmts3) == 3, len(stmts3)
         assert all(s.count("json(?)") <= 60 and s.endswith("WHERE id = 'nd-organizer'")
                    for s, _ in stmts3)
+        # history sync: audioscrobbler sig, row shaping, push params
+        sig = as_api_sig("secret", {"method": "x", "b": "2", "a": "1"})
+        assert sig == hashlib.md5(b"a1b2methodxsecret").hexdigest(), sig
+        hrows = _as_recent_rows({"recenttracks": {"track": [
+            {"name": "T", "artist": {"#text": "A", "mbid": "m1"},
+             "album": {"#text": "Al", "mbid": "m2"}, "mbid": "m3",
+             "date": {"uts": "1700000000"}},
+            {"name": "T2", "artist": {"name": "A2"},
+             "album": {"#text": "Al2"}, "mbid": "",
+             "date": {"#text": "11 Nov 2026 16:53 GMT"}},
+            {"name": "Now Playing", "artist": {"#text": "A"}},
+        ]}})
+        assert len(hrows) == 2, hrows
+        assert hrows[0]["listened_at"] == 1700000000
+        assert hrows[0]["recording_mbid"] == "m3" and hrows[0]["album"] == "Al"
+        assert hrows[1]["artist"] == "A2" and hrows[1]["listened_at"] > 1700000000
+        assert hrows[1]["recording_mbid"] is None
+        lbrows = _lb_rows([{"listened_at": 1700000001, "track_metadata": {
+            "artist_name": "A", "track_name": "T", "release_name": "R",
+            "additional_info": {"recording_mbid": "x", "spotify_id": "s"}}}])
+        assert lbrows[0]["album"] == "R" and lbrows[0]["recording_mbid"] == "x"
+        assert lbrows[0]["extra"] == {"spotify_id": "s"}
+        sp = _as_scrobble_params([{"artist": "A", "track": "T", "listened_at": 5,
+                                   "album": "Al", "recording_mbid": None}])
+        assert sp["artist[0]"] == "A" and sp["timestamp[0]"] == "5"
+        assert sp["album[0]"] == "Al" and "mbid[0]" not in sp
+        assert _as_api_error({"error": 4, "message": "Invalid authentication token supplied"}) == \
+            ("Invalid authentication token supplied", 4)
+        assert _as_api_error({"recenttracks": {}}) is None
+        assert _as_api_error({"error": {"code": 9, "message": "x"}}) == ("x", 9)
         print("ok")
         sys.exit(0)
     load_log()
@@ -3803,4 +4376,6 @@ if __name__ == "__main__":
     log.info("=" * 60)
     # Start background starred pull thread
     threading.Thread(target=_starred_pull_thread, daemon=True).start()
+    # Listen-history hub: pull Last.fm/Libre.fm/ListenBrainz + mirror pushes
+    threading.Thread(target=_history_sync_thread, daemon=True).start()
     Server(("0.0.0.0", PORT), Handler).serve_forever()

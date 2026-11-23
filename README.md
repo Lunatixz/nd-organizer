@@ -307,6 +307,34 @@ your MusicBrainz profile. ListenBrainz feedback is also pulled back in
 (gated by `listenbrainzScrobble`): loved tracks seed a first-sight rating
 and sync as Navidrome stars.
 
+## Listen-history hub (Last.fm / Libre.fm / ListenBrainz)
+
+A central, source-tagged record of everything you have listened to, kept by the
+webhook sidecar in the same MySQL database as the KV store (`listen_history`
+table). It is the sync point for every scrobble client:
+
+- **Pull** (`historySyncSources`, default `lastfm,librefm,listenbrainz`): each
+  source's *full* history is backfilled once (paged across cycles, resumable
+  cursors), then kept current every `historySyncMinutes`. Rows are idempotent
+  (source + time + track), so re-pulls are free.
+- **Metrics**: per-service snapshots - profile playcounts, loved totals, top
+  tracks/artists/albums for all periods, ListenBrainz listen-count, feedback
+  totals and top lists - refresh at most once a day into the same state record.
+- **Mirror** (`historySyncPush`, e.g. `librefm,listenbrainz`): finds the plays a
+  target lacks (SQL anti-join against the target's rows), submits them
+  (`track.scrobble` batches / `submit-listens`) and records them as target rows
+  so nothing is ever sent twice.
+
+Libre.fm reuses the Last.fm client - same Audioscrobbler 2.0 protocol on its own
+base URL: `librefmUser`/`librefmPassword` fall back to the Last.fm credentials
+when empty (set the password only if your Libre.fm password differs).
+ListenBrainz uses `musicbrainzToken`.
+
+Status: `GET http://<host>:8099/history` returns per-source counts, watermarks,
+last errors and the metrics snapshots. Requires `persistenceBackend = mysql`;
+the sync runs in a background thread of the webhook sidecar, so multi-year
+backfills never block the dashboard or the plugin.
+
 ## Metadata sources
 
 The plugin pulls metadata from multiple sources to enrich your library:

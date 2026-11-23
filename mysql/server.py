@@ -28,6 +28,7 @@
 # Env vars: none required (port defaults to 8098).
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -86,6 +87,28 @@ CREATE TABLE IF NOT EXISTS kvstore (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME DEFAULT NULL
+);
+CREATE TABLE IF NOT EXISTS listen_history (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    play_key CHAR(40) NOT NULL,
+    source VARCHAR(16) NOT NULL,
+    listened_at INT UNSIGNED NOT NULL,
+    artist VARCHAR(512) NOT NULL,
+    track VARCHAR(512) NOT NULL,
+    album VARCHAR(512) DEFAULT NULL,
+    recording_mbid VARCHAR(36) DEFAULT NULL,
+    release_mbid VARCHAR(36) DEFAULT NULL,
+    artist_mbid VARCHAR(36) DEFAULT NULL,
+    extra TEXT DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_play (play_key),
+    KEY idx_source_at (source, listened_at),
+    KEY idx_listened (listened_at)
+);
+CREATE TABLE IF NOT EXISTS listen_source_state (
+    source VARCHAR(32) PRIMARY KEY NOT NULL,
+    state MEDIUMTEXT NOT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 )
 """
 
@@ -119,8 +142,12 @@ def connect(db):
 
 
 def ensure_schema(conn):
+    # SCHEMA holds several CREATE TABLE statements; pymysql's default client
+    # flags reject multi-statement execute(), so run them one by one.
     with conn.cursor() as cur:
-        cur.execute(SCHEMA)
+        for stmt in SCHEMA.split(";"):
+            if stmt.strip():
+                cur.execute(stmt)
 
 
 def handle(db, op, body):
@@ -231,6 +258,94 @@ def handle(db, op, body):
                     for r in cur.fetchall():
                         values[r[0]] = base64.b64encode(r[1]).decode()
                 return {"values": values}
+            if op == "history_upsert":
+                # Idempotent bulk insert into the union listen history; play_key
+                # (sha1 of source|ts|artist|track) makes replays no-ops and lets
+                # us count real inserts (INSERT IGNORE -> rowcount).
+                rows = body.get("rows") or []
+                data = []
+                for r in rows:
+                    src = str(r.get("source") or "")[:16]
+                    ts = int(r.get("listened_at") or 0)
+                    artist = str(r.get("artist") or "")
+                    track = str(r.get("track") or "")
+                    if not src or not ts or not artist or not track:
+                        continue
+                    play_key = hashlib.sha1(
+                        ("%s|%d|%s|%s" % (src, ts, artist, track)).encode("utf-8", "replace")
+                    ).hexdigest()
+                    album = r.get("album")
+                    extra = r.get("extra")
+                    data.append((
+                        play_key, src, ts,
+                        artist[:512], track[:512],
+                        str(album)[:512] if album else None,
+                        (r.get("recording_mbid") or None),
+                        (r.get("release_mbid") or None),
+                        (r.get("artist_mbid") or None),
+                        json.dumps(extra, ensure_ascii=False) if extra is not None else None,
+                    ))
+                if not data:
+                    return {"ok": True, "inserted": 0}
+                cur.executemany(
+                    "INSERT IGNORE INTO listen_history "
+                    "(play_key, source, listened_at, artist, track, album, "
+                    "recording_mbid, release_mbid, artist_mbid, extra) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    data,
+                )
+                return {"ok": True, "inserted": int(cur.rowcount or 0)}
+            if op == "history_state_get":
+                src = body.get("source")
+                cur.execute("SELECT state FROM listen_source_state WHERE source=%s", (src,))
+                row = cur.fetchone()
+                if not row:
+                    return {"state": None}
+                try:
+                    return {"state": json.loads(row[0])}
+                except Exception:
+                    return {"state": None}
+            if op == "history_state_set":
+                src = body.get("source")
+                state = body.get("state")
+                if not src:
+                    return {"error": "source required"}
+                blob = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+                cur.execute(
+                    "INSERT INTO listen_source_state (source, state) VALUES (%s, %s) "
+                    "ON DUPLICATE KEY UPDATE state=VALUES(state)",
+                    (src, blob),
+                )
+                return {"ok": True}
+            if op == "history_counts":
+                cur.execute(
+                    "SELECT source, COUNT(*), COALESCE(MIN(listened_at),0), "
+                    "COALESCE(MAX(listened_at),0) FROM listen_history GROUP BY source"
+                )
+                return {"counts": {r[0]: {"count": int(r[1]), "oldest": int(r[2]),
+                                          "newest": int(r[3])} for r in cur.fetchall()}}
+            if op == "history_missing":
+                # Plays every source has EXCEPT the push target - identified by
+                # the target row whose play_key would equal sha1(target|ts|a|t).
+                target = body.get("target")
+                limit = int(body.get("limit") or 50)
+                cur.execute(
+                    "SELECT h.source, h.listened_at, h.artist, h.track, h.album, "
+                    "h.recording_mbid, h.release_mbid, h.artist_mbid, h.extra "
+                    "FROM listen_history h "
+                    "WHERE h.source <> %s AND NOT EXISTS ("
+                    "  SELECT 1 FROM listen_history t WHERE t.source = %s "
+                    "  AND t.play_key = SHA1(CONCAT(%s, '|', h.listened_at, '|', h.artist, '|', h.track))) "
+                    "ORDER BY h.listened_at LIMIT %s",
+                    (target, target, target, limit),
+                )
+                return {"rows": [
+                    {"source": r[0], "listened_at": int(r[1]), "artist": r[2], "track": r[3],
+                     "album": r[4], "recording_mbid": r[5], "release_mbid": r[6],
+                     "artist_mbid": r[7],
+                     "extra": json.loads(r[8]) if r[8] else None}
+                    for r in cur.fetchall()
+                ]}
             return {"error": "unknown op: %s" % op}
     finally:
         conn.close()
@@ -387,7 +502,7 @@ class Handler(BaseHTTPRequestHandler):
         if op == "export":
             self._stream_export(db)
             return
-        mutating = op in ("set", "delete", "import")
+        mutating = op in ("set", "delete", "import", "history_upsert", "history_state_set")
         detail = body.get("key") or body.get("prefix") or ""
         if op == "get_many":
             detail = "%d keys" % len(body.get("keys") or [])

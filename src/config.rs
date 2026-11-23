@@ -338,6 +338,18 @@ pub struct Config {
     pub lastfm_api_secret: String,
     /// Last.fm account password (used once to obtain a session key).
     pub lastfm_password: String,
+    /// Libre.fm account (falls back to the last.fm user/password when empty).
+    /// Libre.fm speaks the same Audioscrobbler API on its own base URL.
+    pub librefm_user: String,
+    pub librefm_password: String,
+    /// Listen-history hub (webhook sidecar thread): pull every play from these
+    /// sources into the sidecar's listen_history table and mirror plays the
+    /// push targets lack. Consumed by the webhook, loaded here so the manifest
+    /// toggles are real config keys.
+    pub history_sync_enabled: bool,
+    pub history_sync_sources: String,
+    pub history_sync_push: String,
+    pub history_sync_minutes: i32,
     pub genre_source: String,
     pub overwrite_existing_tags: bool,
     pub write_playcount: bool,
@@ -535,6 +547,12 @@ impl Default for Config {
             lastfm_user: String::new(),
             lastfm_api_secret: String::new(),
             lastfm_password: String::new(),
+            librefm_user: String::new(),
+            librefm_password: String::new(),
+            history_sync_enabled: false,
+            history_sync_sources: "lastfm,librefm,listenbrainz".into(),
+            history_sync_push: String::new(),
+            history_sync_minutes: 60,
             genre_source: "musicbrainz".into(),
             overwrite_existing_tags: false,
             write_playcount: false,
@@ -637,6 +655,8 @@ const CONFIG_KEYS: &[&str] = &[
      "appleMusicAlbumInfo",
      "metaRefreshEnabled", "metaRefreshCron", "metaRefreshCooldownDays",
      "favoritesSyncBidirectional", "favoritesSyncMinutes",
+    "librefmUser", "librefmPassword",
+    "historySyncEnabled", "historySyncSources", "historySyncPush", "historySyncMinutes",
      "ratingSyncWriteToLidarr", "ratingSyncPullFromNavidrome",
      "useCommunityRatings", "listenbrainzUser",
 ];
@@ -762,6 +782,23 @@ impl Config {
             c.favorites_sync_minutes = v.trim().parse().unwrap_or(c.favorites_sync_minutes);
         }
         c.favorites_sync_bidirectional = bool(map, "favoritesSyncBidirectional", c.favorites_sync_bidirectional);
+        if let Some(v) = map.get("librefmUser") {
+            c.librefm_user = v.trim().to_string();
+        }
+        if let Some(v) = map.get("librefmPassword") {
+            c.librefm_password = v.to_string();
+        }
+        c.history_sync_enabled = bool(map, "historySyncEnabled", c.history_sync_enabled);
+        if let Some(v) = map.get("historySyncSources") {
+            c.history_sync_sources = v.trim().to_string();
+        }
+        if let Some(v) = map.get("historySyncPush") {
+            c.history_sync_push = v.trim().to_string();
+        }
+        c.history_sync_minutes = map
+            .get("historySyncMinutes")
+            .map(|v| v.trim().parse().unwrap_or(c.history_sync_minutes))
+            .unwrap_or(c.history_sync_minutes);
         c.playback_stats_enabled = bool(map, "playbackStatsEnabled", c.playback_stats_enabled);
         if let Some(v) = map.get("statsPollMinutes") {
             c.stats_poll_minutes = v.trim().parse().unwrap_or(c.stats_poll_minutes);
@@ -1188,6 +1225,27 @@ mod tests {
         assert_eq!(c.backup_path, "");
         assert_eq!(c.backup_every_days, 7, "absent key uses the default");
         assert_eq!(c.restore_from_zip, "", "absent key means no restore");
+    }
+
+    #[test]
+    fn history_sync_settings_parse() {
+        let c = Config::from_map(&map(&[
+            ("historySyncEnabled", "true"),
+            ("historySyncSources", "lastfm, librefm"),
+            ("historySyncPush", "librefm"),
+            ("historySyncMinutes", "30"),
+            ("librefmUser", "me"),
+        ]));
+        assert!(c.history_sync_enabled);
+        assert_eq!(c.history_sync_sources, "lastfm, librefm");
+        assert_eq!(c.history_sync_push, "librefm");
+        assert_eq!(c.history_sync_minutes, 30);
+        assert_eq!(c.librefm_user, "me");
+        let d = Config::from_map(&HashMap::new());
+        assert!(!d.history_sync_enabled, "opt-in");
+        assert_eq!(d.history_sync_sources, "lastfm,librefm,listenbrainz");
+        assert_eq!(d.history_sync_minutes, 60);
+        assert_eq!(d.librefm_password, "");
     }
 
     #[test]

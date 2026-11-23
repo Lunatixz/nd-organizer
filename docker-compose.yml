@@ -272,6 +272,11 @@ services:
     image: docker.io/library/mariadb:11.8
     container_name: nd-organizer-mariadb
     restart: unless-stopped
+    # Crash-loop guard: an unclean shutdown can leave tc.log with a torn write,
+    # and "Bad magic header in tc log" then aborts EVERY boot (happened twice).
+    # The file only carries XA/commit state this stack never uses - wipe it
+    # before each start, then hand over to the normal entrypoint.
+    entrypoint: ["sh", "-c", "rm -f /var/lib/mysql/tc.log; exec docker-entrypoint.sh mariadbd"]
     ports:
       - "3306:3306"
     environment:

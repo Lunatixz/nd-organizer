@@ -646,6 +646,46 @@
           "default": false,
           "description": "When on, unstar in Navidrome propagates to unlove on Last.fm and vice versa. When off, sync is additive-only (never removes). Enable if you want both sources to stay perfectly in sync."
         },
+        "librefmUser": {
+          "type": "string",
+          "title": "Libre.fm username",
+          "default": "",
+          "description": "Libre.fm account used for history pulls and mirror pushes. Falls back to the Last.fm username when empty (same account name on both)."
+        },
+        "librefmPassword": {
+          "type": "string",
+          "title": "Libre.fm password",
+          "default": "",
+          "options": {
+            "format": "password"
+          },
+          "description": "Only needed when mirroring plays TO Libre.fm (session auth). Falls back to the Last.fm password when empty - set it if your Libre.fm password differs."
+        },
+        "historySyncEnabled": {
+          "type": "boolean",
+          "title": "Listen-history sync (hub)",
+          "default": false,
+          "description": "Pull the user's full listening history and metrics from the selected sources into the sidecar's listen_history table, and mirror plays the push targets are missing. Runs in the webhook sidecar's background thread; full backfills continue across cycles."
+        },
+        "historySyncSources": {
+          "type": "string",
+          "title": "History sources (pull)",
+          "default": "lastfm,librefm,listenbrainz",
+          "description": "Comma-separated sources to pull from: lastfm, librefm, listenbrainz. Each source backfills its full history once, then stays current every sync cycle."
+        },
+        "historySyncPush": {
+          "type": "string",
+          "title": "History mirror targets (push)",
+          "default": "",
+          "description": "Comma-separated targets to mirror the union of plays TO: librefm, listenbrainz. Only plays the target lacks are submitted, and a pushed row is recorded so nothing is sent twice. Needs the Libre.fm password and/or musicbrainzToken."
+        },
+        "historySyncMinutes": {
+          "type": "integer",
+          "title": "History sync every (minutes)",
+          "minimum": 15,
+          "default": 60,
+          "description": "How often the background sync cycles through sources and push targets. Each source gets a time-boxed pagination budget per cycle; metrics snapshots refresh at most once a day."
+        },
         "genreSource": {
           "type": "string",
           "title": "Genre source",
@@ -1637,7 +1677,34 @@
           "elements": [
             {
               "type": "Label",
-              "text": "Scrobble, playcounts, star-ratings and favorites sync. Choose your scrobble provider below — the username/password/secret fields apply to whichever provider is selected (Last.fm or Libre.fm). TIP: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage. For dedup across multiple sources, use multi-scrobbler (github.com/foxxmd/multi-scrobbler)."
+              "text": "Scrobble, playcounts, star-ratings and favorites sync. Choose your scrobble provider below - the username/password/secret fields apply to whichever provider is selected (Last.fm or Libre.fm). TIP: enable BOTH lastfmScrobble AND listenbrainzScrobble for full coverage. For dedup across multiple sources, use multi-scrobbler (github.com/foxxmd/multi-scrobbler)."
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/historySyncEnabled"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/historySyncSources"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/historySyncPush"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/historySyncMinutes"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmUser"
+            },
+            {
+              "type": "Control",
+              "scope": "#/properties/librefmPassword",
+              "options": {
+                "format": "password"
+              }
             },
             {
               "type": "Control",
