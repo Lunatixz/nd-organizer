@@ -1652,6 +1652,9 @@ def _history_pull_as(provider, cfg, state, budget_end):
         page = int(state.get("page") or 1)
         resp = _as_call(provider, "user.getRecentTracks",
                         {"user": user, "limit": 200, "page": page, "extended": 1})
+        if provider == "librefm":
+            # Libre.fm rate-limits reads hard; page gently or every cycle 429s.
+            time.sleep(0.5)
         rows = _as_recent_rows(resp)
         for r in rows:
             r["source"] = provider
@@ -1772,7 +1775,7 @@ def _history_metrics_lb(cfg, state):
             return json.load(r)
 
     try:
-        m["listen_count"] = (get("/1/user/%s/listen-count" % q).get("payload") or {}).get("listens")
+        m["listen_count"] = (get("/1/user/%s/listen-count" % q).get("payload") or {}).get("count")
     except Exception as e:
         m["listen_count_error"] = str(e)[:200]
     for score, key in ((1, "loved_total"), (-1, "hated_total")):
