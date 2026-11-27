@@ -1325,6 +1325,7 @@ pub mod host_stats {
     /// Returns the count of files whose tags were actually modified.
     pub fn write_essentia_genres(
         cfg: &crate::config::Config,
+        library_id: i32,
         files: &[(String, crate::tags::TrackTags)],
         fin: &std::collections::HashMap<String, std::path::PathBuf>,
         timeout_ms: i32,
@@ -1343,7 +1344,7 @@ pub mod host_stats {
             if crate::tags::is_checked(abs, crate::tags::FLAG_ESSENTIA) {
                 continue;
             }
-            let path_str = abs.to_string_lossy().to_string();
+            let path_str = crate::scan::sidecar_path(library_id, abs);
             let cache_key = format!("essentia:{}", path_str);
             // Check cache first (7-day TTL).
             if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {

@@ -38,7 +38,7 @@ fn library_real_path(library_id: i32) -> Result<String, String> {
 /// Sidecar-visible absolute path: Navidrome's mount_point (/libraries/N) is NOT
 /// what the sidecar mounts — it mounts lib.path (/music, /unsorted). Rewrite the
 /// prefix so os.path.exists() inside the sidecar container finds the file.
-fn sidecar_path(library_id: i32, abs: &std::path::Path) -> String {
+pub(crate) fn sidecar_path(library_id: i32, abs: &std::path::Path) -> String {
     let mp = lib_root(library_id)
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
@@ -1720,7 +1720,7 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
     // HTTP compares need the bigger window, cross-dup below is cheap local
     // stats per file.
     if cfg.essentia_fingerprint && !cfg.essentia_url.trim().is_empty() {
-        report_essentia_duplicates(cfg, &real_root, &verified, task_start, task_budget);
+        report_essentia_duplicates(cfg, library_id, &real_root, &verified, task_start, task_budget);
         crate::wasm::log_info("group_step: essentia-dup report done");
     }
     if cfg.detect_duplicates {
@@ -1869,13 +1869,20 @@ pub fn group_step(cfg: &Config, library_id: i32) -> Result<(usize, usize), Strin
             groups.len()
         ));
         0
-    } else {
-        let n = crate::wasm::enqueue_plan_tasks(cfg, library_id, groups)?;
+    } else if !groups.is_empty() {
+        // Stash plan groups until cleanup finishes so cleanup's 15s-budgeted
+        // continuation never starves behind a per-album plan/enrich burst.
+        let n_groups = groups.len();
+        let _ = crate::store::kv().set(
+            &format!("plan.stash.{library_id}"),
+            serde_json::to_vec(&groups).unwrap_or_default(),
+        );
         crate::wasm::log_info(&format!(
-            "group_step: grouped {} files into {} plan tasks (enqueued)",
-            total_files, n
+            "group_step: grouped {total_files} files into {n_groups} group(s) (stashed for planning after cleanup)"
         ));
-        n
+        0
+    } else {
+        0
     };
     // Safe to delete indexed_key now — plan/enrich tasks are enqueued and group won't need it again.
     let _ = crate::store::kv().delete(&indexed_key);
@@ -2068,6 +2075,7 @@ fn report_cross_duplicates(
 /// Reports covers (50-95% similarity) and duplicates (>95% similarity).
 fn report_essentia_duplicates(
     cfg: &Config,
+    library_id: i32,
     root: &str,
     verified: &[(String, crate::tags::TrackTags)],
     start: std::time::SystemTime,
@@ -2095,8 +2103,8 @@ fn report_essentia_duplicates(
                 let abs_a = std::path::Path::new(root).join(&group[i]);
                 let abs_b = std::path::Path::new(root).join(&group[j]);
                 let body = serde_json::json!({
-                    "path_a": abs_a.to_string_lossy(),
-                    "path_b": abs_b.to_string_lossy(),
+                    "path_a": sidecar_path(library_id, &abs_a),
+                    "path_b": sidecar_path(library_id, &abs_b),
                 });
                 let mut headers = std::collections::HashMap::new();
                 headers.insert("Content-Type".into(), "application/json".into());
@@ -2242,6 +2250,16 @@ pub fn cleanup_step(cfg: &Config, library_id: i32) -> Result<usize, String> {
         // release as plan tasks in BOTH modes — dry produces the would-move
         // report, apply moves then enriches. Otherwise the old enrich-only
         // release (apply mode only; the stash survives a dry pass for later).
+        let plan_stash_key = format!("plan.stash.{library_id}");
+        if let Ok(Some(raw)) = crate::store::kv().get(&plan_stash_key) {
+            if let Ok(groups) = serde_json::from_slice::<Vec<Vec<String>>>(&raw) {
+                let n = crate::wasm::enqueue_plan_tasks(cfg, library_id, groups)?;
+                crate::wasm::log_info(&format!(
+                    "cleanup: released {n} stashed plan task(s)"
+                ));
+                let _ = crate::store::kv().delete(&plan_stash_key);
+            }
+        }
         let stash_key = format!("enrich.stash.{library_id}");
         if let Ok(Some(raw)) = crate::store::kv().get(&stash_key) {
             if let Ok(groups) = serde_json::from_slice::<Vec<Vec<String>>>(&raw) {
@@ -3257,7 +3275,7 @@ pub fn plan_enrich_step(
                 }
             }
             if cfg.genre_source == "essentia" && !cfg.essentia_url.trim().is_empty() {
-                let n = crate::stats::host_stats::write_essentia_genres(cfg, &files, &fin, 20_000);
+                let n = crate::stats::host_stats::write_essentia_genres(cfg, library_id, &files, &fin, 20_000);
                 if n > 0 {
                     actions.push(serde_json::json!({
                         "ts": crate::state::now_ts(),
@@ -3284,37 +3302,14 @@ pub fn plan_enrich_step(
                     if !crate::wasm::should_write_tags(cfg, tags.album_artist.as_str()) {
                         continue;
                     }
-                    let path_str = abs.to_string_lossy().to_string();
-                    let cache_key = format!("instrumental:{}", path_str);
-
-                    // Check cache first. A failed or timed-out call is
-                    // "unknown" (None) — skip the label check rather than
-                    // strip a correct "(Instrumental)" on a network error.
-                    let is_instrumental: Option<bool> = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
-                        serde_json::from_slice::<serde_json::Value>(&v)
-                            .ok()
-                            .and_then(|v| v.get("isInstrumental").and_then(|v| v.as_bool()))
-                    } else {
-                        // Call Essentia /instrumental-check.
-                        let base = cfg.essentia_url.trim().trim_end_matches('/');
-                        let body = serde_json::json!({"path": path_str});
-                        let req = nd_pdk::host::http::HTTPRequest {
-                            method: "POST".into(),
-                            url: format!("{}/instrumental-check", base),
-                            headers: std::collections::HashMap::new(),
-                            no_follow_redirects: false,
-                            body: body.to_string().into_bytes(),
-                            timeout_ms: cap_ms(enrich_start, task_budget, 25_000),
-                        };
-                        match nd_pdk::host::http::send(req) {
-                            Ok(Some(resp)) if resp.status_code == 200 => {
-                                let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
-                                let _ = crate::store::kv().set(&cache_key, resp.body);
-                                val.get("isInstrumental").and_then(|v| v.as_bool())
-                            }
-                            _ => None,
-                        }
-                    };
+                    let is_instrumental = essentia_check_instrumental(
+                        cfg,
+                        library_id,
+                        &abs,
+                        "instrumental",
+                        cap_ms(enrich_start, task_budget, 25_000),
+                    )
+                    .and_then(|v| v.get("isInstrumental").and_then(|b| b.as_bool()));
 
                     // Re-read title from file tag to avoid stale KV cache
                     // causing double-suffix on subsequent runs.
@@ -3384,45 +3379,14 @@ pub fn plan_enrich_step(
                     if !crate::wasm::should_write_tags(cfg, tags.album_artist.as_str()) {
                         continue;
                     }
-                    let path_str = abs.to_string_lossy().to_string();
-                    let cache_key = format!("acoustic:{}", path_str);
-
-                    // Check cache first. Failed/timeout call = unknown (None):
-                    // skip the label check instead of stripping on network error.
-                    let is_acoustic: Option<bool> = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
-                        serde_json::from_slice::<serde_json::Value>(&v)
-                            .ok()
-                            .and_then(|v| v.get("isAcoustic").and_then(|v| v.as_bool()))
-                    } else {
-                        // Use librosa HPSS to detect acoustic character:
-                        // High harmonic ratio relative to percussive = acoustic.
-                        let base = cfg.essentia_url.trim().trim_end_matches('/');
-                        let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false, "vocalRatio": true});
-                        let req = nd_pdk::host::http::HTTPRequest {
-                            method: "POST".into(),
-                            url: format!("{}/instrumental-check", base),
-                            headers: std::collections::HashMap::new(),
-                            no_follow_redirects: false,
-                            body: body.to_string().into_bytes(),
-                            timeout_ms: cap_ms(enrich_start, task_budget, 25_000),
-                        };
-                        match nd_pdk::host::http::send(req) {
-                            Ok(Some(resp)) if resp.status_code == 200 => {
-                                let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
-                                let _ = crate::store::kv().set(&cache_key, resp.body);
-                                // Acoustic = NOT instrumental AND has vocal content.
-                                // Acoustic: has vocals but low vocal energy (0.05-0.3 range).
-                                // Pure instrumental = not acoustic. High vocal energy = not acoustic.
-                                val.get("isInstrumental").and_then(|v| v.as_bool()).map(|is_instr| {
-                                    let vocal_ratio = val.get("vocalRatio")
-                                        .and_then(|v| v.as_f64())
-                                        .unwrap_or(0.0);
-                                    !is_instr && vocal_ratio > 0.05 && vocal_ratio < 0.3
-                                })
-                            }
-                            _ => None,
-                        }
-                    };
+                    let is_acoustic = essentia_check_instrumental(
+                        cfg,
+                        library_id,
+                        &abs,
+                        "acoustic",
+                        cap_ms(enrich_start, task_budget, 25_000),
+                    )
+                    .and_then(|v| is_acoustic_from_val(&v));
 
                     // Re-read title from file tag to avoid stale KV cache
                     // causing double-suffix on subsequent runs.
@@ -3556,7 +3520,7 @@ pub fn plan_enrich_step(
         // Write NFO at the end — after ALL metadata sources have been queried.
         // This ensures the NFO contains the most complete metadata possible.
         if cfg.write_nfo {
-            write_group_nfo(cfg, &plan, &files, &fin, &sidecar_abs);
+            write_group_nfo(cfg, library_id, &plan, &files, &fin, &sidecar_abs);
             actions.push(serde_json::json!({
                 "ts": crate::state::now_ts(),
                 "text": "wrote album.nfo (unified metadata)".to_string(),
@@ -3934,7 +3898,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                         for (r, _) in dir_files.iter() {
                             fin.insert(r.clone(), root.join(r));
                         }
-                        write_group_nfo(cfg, &plan, dir_files, &fin, &dir_abs);
+                        write_group_nfo(cfg, library_id, &plan, dir_files, &fin, &dir_abs);
                         crate::wasm::log_info(&format!(
                             "meta_refresh: wrote album.nfo — {dir_rel}"
                         ));
@@ -4048,6 +4012,7 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 fin1.insert(rel.clone(), abs.clone());
                 if crate::stats::host_stats::write_essentia_genres(
                     cfg,
+                    library_id,
                     &files1,
                     &fin1,
                     cap_ms(start, budget, 8_000),
@@ -4090,34 +4055,14 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 && !crate::tags::is_checked(&abs, crate::tags::FLAG_INSTRUMENTAL)
                 && crate::wasm::should_write_tags(cfg, &cur.album_artist)
             {
-                let path_str = abs.to_string_lossy().to_string();
-                let cache_key = format!("instrumental:{}", path_str);
-                // Failed/timeout call = unknown (None): skip the label check
-                // instead of stripping a correct "(Instrumental)" label.
-                let is_instrumental: Option<bool> = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
-                    serde_json::from_slice::<serde_json::Value>(&v)
-                        .ok()
-                        .and_then(|v| v.get("isInstrumental").and_then(|v| v.as_bool()))
-                } else {
-                    let base = cfg.essentia_url.trim().trim_end_matches('/');
-                    let body = serde_json::json!({"path": path_str});
-                    let req = nd_pdk::host::http::HTTPRequest {
-                        method: "POST".into(),
-                        url: format!("{}/instrumental-check", base),
-                        headers: std::collections::HashMap::new(),
-                        no_follow_redirects: false,
-                        body: body.to_string().into_bytes(),
-                        timeout_ms: cap_ms(start, budget, 25_000),
-                    };
-                    match nd_pdk::host::http::send(req) {
-                        Ok(Some(resp)) if resp.status_code == 200 => {
-                            let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
-                            let _ = crate::store::kv().set(&cache_key, resp.body);
-                            val.get("isInstrumental").and_then(|v| v.as_bool())
-                        }
-                        _ => None,
-                    }
-                };
+                let is_instrumental = essentia_check_instrumental(
+                    cfg,
+                    library_id,
+                    &abs,
+                    "instrumental",
+                    cap_ms(start, budget, 25_000),
+                )
+                .and_then(|v| v.get("isInstrumental").and_then(|b| b.as_bool()));
                 let has_instrumental_label = cur_title.to_lowercase().contains("instrumental");
                 if let Some(is_instrumental) = is_instrumental {
                 if has_instrumental_label && !is_instrumental {
@@ -4154,39 +4099,14 @@ pub fn meta_refresh_step(cfg: &Config, library_id: i32) -> Result<String, String
                 && !crate::tags::is_checked(&abs, crate::tags::FLAG_ACOUSTIC)
                 && crate::wasm::should_write_tags(cfg, &cur.album_artist)
             {
-                let path_str = abs.to_string_lossy().to_string();
-                let cache_key = format!("acoustic:{}", path_str);
-                // Failed/timeout call = unknown (None): skip the label check
-                // instead of stripping a correct "(Acoustic)" label.
-                let is_acoustic: Option<bool> = if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
-                    serde_json::from_slice::<serde_json::Value>(&v)
-                        .ok()
-                        .and_then(|v| v.get("isAcoustic").and_then(|v| v.as_bool()))
-                } else {
-                    let base = cfg.essentia_url.trim().trim_end_matches('/');
-                    let body = serde_json::json!({"path": path_str, "genres": false, "moods": false, "structure": false, "chroma": false, "bpm": false, "vocalRatio": true});
-                    let req = nd_pdk::host::http::HTTPRequest {
-                        method: "POST".into(),
-                        url: format!("{}/instrumental-check", base),
-                        headers: std::collections::HashMap::new(),
-                        no_follow_redirects: false,
-                        body: body.to_string().into_bytes(),
-                        timeout_ms: cap_ms(start, budget, 25_000),
-                    };
-                    match nd_pdk::host::http::send(req) {
-                        Ok(Some(resp)) if resp.status_code == 200 => {
-                            let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
-                            let _ = crate::store::kv().set(&cache_key, resp.body);
-                            val.get("isInstrumental").and_then(|v| v.as_bool()).map(|is_instr| {
-                                let vocal_ratio = val.get("vocalRatio")
-                                    .and_then(|v| v.as_f64())
-                                    .unwrap_or(0.0);
-                                !is_instr && vocal_ratio > 0.05 && vocal_ratio < 0.3
-                            })
-                        }
-                        _ => None,
-                    }
-                };
+                let is_acoustic = essentia_check_instrumental(
+                    cfg,
+                    library_id,
+                    &abs,
+                    "acoustic",
+                    cap_ms(start, budget, 25_000),
+                )
+                .and_then(|v| is_acoustic_from_val(&v));
                 let has_acoustic_label = cur_title.to_lowercase().contains("acoustic");
                 if let Some(is_acoustic) = is_acoustic {
                 if has_acoustic_label && !is_acoustic {
@@ -4443,9 +4363,64 @@ fn basename(rel: &str) -> &str {
     }
 }
 
+/// Query Essentia `/instrumental-check` (with KV cache keyed by sidecar path).
+/// Returns `None` on network/timeout/HTTP failure so callers never strip a valid
+/// label on transient errors.
+fn essentia_check_instrumental(
+    cfg: &Config,
+    library_id: i32,
+    abs: &Path,
+    cache_prefix: &str,
+    timeout_ms: i32,
+) -> Option<serde_json::Value> {
+    let path_str = sidecar_path(library_id, abs);
+    let cache_key = format!("{cache_prefix}:{path_str}");
+    if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {
+        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&v) {
+            return Some(val);
+        }
+    }
+    let base = cfg.essentia_url.trim().trim_end_matches('/');
+    let body = serde_json::json!({"path": path_str});
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("Content-Type".into(), "application/json".into());
+    let req = nd_pdk::host::http::HTTPRequest {
+        method: "POST".into(),
+        url: format!("{base}/instrumental-check"),
+        headers,
+        no_follow_redirects: false,
+        body: body.to_string().into_bytes(),
+        timeout_ms,
+    };
+    match nd_pdk::host::http::send(req) {
+        Ok(Some(resp)) if resp.status_code == 200 => {
+            let val: serde_json::Value = serde_json::from_slice(&resp.body).ok().unwrap_or_default();
+            let _ = crate::store::kv().set(&cache_key, resp.body);
+            Some(val)
+        }
+        _ => None,
+    }
+}
+
+/// Derive acoustic status from an `/instrumental-check` payload: accepts an
+/// explicit `isAcoustic` boolean if present, otherwise `!isInstrumental` with
+/// low vocal energy (`0.05 < vocalRatio < 0.3`).
+fn is_acoustic_from_val(val: &serde_json::Value) -> Option<bool> {
+    if let Some(b) = val.get("isAcoustic").and_then(|v| v.as_bool()) {
+        return Some(b);
+    }
+    val.get("isInstrumental")
+        .and_then(|v| v.as_bool())
+        .map(|is_instr| {
+            let vocal_ratio = val.get("vocalRatio").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            !is_instr && vocal_ratio > 0.05 && vocal_ratio < 0.3
+        })
+}
+
 /// Write album.nfo at the group's target dir from the group's metadata.
 fn write_group_nfo(
     cfg: &Config,
+    library_id: i32,
     plan: &crate::organizer::GroupPlan,
     files: &[(String, TrackTags)],
     fin: &std::collections::HashMap<String, std::path::PathBuf>,
@@ -4489,7 +4464,7 @@ fn write_group_nfo(
             .first()
             .and_then(|(rel, _)| fin.get(rel).cloned())
             .and_then(|abs| {
-            let path_str = abs.to_string_lossy().to_string();
+            let path_str = sidecar_path(library_id, &abs);
             let cache_key = format!("essentia:{}", path_str);
             // Try cache first.
             if let Ok(Some(v)) = crate::store::kv().get(&cache_key) {

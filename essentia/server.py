@@ -28,6 +28,7 @@ import logging
 import os
 import struct
 import sys
+import threading
 import time
 import urllib.request
 
@@ -39,7 +40,8 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("essentia")
 
 LOG_BUFFER = collections.deque(maxlen=500)
-ANALYSIS_CACHE = collections.OrderedDict()  # path -> (result, mtime, ts)
+ANALYSIS_CACHE = collections.OrderedDict()  # (path, flags...) -> (result, mtime, ts)
+_CACHE_LOCK = threading.Lock()
 MAX_CACHE_SIZE = 256
 MAX_POST_BODY = 10 * 1024 * 1024  # 10 MB
 
@@ -356,29 +358,31 @@ def load_audio(path, duration=120):
     return None, "no audio backend available"
 
 
-def _get_cache(path):
+def _get_cache(cache_key, path):
     """Return cached analysis result if valid (same mtime, < 1h old)."""
     try:
         mtime = os.path.getmtime(path)
     except OSError:
         return None
-    if path in ANALYSIS_CACHE:
-        result, cached_mtime, ts = ANALYSIS_CACHE[path]
-        if cached_mtime == mtime and (time.time() - ts) < 3600:
-            ANALYSIS_CACHE.move_to_end(path)
-            return result
-        del ANALYSIS_CACHE[path]
+    with _CACHE_LOCK:
+        if cache_key in ANALYSIS_CACHE:
+            result, cached_mtime, ts = ANALYSIS_CACHE[cache_key]
+            if cached_mtime == mtime and (time.time() - ts) < 3600:
+                ANALYSIS_CACHE.move_to_end(cache_key)
+                return result
+            del ANALYSIS_CACHE[cache_key]
     return None
 
 
-def _set_cache(path, result):
+def _set_cache(cache_key, path, result):
     try:
         mtime = os.path.getmtime(path)
     except OSError:
         return
-    ANALYSIS_CACHE[path] = (result, mtime, time.time())
-    while len(ANALYSIS_CACHE) > MAX_CACHE_SIZE:
-        ANALYSIS_CACHE.popitem(last=False)
+    with _CACHE_LOCK:
+        ANALYSIS_CACHE[cache_key] = (result, mtime, time.time())
+        while len(ANALYSIS_CACHE) > MAX_CACHE_SIZE:
+            ANALYSIS_CACHE.popitem(last=False)
 
 
 def _validate_path(path):
@@ -395,7 +399,8 @@ def analyze_audio(path, genres=True, moods=True, structure=False, chroma=False, 
     result = {"genres": [], "moods": [], "energy": None}
     if not _validate_path(path):
         return result, "file not found"
-    cached = _get_cache(path)
+    cache_key = (path, bool(genres), bool(moods), bool(structure), bool(chroma), bool(bpm))
+    cached = _get_cache(cache_key, path)
     if cached is not None:
         return cached, None
     audio, err = load_audio(path)
@@ -410,7 +415,7 @@ def analyze_audio(path, genres=True, moods=True, structure=False, chroma=False, 
         return result, "no analysis backend"
     if err:
         return result, err
-    _set_cache(path, result)
+    _set_cache(cache_key, path, result)
     dt = time.time() - t0
     log.info("analyzed %s (%.1fs): %d genres, %d moods, structure=%s, chords=%s",
              os.path.basename(path), dt,
@@ -472,7 +477,7 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
     if VOICE_MODEL is not None:
         try:
             if musicnn_emb is None:
-                musicnn_emb = MOOD_MODEL["embedding"](audio_16k)
+                musicnn_emb = VOICE_MODEL["embedding"](audio_16k)
             preds = VOICE_MODEL["classifier"](musicnn_emb)[0]
             voice_labels = ["instrumental", "voice"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
@@ -487,7 +492,7 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
     if DANCE_MODEL is not None:
         try:
             if effnet_emb is None:
-                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+                effnet_emb = DANCE_MODEL["embedding"](audio_16k)
             preds = DANCE_MODEL["classifier"](effnet_emb)[0]
             dance_labels = ["danceable", "not_danceable"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
@@ -502,7 +507,7 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
     if GENDER_MODEL is not None:
         try:
             if effnet_emb is None:
-                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+                effnet_emb = GENDER_MODEL["embedding"](audio_16k)
             preds = GENDER_MODEL["classifier"](effnet_emb)[0]
             gender_labels = ["female", "male"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
@@ -517,7 +522,7 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
     if DEAM_MODEL is not None:
         try:
             if musicnn_emb is None:
-                musicnn_emb = MOOD_MODEL["embedding"](audio_16k)
+                musicnn_emb = DEAM_MODEL["embedding"](audio_16k)
             preds = DEAM_MODEL["classifier"](musicnn_emb)[0]
             result["valence"] = round(float(preds[0]), 2)
             result["arousal"] = round(float(preds[1]), 2)
@@ -528,7 +533,7 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
     if APPROACH_MODEL is not None:
         try:
             if effnet_emb is None:
-                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+                effnet_emb = APPROACH_MODEL["embedding"](audio_16k)
             preds = APPROACH_MODEL["classifier"](effnet_emb)[0]
             approach_labels = ["not_approachable", "approachable"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
@@ -543,7 +548,7 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
     if ENGAGE_MODEL is not None:
         try:
             if effnet_emb is None:
-                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+                effnet_emb = ENGAGE_MODEL["embedding"](audio_16k)
             preds = ENGAGE_MODEL["classifier"](effnet_emb)[0]
             engage_labels = ["not_engaging", "engaging"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]
@@ -558,7 +563,7 @@ def _analyze_essentia(audio, path, genres, moods, structure, chroma, bpm):
     if TIMBRE_MODEL is not None:
         try:
             if effnet_emb is None:
-                effnet_emb = GENRE_MODEL["embedding"](audio_16k)
+                effnet_emb = TIMBRE_MODEL["embedding"](audio_16k)
             preds = TIMBRE_MODEL["classifier"](effnet_emb)[0]
             timbre_labels = ["bright", "dark"]
             top = sorted(enumerate(preds), key=lambda x: x[1], reverse=True)[:2]

@@ -267,9 +267,12 @@ pub fn insert_text_any(tag: &mut Tag, keys: &[ItemKey], value: &str) -> bool {
             return true;
         }
     }
-    if matches!(keys.first(), Some(ItemKey::Unknown(_))) {
+    if let Some(unk) = keys.iter().find(|k| matches!(k, ItemKey::Unknown(_))) {
+        // Remove existing entries for this unknown key first so overwrites
+        // replace instead of accumulating duplicate items.
+        tag.remove_key(unk);
         tag.insert_unchecked(TagItem::new(
-            keys[0].clone(),
+            unk.clone(),
             ItemValue::Text(value.to_string()),
         ));
         return true;
@@ -311,6 +314,43 @@ pub fn write_mbids(
 save_tagged_atomic(&tagged, path)
 }
 
+/// Apply playback metadata (`FMPS_PLAYCOUNT`, `RATING`, `LOVED`) to an
+/// in-memory `Tag`. Returns `true` when at least one field was updated.
+pub fn apply_playback_meta_to_tag(
+    tag: &mut Tag,
+    stars: Option<f64>,
+    playcount: i64,
+    loved: Option<bool>,
+    overwrite: bool,
+) -> bool {
+    let mut changed = false;
+    if playcount > 0 {
+        let pc = playcount.to_string();
+        let key = [ItemKey::Unknown("FMPS_PLAYCOUNT".into())];
+        let existing = get_str_any(tag, &key);
+        if should_write(existing, &pc, overwrite) {
+            changed |= insert_text_any(tag, &key, &pc);
+        }
+    }
+    if let Some(s) = stars {
+        let val = format!("{s}");
+        let key = [ItemKey::Unknown("RATING".into())];
+        let existing = get_str_any(tag, &key);
+        if should_write(existing, &val, overwrite) {
+            changed |= insert_text_any(tag, &key, &val);
+        }
+    }
+    if let Some(l) = loved {
+        let val = if l { "1" } else { "0" };
+        let key = [ItemKey::Unknown("LOVED".into())];
+        let existing = get_str_any(tag, &key);
+        if should_write(existing, val, overwrite) {
+            changed |= insert_text_any(tag, &key, val);
+        }
+    }
+    changed
+}
+
 /// Write playback metadata into a track's tags (opt-in, `writePlaycount`):
 /// `FMPS_PLAYCOUNT` (playcount), `RATING` (0.0-5.0 star value), and `LOVED`
 /// (1/0 favorite status). Idempotent + respects the fill-only/overwrite policy.
@@ -323,36 +363,11 @@ pub fn write_playback_meta(
 ) -> Result<(), String> {
     let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
     let mut tag = tagged.primary_tag().ok_or("no tag block")?.to_owned();
-    let mut changed = false;
-    if playcount > 0 {
-        let pc = playcount.to_string();
-        let existing = tag.get_string(&ItemKey::Unknown("FMPS_PLAYCOUNT".into())).unwrap_or("");
-        if should_write(existing, &pc, overwrite) {
-            tag.insert_text(ItemKey::Unknown("FMPS_PLAYCOUNT".into()), pc);
-            changed = true;
-        }
-    }
-    if let Some(s) = stars {
-        let val = format!("{s}");
-        let existing = tag.get_string(&ItemKey::Unknown("RATING".into())).unwrap_or("");
-        if should_write(existing, &val, overwrite) {
-            tag.insert_text(ItemKey::Unknown("RATING".into()), val);
-            changed = true;
-        }
-    }
-    if let Some(l) = loved {
-        let val = if l { "1" } else { "0" };
-        let existing = tag.get_string(&ItemKey::Unknown("LOVED".into())).unwrap_or("");
-        if should_write(existing, val, overwrite) {
-            tag.insert_text(ItemKey::Unknown("LOVED".into()), val.to_string());
-            changed = true;
-        }
-    }
-    if !changed {
+    if !apply_playback_meta_to_tag(&mut tag, stars, playcount, loved, overwrite) {
         return Ok(());
     }
     let _ = tagged.insert_tag(tag);
-save_tagged_atomic(&tagged, path)
+    save_tagged_atomic(&tagged, path)
 }
 
 /// Fill a track's genuinely-MISSING tag fields from a MusicBrainz tracklist
@@ -824,5 +839,24 @@ mod verify_gate_tests {
         // An empty value is not a check.
         assert!(insert_text_any(&mut t, &[ItemKey::Unknown("EMPTY_FLAG".into())], ""));
         assert!(!super::checked_in_tag(&t, "EMPTY_FLAG"));
+    }
+
+    #[test]
+    fn playback_meta_writes_and_overwrites_unknown_keys() {
+        use super::{apply_playback_meta_to_tag, get_str_any};
+        let mut t = Tag::new(TagType::Id3v2);
+        // Initial fill writes FMPS_PLAYCOUNT, RATING, LOVED.
+        assert!(apply_playback_meta_to_tag(&mut t, Some(4.5), 12, Some(true), false));
+        assert_eq!(get_str_any(&t, &[ItemKey::Unknown("FMPS_PLAYCOUNT".into())]), "12");
+        assert_eq!(get_str_any(&t, &[ItemKey::Unknown("RATING".into())]), "4.5");
+        assert_eq!(get_str_any(&t, &[ItemKey::Unknown("LOVED".into())]), "1");
+        // Without overwrite, existing values are preserved.
+        assert!(!apply_playback_meta_to_tag(&mut t, Some(2.0), 20, Some(false), false));
+        assert_eq!(get_str_any(&t, &[ItemKey::Unknown("RATING".into())]), "4.5");
+        // With overwrite, values update cleanly without duplicating items.
+        assert!(apply_playback_meta_to_tag(&mut t, Some(2.0), 20, Some(false), true));
+        assert_eq!(get_str_any(&t, &[ItemKey::Unknown("FMPS_PLAYCOUNT".into())]), "20");
+        assert_eq!(get_str_any(&t, &[ItemKey::Unknown("RATING".into())]), "2");
+        assert_eq!(get_str_any(&t, &[ItemKey::Unknown("LOVED".into())]), "0");
     }
 }

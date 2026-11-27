@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS listen_source_state (
 """
 
 NOT_EXPIRED = "(expires_at IS NULL OR expires_at > NOW())"
+_INITIALIZED_TARGETS = set()
 
 
 def connect(db):
@@ -123,22 +124,28 @@ def connect(db):
     user = db.get("user") or os.environ.get("MYSQL_USER", "")
     password = db.get("password") or os.environ.get("MYSQL_PASSWORD", "")
     database = db.get("name") or os.environ.get("MYSQL_DATABASE", "")
-    
-    # Create database if it doesn't exist
-    if database:
+
+    target_key = (host, port, database)
+    # Create database once per target instead of on every KV operation
+    if database and target_key not in _INITIALIZED_TARGETS:
         try:
+            safe_db = database.replace("`", "``")
             tmp = pymysql.connect(host=host, port=port, user=user, password=password,
                                   autocommit=True, connect_timeout=5)
             with tmp.cursor() as cur:
-                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{safe_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
             tmp.close()
         except Exception as e:
             log.warning("could not ensure database exists: %s", e)
-    
-    return pymysql.connect(
+
+    conn = pymysql.connect(
         host=host, port=port, user=user, password=password,
         database=database, autocommit=True, connect_timeout=5,
     )
+    if target_key not in _INITIALIZED_TARGETS:
+        ensure_schema(conn)
+        _INITIALIZED_TARGETS.add(target_key)
+    return conn
 
 
 def ensure_schema(conn):

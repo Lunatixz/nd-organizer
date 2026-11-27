@@ -516,7 +516,6 @@ class Handler(BaseHTTPRequestHandler):
             if i > 0 and time.time() - batch_start < 0.35 * i:
                 time.sleep(0.35 - (time.time() - batch_start - 0.35 * (i - 1)))
             path = entry.get("path", "")
-            path = entry.get("path", "")
             mtime = entry.get("mtime", 0)
             if not path or not os.path.exists(path):
                 results.append({"path": path, "ok": False, "error": "file not found"})
